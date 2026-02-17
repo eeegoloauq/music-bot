@@ -1,0 +1,45 @@
+services:
+  music-bot:
+    image: "ghcr.io/eeegoloauq/music-bot:latest"
+    # Or build from source:
+    # build: .
+    container_name: music-bot
+    restart: unless-stopped
+    volumes:
+      - /media/music:/music               # Same music directory as Navidrome
+      - ./.env:/data/bot.env:ro           # Config — Python reads this directly, $ works as-is
+    # If Navidrome runs on the host or in another compose stack:
+    # extra_hosts:
+    #   - "host.docker.internal:host-gateway"
+
+# ─── .env file format ────────────────────────────────────────
+#
+#   TG_TOKEN=your_bot_token
+#   NAVIDROME_URL=http://host.docker.internal:4533
+#   NAVIDROME_USER=admin
+#   NAVIDROME_PASS=p@$$w0rd
+#   ALLOWED_USERS=123456789
+#   MUSIC_DIR=/music
+#   STREAM_BITRATE=320
+#
+# In Dockge: paste these in the Environment Variables section.
+# Special characters like $ work without escaping.
+#
+# ─── Example: same compose stack as Navidrome ─────────────────
+#
+# services:
+#   navidrome:
+#     image: "deluan/navidrome:latest"
+#     ports:
+#       - 4533:4533
+#     environment:
+#       ND_SCANSCHEDULE: "@every 6h"
+#     volumes:
+#       - ./navidrome-data:/data
+#       - /media/music:/music:ro
+#
+#   music-bot:
+#     image: "ghcr.io/eeegoloauq/music-bot:latest"
+#     volumes:
+#       - /media/music:/music
+#       - ./.env:/data/bot.env:ro
