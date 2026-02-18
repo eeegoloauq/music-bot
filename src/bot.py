@@ -37,6 +37,8 @@ logger = logging.getLogger(__name__)
 
 ALBUM_RE = re.compile(r"(?:monochrome\.samidy\.com|monochrome\.tf|tidal\.com)/album/(\d+)")
 TRACK_RE = re.compile(r"(?:monochrome\.samidy\.com|monochrome\.tf|tidal\.com)/track/(\d+)")
+# Words after the link that trigger HI_RES_LOSSLESS for this download
+_HIRES_RE = re.compile(r"\b(hi|hq|hires|hi-res)\b", re.IGNORECASE)
 
 # song_id -> telegram file_id
 _file_id_cache: dict[str, str] = {}
@@ -112,9 +114,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     track_match = TRACK_RE.search(text) if not album_match else None
 
     if album_match:
-        await _download_album(update, album_match.group(1))
+        suffix = text[album_match.end():]
+        quality = "HI_RES_LOSSLESS" if _HIRES_RE.search(suffix) else None
+        await _download_album(update, album_match.group(1), quality=quality)
     elif track_match:
-        await _download_track(update, track_match.group(1))
+        suffix = text[track_match.end():]
+        quality = "HI_RES_LOSSLESS" if _HIRES_RE.search(suffix) else None
+        await _download_track(update, track_match.group(1), quality=quality)
 
 
 async def _trigger_scan() -> str:
@@ -132,7 +138,7 @@ async def _trigger_scan() -> str:
         return "Library scan failed."
 
 
-async def _download_album(update: Update, album_id: str):
+async def _download_album(update: Update, album_id: str, quality: str | None = None):
     if _download_semaphore.locked():
         status_msg = await update.message.reply_text("Queued, waiting for current download...")
     else:
@@ -166,7 +172,9 @@ async def _download_album(update: Update, album_id: str):
 
         # Step 2: download
         try:
-            result = await monochrome.download_album(album_id, MUSIC_DIR, progress=progress, album=album)
+            result = await monochrome.download_album(
+            album_id, MUSIC_DIR, progress=progress, album=album, quality=quality
+        )
         except Exception as e:
             logger.error("Album download failed (%s — %s): %s", album["artist"], album["title"], e)
             await status_msg.edit_text(f"Download failed: {e}")
@@ -178,7 +186,12 @@ async def _download_album(update: Update, album_id: str):
         else:
             parts = []
             if result["downloaded"]:
-                parts.append(f"{result['downloaded']} saved")
+                saved = f"{result['downloaded']} saved"
+                if result.get("format"):
+                    saved += f" · {result['format']}"
+                if result.get("with_lyrics"):
+                    saved += f" · lyrics {result['with_lyrics']}/{result['downloaded']}"
+                parts.append(saved)
             if result["skipped"]:
                 parts.append(f"{result['skipped']} skipped")
             if result["failed"]:
@@ -207,7 +220,7 @@ async def _download_album(update: Update, album_id: str):
                 pass
 
 
-async def _download_track(update: Update, track_id: str):
+async def _download_track(update: Update, track_id: str, quality: str | None = None):
     if _download_semaphore.locked():
         status_msg = await update.message.reply_text("Queued, waiting for current download...")
     else:
@@ -229,7 +242,9 @@ async def _download_track(update: Update, track_id: str):
 
         # Step 2: download
         try:
-            path, was_downloaded = await monochrome.download_single_track(track, album_ctx, MUSIC_DIR)
+            path, was_downloaded, fmt = await monochrome.download_single_track(
+            track, album_ctx, MUSIC_DIR, quality=quality
+        )
         except Exception as e:
             logger.error("Track download failed (%s — %s): %s", track["artist"], track["title"], e)
             await status_msg.edit_text(f"Download failed: {e}")
@@ -237,7 +252,8 @@ async def _download_track(update: Update, track_id: str):
 
         if was_downloaded:
             scan_note = await _trigger_scan()
-            done_text = f"Done! {track['artist']} — {track['title']}\n{scan_note}"
+            fmt_str = f" · {fmt}" if fmt else ""
+            done_text = f"Done! {track['artist']} — {track['title']}{fmt_str}\n{scan_note}"
         else:
             done_text = f"Already in library: {track['artist']} — {track['title']}"
 

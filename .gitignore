@@ -1,4 +1,8 @@
 .env
 __pycache__/
 *.pyc
+*.pyo
 tmp/
+test/
+.venv/
+venv/
