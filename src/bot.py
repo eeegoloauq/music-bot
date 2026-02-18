@@ -23,7 +23,7 @@ from telegram.ext import (
 from telegram.error import NetworkError
 from telegram.request import HTTPXRequest
 
-from config import TG_TOKEN, ALLOWED_USERS, MUSIC_DIR
+from config import TG_TOKEN, ALLOWED_USERS, MUSIC_DIR, NAVI_LOGIN, NAVI_PASS, NAVI_PUBLIC_URL
 import monochrome
 import navidrome
 
@@ -100,12 +100,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @authorized
 async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        await navidrome.start_scan()
-        await update.message.reply_text("Library scan started.")
-    except Exception as e:
-        logger.exception("Scan failed")
-        await update.message.reply_text(f"Scan failed: {e}")
+    note = await _trigger_scan()
+    await update.message.reply_text(note)
 
 
 @authorized
@@ -121,6 +117,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _download_track(update, track_match.group(1))
 
 
+async def _trigger_scan() -> str:
+    """Attempt a Navidrome library scan. Returns a status line for the user."""
+    if not NAVI_LOGIN or not NAVI_PASS:
+        return "Library scan not configured (NAVIDROME_USER/NAVIDROME_PASS not set)."
+    try:
+        await navidrome.start_scan()
+        return "Library scan triggered."
+    except navidrome.NavidromeAuthError:
+        logger.warning("Navidrome scan: wrong credentials")
+        return "Library scan failed: wrong credentials."
+    except Exception as e:
+        logger.warning("Navidrome scan failed: %s", e)
+        return "Library scan failed."
+
+
 async def _download_album(update: Update, album_id: str):
     if _download_semaphore.locked():
         status_msg = await update.message.reply_text("Queued, waiting for current download...")
@@ -128,48 +139,72 @@ async def _download_album(update: Update, album_id: str):
         status_msg = await update.message.reply_text("Fetching album info...")
 
     async with _download_semaphore:
+        # Step 1: fetch metadata
         try:
             album = await monochrome.fetch_album(album_id)
+        except Exception as e:
+            logger.error("Failed to fetch album %s: %s", album_id, e)
+            await status_msg.edit_text(f"Failed to fetch album info: {e}")
+            return
+
+        try:
             await status_msg.edit_text(
                 f"Downloading: {album['artist']} — {album['title']}\n"
                 f"Tracks: {len(album['tracks'])}"
             )
+        except Exception:
+            pass
 
-            async def progress(current, total, track_title):
-                try:
-                    await status_msg.edit_text(
-                        f"Downloading: {album['artist']} — {album['title']}\n"
-                        f"Track {current}/{total}: {track_title}"
-                    )
-                except Exception:
-                    pass
+        async def progress(current, total, track_title):
+            try:
+                await status_msg.edit_text(
+                    f"Downloading: {album['artist']} — {album['title']}\n"
+                    f"Track {current}/{total}: {track_title}"
+                )
+            except Exception:
+                pass
 
+        # Step 2: download
+        try:
             result = await monochrome.download_album(album_id, MUSIC_DIR, progress=progress, album=album)
-
-            if result["downloaded"] == 0 and not result["failed"]:
-                done_text = f"Already in library: {album['artist']} — {album['title']}"
-            else:
-                parts = []
-                if result["downloaded"]:
-                    parts.append(f"{result['downloaded']} saved")
-                if result["skipped"]:
-                    parts.append(f"{result['skipped']} skipped")
-                if result["failed"]:
-                    parts.append(f"{len(result['failed'])} failed")
-                done_text = f"Done! {album['artist']} — {album['title']}\n" + ", ".join(parts) + "."
-
-            if result["downloaded"] > 0:
-                await navidrome.start_scan()
-                done_text += "\nLibrary scan triggered."
-
-            await status_msg.edit_text(done_text)
-
-            share_url = await _try_share_album(album["artist"], album["title"])
-            if share_url:
-                await status_msg.edit_text(f"{done_text}\n\n{share_url}")
         except Exception as e:
-            logger.exception("Album download failed")
+            logger.error("Album download failed (%s — %s): %s", album["artist"], album["title"], e)
             await status_msg.edit_text(f"Download failed: {e}")
+            return
+
+        # Build result text
+        if result["downloaded"] == 0 and not result["failed"]:
+            done_text = f"Already in library: {album['artist']} — {album['title']}"
+        else:
+            parts = []
+            if result["downloaded"]:
+                parts.append(f"{result['downloaded']} saved")
+            if result["skipped"]:
+                parts.append(f"{result['skipped']} skipped")
+            if result["failed"]:
+                shown = result["failed"][:3]
+                details = ", ".join(f"{t} ({r})" for t, r in shown)
+                if len(result["failed"]) > 3:
+                    details += f" +{len(result['failed']) - 3} more"
+                parts.append(f"{len(result['failed'])} failed: {details}")
+            done_text = f"Done! {album['artist']} — {album['title']}\n" + ", ".join(parts) + "."
+
+        # Step 3: scan (non-critical)
+        if result["downloaded"] > 0:
+            done_text += "\n" + await _trigger_scan()
+
+        try:
+            await status_msg.edit_text(done_text)
+        except Exception:
+            pass
+
+        # Step 4: share link (non-critical)
+        share_url = await _try_share_album(album["artist"], album["title"])
+        if share_url:
+            try:
+                await status_msg.edit_text(f"{done_text}\n\n{share_url}")
+            except Exception:
+                pass
 
 
 async def _download_track(update: Update, track_id: str):
@@ -179,38 +214,53 @@ async def _download_track(update: Update, track_id: str):
         status_msg = await update.message.reply_text("Fetching track info...")
 
     async with _download_semaphore:
+        # Step 1: fetch metadata
         try:
             track, album_ctx = await monochrome.fetch_single_track(track_id)
-            await status_msg.edit_text(
-                f"Downloading: {track['artist']} — {track['title']}"
-            )
-
-            path, was_downloaded = await monochrome.download_single_track(track, album_ctx, MUSIC_DIR)
-
-            if was_downloaded:
-                await navidrome.start_scan()
-                done_text = (
-                    f"Done! {track['artist']} — {track['title']}\n"
-                    "Library scan triggered."
-                )
-            else:
-                done_text = f"Already in library: {track['artist']} — {track['title']}"
-
-            await status_msg.edit_text(done_text)
-
-            share_url = await _try_share_album(
-                album_ctx.get("artist", track["artist"]),
-                album_ctx.get("title", ""),
-            )
-            if share_url:
-                await status_msg.edit_text(f"{done_text}\n\n{share_url}")
         except Exception as e:
-            logger.exception("Track download failed")
+            logger.error("Failed to fetch track %s: %s", track_id, e)
+            await status_msg.edit_text(f"Failed to fetch track info: {e}")
+            return
+
+        try:
+            await status_msg.edit_text(f"Downloading: {track['artist']} — {track['title']}")
+        except Exception:
+            pass
+
+        # Step 2: download
+        try:
+            path, was_downloaded = await monochrome.download_single_track(track, album_ctx, MUSIC_DIR)
+        except Exception as e:
+            logger.error("Track download failed (%s — %s): %s", track["artist"], track["title"], e)
             await status_msg.edit_text(f"Download failed: {e}")
+            return
+
+        if was_downloaded:
+            scan_note = await _trigger_scan()
+            done_text = f"Done! {track['artist']} — {track['title']}\n{scan_note}"
+        else:
+            done_text = f"Already in library: {track['artist']} — {track['title']}"
+
+        try:
+            await status_msg.edit_text(done_text)
+        except Exception:
+            pass
+
+        share_url = await _try_share_album(
+            album_ctx.get("artist", track["artist"]),
+            album_ctx.get("title", ""),
+        )
+        if share_url:
+            try:
+                await status_msg.edit_text(f"{done_text}\n\n{share_url}")
+            except Exception:
+                pass
 
 
 async def _try_share_album(artist: str, title: str) -> str | None:
     """Wait for Navidrome to index, then create a share link for the album."""
+    if not NAVI_PUBLIC_URL:
+        return None
     try:
         await asyncio.sleep(3)
         album_id = await navidrome.search_album(artist, title)
@@ -222,8 +272,11 @@ async def _try_share_album(artist: str, title: str) -> str | None:
         if url:
             _share_url_cache[album_id] = url
         return url
-    except Exception:
-        logger.exception("Failed to create share link")
+    except navidrome.NavidromeAuthError:
+        logger.warning("Navidrome share: wrong credentials")
+        return None
+    except Exception as e:
+        logger.warning("Failed to create share link: %s", e)
         return None
 
 
@@ -236,8 +289,11 @@ async def _get_share_url(entry_id: str, description: str) -> str | None:
         if url:
             _share_url_cache[entry_id] = url
         return url
-    except Exception:
-        logger.exception("Failed to create share link")
+    except navidrome.NavidromeAuthError:
+        logger.warning("Navidrome share: wrong credentials")
+        return None
+    except Exception as e:
+        logger.warning("Failed to create share link for %s: %s", entry_id, e)
         return None
 
 
@@ -292,7 +348,8 @@ async def _ensure_cached(bot, user_id: int, entry: dict) -> str | None:
         if msg.audio:
             _file_id_cache[song_id] = msg.audio.file_id
         else:
-            logger.error("Upload resulted in non-Audio type for %s", song_id)
+            logger.error("Upload resulted in non-Audio type for %s — %s (id=%s)",
+                         entry["artist"], entry["title"], song_id)
             await msg.delete()
             return None
         await msg.delete()
@@ -301,8 +358,9 @@ async def _ensure_cached(bot, user_id: int, entry: dict) -> str | None:
         logger.info("Inline: %s — %s | upload %.1fs (%.1f MB/s) | total %.1fs",
                      entry["artist"], entry["title"], t2 - t1, up_speed, t2 - t0)
         return _file_id_cache[song_id]
-    except Exception:
-        logger.exception("Upload failed for %s", song_id)
+    except Exception as e:
+        logger.warning("Upload failed for %s — %s (id=%s): %s",
+                       entry["artist"], entry["title"], song_id, e)
         return None
     finally:
         event.set()
@@ -319,9 +377,32 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     try:
         playing = await navidrome.get_now_playing()
-    except Exception:
-        logger.exception("Failed to get now playing")
-        playing = []
+    except navidrome.NavidromeAuthError:
+        logger.warning("Navidrome inline: wrong credentials")
+        await update.inline_query.answer([
+            InlineQueryResultArticle(
+                id=str(uuid4()),
+                title="Navidrome: wrong credentials",
+                description="Check NAVIDROME_USER / NAVIDROME_PASS",
+                input_message_content=InputTextMessageContent(
+                    "Navidrome auth failed — check credentials."
+                ),
+            )
+        ], cache_time=5)
+        return
+    except Exception as e:
+        logger.warning("Navidrome unavailable for getNowPlaying: %s", e)
+        await update.inline_query.answer([
+            InlineQueryResultArticle(
+                id=str(uuid4()),
+                title="Navidrome unavailable",
+                description=str(e),
+                input_message_content=InputTextMessageContent(
+                    f"Navidrome unavailable: {e}"
+                ),
+            )
+        ], cache_time=5)
+        return
 
     if not playing:
         await update.inline_query.answer(
@@ -380,7 +461,7 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
             InlineQueryResultArticle(
                 id=str(uuid4()),
                 title="Failed to load tracks",
-                description="Could not download from Navidrome",
+                description="Could not stream from Navidrome",
                 input_message_content=InputTextMessageContent("Failed to load tracks."),
             )
         )
@@ -401,6 +482,13 @@ async def _shutdown(app: Application) -> None:
 
 
 def main():
+    if not NAVI_LOGIN or not NAVI_PASS:
+        logger.warning(
+            "NAVIDROME_USER/NAVIDROME_PASS not set — scan, inline audio, and share will not work"
+        )
+    if not NAVI_PUBLIC_URL:
+        logger.info("NAVIDROME_PUBLIC_URL not set — share links disabled")
+
     app = (
         Application.builder()
         .token(TG_TOKEN)

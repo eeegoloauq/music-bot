@@ -6,6 +6,7 @@ import os
 import re
 import time
 from typing import Callable, Awaitable
+from urllib.parse import urlparse
 
 import aiohttp
 from mutagen.flac import FLAC, Picture
@@ -238,6 +239,8 @@ async def _download_flac(url: str, filepath: str, max_retries: int = 3) -> int:
                                attempt, max_retries, e, delay)
                 await asyncio.sleep(delay)
             else:
+                logger.error("FLAC download failed after %d attempts (%s): %s",
+                             max_retries, urlparse(url).netloc, e)
                 raise
 
 
@@ -396,7 +399,7 @@ async def download_album(
     album_bytes = 0
     downloaded = 0
     skipped = 0
-    failed = []
+    failed: list[tuple[str, str]] = []
     logger.info("Album: %s — %s (%d tracks)", album["artist"], album["title"], total)
 
     for i, track in enumerate(album["tracks"], 1):
@@ -429,8 +432,9 @@ async def download_album(
             _write_tags(filepath, track, album, stream_meta, cover_data)
             downloaded += 1
         except Exception as e:
-            logger.warning("  [%d/%d] %s — failed: %s", i, total, track["title"], e)
-            failed.append(track["title"])
+            logger.warning("  [%d/%d] track %s (id=%s) — failed: %s",
+                           i, total, track["title"], track["id"], e)
+            failed.append((track["title"], str(e)))
 
     album_elapsed = time.monotonic() - album_t0
     album_mb = album_bytes / (1024 * 1024)
