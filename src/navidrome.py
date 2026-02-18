@@ -15,6 +15,14 @@ _STREAM_TIMEOUT = aiohttp.ClientTimeout(total=120)
 _session: aiohttp.ClientSession | None = None
 
 
+class NavidromeAuthError(Exception):
+    """Wrong or missing Navidrome credentials (Subsonic error 40/50)."""
+
+
+class NavidromeError(Exception):
+    """Navidrome returned an API-level error."""
+
+
 async def _get_session() -> aiohttp.ClientSession:
     global _session
     if _session is None or _session.closed:
@@ -43,7 +51,13 @@ def _auth_params() -> dict[str, str]:
 
 
 async def _api_json(path: str, extra_params: dict | None = None) -> dict:
-    """Call a Subsonic JSON endpoint. Returns subsonic-response dict or {}."""
+    """Call a Subsonic JSON endpoint. Returns the subsonic-response dict.
+
+    Raises:
+        NavidromeAuthError: wrong/missing credentials (error code 40, 41, 50).
+        NavidromeError: other Subsonic API errors.
+        aiohttp.ClientError: network / connection failures.
+    """
     url = urljoin(NAVI_URL + "/", path)
     params = _auth_params()
     if extra_params:
@@ -57,8 +71,11 @@ async def _api_json(path: str, extra_params: dict | None = None) -> dict:
     root = data.get("subsonic-response", {})
     if root.get("status") == "failed":
         err = root.get("error", {})
-        logger.warning("Navidrome error on %s: [%s] %s",
-                       path, err.get("code"), err.get("message"))
+        code = err.get("code")
+        message = err.get("message", "unknown error")
+        if code in (40, 41, 50):
+            raise NavidromeAuthError(message)
+        raise NavidromeError(f"[{code}] {message}")
     return root
 
 
@@ -119,8 +136,6 @@ async def create_share(entry_id: str, description: str = "") -> str | None:
     if not NAVI_PUBLIC_URL:
         return None
     root = await _api_json("rest/createShare", {"id": entry_id, "description": description})
-    if root.get("status") != "ok":
-        return None
     shares = root.get("shares", {}).get("share", [])
     if isinstance(shares, dict):
         shares = [shares]
@@ -129,7 +144,6 @@ async def create_share(entry_id: str, description: str = "") -> str | None:
     share_url = shares[0].get("url", "")
     if not share_url:
         return None
-    # Rewrite internal URL to public
     if share_url.startswith(NAVI_URL):
         share_url = NAVI_PUBLIC_URL + share_url[len(NAVI_URL):]
     return share_url
@@ -146,14 +160,12 @@ async def search_album(artist: str, title: str) -> str | None:
     albums = root.get("searchResult3", {}).get("album", [])
     if isinstance(albums, dict):
         albums = [albums]
-    # Find best match — artist and title both match (case-insensitive)
     artist_lower = artist.lower()
     title_lower = title.lower()
     for album in albums:
         if (album.get("artist", "").lower() == artist_lower
                 and album.get("name", "").lower() == title_lower):
             return album.get("id")
-    # Fallback: return first result if any
     if albums:
         return albums[0].get("id")
     return None
