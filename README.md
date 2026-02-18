@@ -65,6 +65,8 @@ python src/bot.py
 | `MUSIC_DIR` | | `/music` | Music library path in container |
 | `STREAM_BITRATE` | | `320` | MP3 bitrate for inline audio (kbps) |
 | `NAVIDROME_PUBLIC_URL` | | | Public Navidrome URL for share links (e.g. `https://music.example.com`). Sharing disabled if not set. |
+| `QUALITY` | | `LOSSLESS` | Download quality: `LOSSLESS` (16-bit FLAC) or `HI_RES_LOSSLESS` (24-bit, saved as `.m4a`). Falls back to `LOSSLESS` if no instance supports hi-res. |
+| `WRITE_TAGS` | | `true` | Set to `false` to skip writing metadata tags (useful if you prefer your own tagger). |
 
 ### Proxy
 
@@ -88,4 +90,4 @@ To enable share links, set `NAVIDROME_PUBLIC_URL` and enable sharing in Navidrom
 
 ## Tags
 
-All metadata is written automatically to downloaded FLACs: artist, album, title, track/disc numbers, date, copyright, ISRC, UPC, BPM, ReplayGain, cover art. Existing tags are never overwritten.
+Metadata is written automatically to downloaded files. FLAC downloads get Vorbis Comment tags; hi-res `.m4a` downloads get iTunes-compatible tags. Tags written: artist, album, title, track/disc numbers, date, copyright, ISRC, UPC, BPM, ReplayGain, cover art, lyrics (from lrclib.net). Existing tags are never overwritten.
