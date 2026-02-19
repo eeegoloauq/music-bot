@@ -576,6 +576,27 @@ async def _download_dash(init_url: str, segment_urls: list[str], filepath: str) 
         raise
 
 
+async def _remux_to_flac(m4a_path: str) -> str:
+    """Remux FLAC-in-M4A (DASH) to a proper FLAC container via ffmpeg.
+
+    Copies the audio stream without re-encoding — lossless and fast.
+    Returns the new .flac path and removes the original .m4a.
+    """
+    flac_path = m4a_path[:-4] + ".flac"
+    tmp_path = flac_path + ".tmp"
+    proc = await asyncio.create_subprocess_exec(
+        "ffmpeg", "-i", m4a_path, "-c:a", "copy", "-f", "flac", "-y", tmp_path,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    await proc.wait()
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffmpeg remux failed for {m4a_path}")
+    os.replace(tmp_path, flac_path)
+    os.remove(m4a_path)
+    return flac_path
+
+
 async def _download_cover(cover_uuid: str, album_dir: str) -> bytes | None:
     """Download cover art if not already on disk. Returns image bytes or None."""
     if not cover_uuid:
@@ -800,23 +821,22 @@ async def download_single_track(track: dict, album_ctx: dict, dest_dir: str,
     t0 = time.monotonic()
     if dl_info["type"] == "dash":
         track_bytes = await _download_dash(dl_info["init_url"], dl_info["segment_urls"], filepath)
+        filepath = await _remux_to_flac(filepath)
     else:
         track_bytes = await _download_flac(dl_info["url"], filepath)
     lyrics = await lyrics_task
 
     elapsed = time.monotonic() - t0
     speed = (track_bytes / (1024 * 1024)) / elapsed if elapsed > 0 else 0
-    logger.info("Track: %s — %s | %.1fMB in %.1fs (%.1f MB/s) [%s%s]",
+    fmt = "24-bit" if dl_info["type"] == "dash" else "16-bit"
+    logger.info("Track: %s — %s | %.1fMB in %.1fs (%.1f MB/s) [FLAC %s%s]",
                 track["artist"], track["title"], track_bytes / (1024 * 1024), elapsed, speed,
-                dl_info["ext"], " lyrics" if lyrics else "")
+                fmt, " lyrics" if lyrics else " no lyrics")
     os.chmod(filepath, 0o666)
 
     if WRITE_TAGS:
-        if dl_info["ext"] == "m4a":
-            _write_m4a_tags(filepath, track, album_ctx, stream_meta, cover_data, lyrics)
-        else:
-            _write_tags(filepath, track, album_ctx, stream_meta, cover_data, lyrics)
-    format_label = "FLAC 24-bit" if dl_info["ext"] == "m4a" else "FLAC 16-bit"
+        _write_tags(filepath, track, album_ctx, stream_meta, cover_data, lyrics)
+    format_label = f"FLAC {fmt}"
     return filepath, True, format_label
 
 
@@ -918,8 +938,6 @@ async def download_album(
 
         try:
             dl_info, stream_meta = await fetch_track_url(track["id"], quality=quality)
-            if not format_label:
-                format_label = "FLAC 24-bit" if dl_info["ext"] == "m4a" else "FLAC 16-bit"
             filepath = os.path.join(album_dir, f"{disc}-{num:02d} {track_title}.{dl_info['ext']}")
 
             t0 = time.monotonic()
@@ -927,6 +945,7 @@ async def download_album(
                 track_bytes = await _download_dash(
                     dl_info["init_url"], dl_info["segment_urls"], filepath
                 )
+                filepath = await _remux_to_flac(filepath)
             else:
                 track_bytes = await _download_flac(dl_info["url"], filepath)
             lyrics = await lyrics_tasks[track["id"]]
@@ -935,17 +954,17 @@ async def download_album(
 
             elapsed = time.monotonic() - t0
             speed = (track_bytes / (1024 * 1024)) / elapsed if elapsed > 0 else 0
-            logger.info("  [%d/%d] %s — %.1fMB in %.1fs (%.1f MB/s) [%s%s]",
+            fmt = "24-bit" if dl_info["type"] == "dash" else "16-bit"
+            if not format_label:
+                format_label = f"FLAC {fmt}"
+            logger.info("  [%d/%d] %s — %.1fMB in %.1fs (%.1f MB/s) [FLAC %s%s]",
                         i, total, track["title"], track_bytes / (1024 * 1024), elapsed, speed,
-                        dl_info["ext"], " lyrics" if lyrics else "")
+                        fmt, " lyrics" if lyrics else " no lyrics")
             album_bytes += track_bytes
             os.chmod(filepath, 0o666)
 
             if WRITE_TAGS:
-                if dl_info["ext"] == "m4a":
-                    _write_m4a_tags(filepath, track, album, stream_meta, cover_data, lyrics)
-                else:
-                    _write_tags(filepath, track, album, stream_meta, cover_data, lyrics)
+                _write_tags(filepath, track, album, stream_meta, cover_data, lyrics)
             downloaded += 1
         except Exception as e:
             logger.warning("  [%d/%d] track %s (id=%s) — failed: %s",
