@@ -161,12 +161,27 @@ async def _download_album(update: Update, album_id: str, quality: str | None = N
         except Exception:
             pass
 
+        _progress_start = time.monotonic()
+
         async def progress(current, total, track_title):
+            done = current - 1  # tracks finished before this one
+            elapsed = time.monotonic() - _progress_start
+            if done > 0:
+                eta_sec = (elapsed / done) * (total - done)
+                if eta_sec >= 60:
+                    eta = f"~{int(eta_sec // 60)}m {int(eta_sec % 60)}s left"
+                else:
+                    eta = f"~{int(eta_sec)}s left"
+            else:
+                eta = ""
             try:
-                await status_msg.edit_text(
+                text = (
                     f"Downloading: {album['artist']} — {album['title']}\n"
-                    f"Track {current}/{total}: {track_title}"
+                    f"[{current}/{total}] {track_title}"
                 )
+                if eta:
+                    text += f" · {eta}"
+                await status_msg.edit_text(text)
             except Exception:
                 pass
 
