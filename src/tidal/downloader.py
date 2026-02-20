@@ -10,7 +10,7 @@ import aiohttp
 from config import QUALITY, WRITE_TAGS
 from tidal.client import _get_session
 from tidal.metadata import fetch_album, fetch_track_url, fetch_lyrics
-from tidal.files import _find_existing_track, _sanitize
+from tidal.files import _find_existing_track, _sanitize, _track_prefix
 from tidal.tagger import _write_tags, _patch_missing_tags
 
 logger = logging.getLogger(__name__)
@@ -139,11 +139,13 @@ async def download_single_track(track: dict, album_ctx: dict, dest_dir: str,
 
     disc = track.get("discNumber", 1)
     num = track.get("trackNumber", 0)
+    total_discs = album_ctx.get("numberOfVolumes", 1)
     track_title = _sanitize(track["title"])
 
     cover_data = await _download_cover(album_ctx.get("cover_uuid", ""), album_dir)
     dl_info, stream_meta = await fetch_track_url(track["id"], quality=quality)
-    filepath = os.path.join(album_dir, f"{disc}-{num:02d} {track_title}.{dl_info['ext']}")
+    prefix = _track_prefix(disc, num, total_discs)
+    filepath = os.path.join(album_dir, f"{prefix} {track_title}.{dl_info['ext']}")
 
     # Fetch lyrics concurrently with download — hides lrclib latency
     lyrics_task = asyncio.create_task(fetch_lyrics(
@@ -251,7 +253,8 @@ async def download_album(
 
         try:
             dl_info, stream_meta = await fetch_track_url(track["id"], quality=quality)
-            filepath = os.path.join(album_dir, f"{disc}-{num:02d} {track_title}.{dl_info['ext']}")
+            prefix = _track_prefix(disc, num, album.get("numberOfVolumes", 1))
+            filepath = os.path.join(album_dir, f"{prefix} {track_title}.{dl_info['ext']}")
 
             t0 = time.monotonic()
             if dl_info["type"] == "dash":
