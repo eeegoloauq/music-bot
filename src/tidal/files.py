@@ -23,6 +23,13 @@ def _normalize_title(title: str) -> str:
     return t.strip().lower()
 
 
+def _track_prefix(disc: int, num: int, total_discs: int) -> str:
+    """Return filename prefix: '01' for single-disc, '1-01' for multi-disc."""
+    if total_discs > 1:
+        return f"{disc}-{num:02d}"
+    return f"{num:02d}"
+
+
 def _comment_value(album_id: str) -> str:
     return (
         f"https://tidal.com/album/{album_id}"
@@ -40,11 +47,12 @@ def _find_existing_track(album_dir: str, track: dict) -> str | None:
     num = track.get("trackNumber", 0)
     title = _sanitize(track["title"])
 
-    # Fast path: our canonical filenames (.flac for LOSSLESS, .m4a for HI_RES)
+    # Fast path: check both disc-prefixed (multi-disc) and plain (single-disc)
     for ext in (".flac", ".m4a"):
-        canonical = os.path.join(album_dir, f"{disc}-{num:02d} {title}{ext}")
-        if os.path.exists(canonical):
-            return canonical
+        for prefix in (f"{disc}-{num:02d}", f"{num:02d}"):
+            canonical = os.path.join(album_dir, f"{prefix} {title}{ext}")
+            if os.path.exists(canonical):
+                return canonical
 
     if not os.path.isdir(album_dir):
         return None
