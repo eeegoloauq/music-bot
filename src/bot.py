@@ -24,7 +24,7 @@ from telegram.error import NetworkError
 from telegram.request import HTTPXRequest
 
 from config import TG_TOKEN, ALLOWED_USERS, MUSIC_DIR, NAVI_LOGIN, NAVI_PASS, NAVI_PUBLIC_URL
-import monochrome
+import tidal
 import navidrome
 
 logging.basicConfig(
@@ -147,7 +147,7 @@ async def _download_album(update: Update, album_id: str, quality: str | None = N
     async with _download_semaphore:
         # Step 1: fetch metadata
         try:
-            album = await monochrome.fetch_album(album_id)
+            album = await tidal.fetch_album(album_id)
         except Exception as e:
             logger.error("Failed to fetch album %s: %s", album_id, e)
             await status_msg.edit_text(f"Failed to fetch album info: {e}")
@@ -187,7 +187,7 @@ async def _download_album(update: Update, album_id: str, quality: str | None = N
 
         # Step 2: download
         try:
-            result = await monochrome.download_album(
+            result = await tidal.download_album(
             album_id, MUSIC_DIR, progress=progress, album=album, quality=quality
         )
         except Exception as e:
@@ -244,7 +244,7 @@ async def _download_track(update: Update, track_id: str, quality: str | None = N
     async with _download_semaphore:
         # Step 1: fetch metadata
         try:
-            track, album_ctx = await monochrome.fetch_single_track(track_id)
+            track, album_ctx = await tidal.fetch_single_track(track_id)
         except Exception as e:
             logger.error("Failed to fetch track %s: %s", track_id, e)
             await status_msg.edit_text(f"Failed to fetch track info: {e}")
@@ -257,7 +257,7 @@ async def _download_track(update: Update, track_id: str, quality: str | None = N
 
         # Step 2: download
         try:
-            path, was_downloaded, fmt = await monochrome.download_single_track(
+            path, was_downloaded, fmt = await tidal.download_single_track(
             track, album_ctx, MUSIC_DIR, quality=quality
         )
         except Exception as e:
@@ -508,7 +508,7 @@ async def _error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def _shutdown(app: Application) -> None:
-    await monochrome.close()
+    await tidal.close()
     await navidrome.close()
 
 
