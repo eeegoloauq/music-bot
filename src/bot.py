@@ -1,6 +1,7 @@
 import asyncio
 import functools
 import logging
+import os
 import re
 import time
 from io import BytesIO
@@ -25,7 +26,7 @@ from telegram.ext import (
 from telegram.error import NetworkError
 from telegram.request import HTTPXRequest
 
-from config import TG_TOKEN, ALLOWED_USERS, MUSIC_DIR, NAVI_LOGIN, NAVI_PASS, NAVI_PUBLIC_URL
+from config import TG_TOKEN, ALLOWED_USERS, MUSIC_DIR, NAVI_LOGIN, NAVI_PASS, NAVI_PUBLIC_URL, INLINE_BITRATE
 import tidal
 import navidrome
 
@@ -46,6 +47,10 @@ _HIRES_RE = re.compile(r"\b(hi|hq|hires|hi-res)\b", re.IGNORECASE)
 _file_id_cache: dict[str, str] = {}
 # song_id -> asyncio.Event (signals upload completion)
 _upload_events: dict[str, asyncio.Event] = {}
+# songs that failed upload (too large, unsupported, etc.) — skip retries this session
+_upload_failed: set[str] = set()
+
+_TG_MAX_AUDIO_BYTES = 50 * 1024 * 1024  # Telegram bot upload limit
 # entry_id -> share URL
 _share_url_cache: dict[str, str] = {}
 # serialize album/track downloads so Tidal CDN doesn't throttle
@@ -330,6 +335,7 @@ async def _get_share_url(entry_id: str, description: str) -> str | None:
         return None
 
 
+
 async def _ensure_cached(bot, user_id: int, entry: dict) -> str | None:
     """Make sure a song is uploaded to Telegram. Returns file_id or None."""
     song_id = entry["songId"]
@@ -337,6 +343,9 @@ async def _ensure_cached(bot, user_id: int, entry: dict) -> str | None:
     if song_id in _file_id_cache:
         logger.info("Inline: %s — %s (cached)", entry["artist"], entry["title"])
         return _file_id_cache[song_id]
+
+    if song_id in _upload_failed:
+        return None
 
     # another query already uploading this song — wait for it
     if song_id in _upload_events:
@@ -351,16 +360,28 @@ async def _ensure_cached(bot, user_id: int, entry: dict) -> str | None:
     _upload_events[song_id] = event
     try:
         t0 = time.monotonic()
+        suffix = entry.get("suffix", "")
+        local_path = os.path.join(MUSIC_DIR, entry.get("path", "")) if entry.get("path") else ""
         cover_coro = navidrome.get_cover_art(entry["coverArtId"]) if entry.get("coverArtId") else asyncio.sleep(0)
-        audio_result, cover_result = await asyncio.gather(
-            navidrome.stream_song(song_id), cover_coro,
-        )
+
+        if suffix in ("m4a", "mp3") and local_path and os.path.exists(local_path):
+            audio_coro = navidrome.download_song(song_id, suffix)
+        else:
+            audio_coro = navidrome.stream_song(song_id)
+
+        audio_result, cover_result = await asyncio.gather(audio_coro, cover_coro)
         audio_data, filename = audio_result
         t1 = time.monotonic()
         size_mb = len(audio_data) / (1024 * 1024)
         dl_speed = size_mb / (t1 - t0) if (t1 - t0) > 0 else 0
         logger.info("Inline: %s — %s | stream %.1fMB in %.1fs (%.1f MB/s)",
                      entry["artist"], entry["title"], size_mb, t1 - t0, dl_speed)
+
+        if len(audio_data) > _TG_MAX_AUDIO_BYTES:
+            logger.warning("Inline: %s — %s | too large for Telegram (%dMB), skipping",
+                           entry["artist"], entry["title"], len(audio_data) // (1024 * 1024))
+            _upload_failed.add(song_id)
+            return None
 
         audio_io = BytesIO(audio_data)
         audio_io.name = filename
@@ -394,6 +415,7 @@ async def _ensure_cached(bot, user_id: int, entry: dict) -> str | None:
     except Exception as e:
         logger.warning("Upload failed for %s — %s (id=%s): %s",
                        entry["artist"], entry["title"], song_id, e)
+        _upload_failed.add(song_id)
         return None
     finally:
         event.set()

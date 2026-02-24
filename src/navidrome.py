@@ -5,7 +5,7 @@ from urllib.parse import urljoin
 
 import aiohttp
 
-from config import NAVI_LOGIN, NAVI_PASS, NAVI_URL, NAVI_PUBLIC_URL, STREAM_BITRATE
+from config import NAVI_LOGIN, NAVI_PASS, NAVI_URL, NAVI_PUBLIC_URL, STREAM_BITRATE, INLINE_BITRATE
 
 logger = logging.getLogger(__name__)
 
@@ -93,18 +93,20 @@ async def get_now_playing() -> list[dict]:
             "albumId": e.get("albumId", ""),
             "coverArtId": e.get("coverArt", ""),
             "duration": e.get("duration", 0),
+            "suffix": e.get("suffix", "").lower(),
+            "path": e.get("path", ""),
         }
         for e in entries
     ]
 
 
 async def stream_song(song_id: str) -> tuple[bytes, str]:
-    """Stream a song from Navidrome with MP3 transcoding."""
+    """Stream a song from Navidrome with MP3 transcoding at inline bitrate."""
     url = urljoin(NAVI_URL + "/", "rest/stream")
     params = _auth_params()
     params["id"] = song_id
     params["format"] = "mp3"
-    params["maxBitRate"] = STREAM_BITRATE
+    params["maxBitRate"] = INLINE_BITRATE
     session = await _get_session()
     async with session.get(url, params=params, timeout=_STREAM_TIMEOUT) as resp:
         content = await resp.read()
@@ -114,6 +116,21 @@ async def stream_song(song_id: str) -> tuple[bytes, str]:
             filename = disp.split("filename=")[-1].strip('" ')
             base = filename.rsplit(".", 1)[0]
             filename = f"{base}.mp3"
+        return content, filename
+
+
+async def download_song(song_id: str, suffix: str) -> tuple[bytes, str]:
+    """Download original file from Navidrome without transcoding."""
+    url = urljoin(NAVI_URL + "/", "rest/download")
+    params = _auth_params()
+    params["id"] = song_id
+    session = await _get_session()
+    async with session.get(url, params=params, timeout=_STREAM_TIMEOUT) as resp:
+        content = await resp.read()
+        disp = resp.headers.get("Content-Disposition", "")
+        filename = f"track.{suffix}"
+        if "filename=" in disp:
+            filename = disp.split("filename=")[-1].strip('" ')
         return content, filename
 
 

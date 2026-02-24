@@ -102,14 +102,16 @@ def _write_audio_tags(filepath: str, dl_info: dict, track: dict, album: dict,
         _write_tags(filepath, track, album, stream_meta, cover_data, lyrics)
 
 
-def _fmt_label(dl_info: dict) -> str:
-    if dl_info["type"] == "dash":
-        return "FLAC 24-bit"
+def _fmt_label(dl_info: dict, stream_meta: dict) -> str:
     codec = dl_info.get("codec", "flac").lower()
+    bit_depth = stream_meta.get("bitDepth")
+    bits = f" {bit_depth}-bit" if bit_depth else ""
+    if dl_info["type"] == "dash":
+        return f"FLAC{bits or ' 24-bit'}"
     if codec == "flac":
-        return "FLAC 16-bit"
+        return f"FLAC{bits or ' 16-bit'}"
     if "alac" in codec:
-        return "ALAC"
+        return f"ALAC{bits}"
     return "M4A"
 
 
@@ -180,7 +182,7 @@ async def download_single_track(track: dict, album_ctx: dict, dest_dir: str,
 
     elapsed = time.monotonic() - t0
     speed = (track_bytes / (1024 * 1024)) / elapsed if elapsed > 0 else 0
-    fmt = _fmt_label(dl_info)
+    fmt = _fmt_label(dl_info, stream_meta)
     logger.info("Track: %s — %s | %.1fMB in %.1fs (%.1f MB/s) [%s%s]",
                 track["artist"], track["title"], track_bytes / (1024 * 1024), elapsed, speed,
                 fmt, " lyrics" if lyrics else " no lyrics")
@@ -288,7 +290,7 @@ async def download_album(
 
             elapsed = time.monotonic() - t0
             speed = (track_bytes / (1024 * 1024)) / elapsed if elapsed > 0 else 0
-            fmt = _fmt_label(dl_info)
+            fmt = _fmt_label(dl_info, stream_meta)
             if not format_label:
                 format_label = fmt
             logger.info("  [%d/%d] %s — %.1fMB in %.1fs (%.1f MB/s) [%s%s]",
