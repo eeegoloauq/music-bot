@@ -8,6 +8,7 @@ import aiohttp
 from config import QUALITY
 from tidal.client import (
     _api_get, _get_session, _get_instances, _get_lrclib_sem,
+    _dead_instances,
     TIDAL_API_URL, TIDAL_TOKEN, LRCLIB_URL,
 )
 
@@ -102,9 +103,11 @@ async def _fetch_hires(track_id: str) -> tuple[dict, dict] | None:
     session = await _get_session()
     path = f"/track/?id={track_id}&quality=HI_RES_LOSSLESS"
     for inst in instances:
+        if inst in _dead_instances:
+            continue
         url = f"{inst}{path}"
         try:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(connect=4, total=20)) as resp:
                 if resp.status != 200:
                     continue
                 body = await resp.json(content_type=None)
@@ -186,6 +189,8 @@ async def fetch_track_url(track_id: str, quality: str | None = None) -> tuple[di
         "trackPeak": data.get("trackPeakAmplitude"),
         "albumReplayGain": data.get("albumReplayGain"),
         "albumPeak": data.get("albumPeakAmplitude"),
+        "bitDepth": data.get("bitDepth"),
+        "sampleRate": data.get("sampleRate"),
     }
     codec = manifest.get("codecs", "flac")
     ext = "flac" if codec.lower() == "flac" else "m4a"

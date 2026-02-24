@@ -17,6 +17,7 @@ ALLOWED_USERS = [
 ]
 MUSIC_DIR = os.getenv("MUSIC_DIR", "/music")
 STREAM_BITRATE = os.getenv("STREAM_BITRATE", "320")
+INLINE_BITRATE = os.getenv("INLINE_BITRATE", "320")
 NAVI_PUBLIC_URL = os.getenv("NAVIDROME_PUBLIC_URL", "").rstrip("/") or ""
 QUALITY = os.getenv("QUALITY", "LOSSLESS")  # LOSSLESS | HI_RES_LOSSLESS
 WRITE_TAGS = os.getenv("WRITE_TAGS", "true").lower() not in ("false", "0", "no")

@@ -105,7 +105,7 @@ async def _api_get(path: str) -> dict:
     for inst in active:
         url = f"{inst}{path}"
         try:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(connect=4, total=20)) as resp:
                 if resp.status != 200:
                     last_err = f"HTTP {resp.status} from {inst}"
                     continue
