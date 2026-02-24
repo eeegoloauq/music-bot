@@ -65,8 +65,9 @@ def _write_tags(filepath: str, track: dict, album: dict,
             tags["replaygain_album_peak"] = f"{rg['albumPeak']:.6f}"
 
         for key, val in tags.items():
-            if val and key not in audio:
-                audio[key] = val
+            if val:
+                if key == "comment" or key not in audio:
+                    audio[key] = val
 
         if cover_data and not audio.pictures:
             pic = Picture()
@@ -132,8 +133,9 @@ def _write_m4a_tags(filepath: str, track: dict, album: dict,
             str_tags["\xa9cmt"] = _comment_value(album_id)
 
         for key, val in str_tags.items():
-            if val and key not in audio:
-                audio[key] = [val]
+            if val:
+                if key == "\xa9cmt" or key not in audio:
+                    audio[key] = [val]
 
         if "trkn" not in audio:
             audio["trkn"] = [(num, total_tracks)]
@@ -205,9 +207,11 @@ async def _patch_flac_tags(filepath: str, track: dict, album: dict) -> list[str]
         audio = FLAC(filepath)
 
         album_id = album.get("id", "")
-        if album_id and "comment" not in audio:
-            audio["comment"] = _comment_value(album_id)
-            added.append("comment")
+        if album_id:
+            new_comment = _comment_value(album_id)
+            if audio.get("comment") != [new_comment]:
+                audio["comment"] = new_comment
+                added.append("comment")
 
         # Migrate existing files: if lyrics=plain but syncedlyrics=LRC,
         # promote LRC to lyrics so Navidrome serves it as synced via API.
@@ -253,9 +257,11 @@ async def _patch_m4a_tags(filepath: str, track: dict, album: dict) -> list[str]:
         audio = MP4(filepath)
 
         album_id = album.get("id", "")
-        if album_id and "\xa9cmt" not in audio:
-            audio["\xa9cmt"] = [_comment_value(album_id)]
-            added.append("comment")
+        if album_id:
+            new_comment = _comment_value(album_id)
+            if audio.get("\xa9cmt") != [new_comment]:
+                audio["\xa9cmt"] = [new_comment]
+                added.append("comment")
 
         lrclib_key = "----:com.apple.iTunes:LRCLIBCHECKED"
         has_lyrics = "\xa9lyr" in audio

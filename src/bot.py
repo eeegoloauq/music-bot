@@ -6,6 +6,8 @@ import time
 from io import BytesIO
 from uuid import uuid4
 
+_RESTART_DELAY = 30  # seconds between automatic restarts after a crash
+
 from telegram import (
     InlineQueryResultArticle,
     InlineQueryResultCachedAudio,
@@ -512,6 +514,23 @@ async def _shutdown(app: Application) -> None:
     await navidrome.close()
 
 
+def _build_app() -> Application:
+    app = (
+        Application.builder()
+        .token(TG_TOKEN)
+        .get_updates_request(HTTPXRequest(pool_timeout=5.0))
+        .post_shutdown(_shutdown)
+        .build()
+    )
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("scan", cmd_scan))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(InlineQueryHandler(handle_inline_query))
+    app.add_error_handler(_error_handler)
+    return app
+
+
 def main():
     if not NAVI_LOGIN or not NAVI_PASS:
         logger.warning(
@@ -520,23 +539,17 @@ def main():
     if not NAVI_PUBLIC_URL:
         logger.info("NAVIDROME_PUBLIC_URL not set — share links disabled")
 
-    app = (
-        Application.builder()
-        .token(TG_TOKEN)
-        .get_updates_request(HTTPXRequest(pool_timeout=5.0))
-        .post_shutdown(_shutdown)
-        .build()
-    )
-
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("help", cmd_help))
-    app.add_handler(CommandHandler("scan", cmd_scan))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.add_handler(InlineQueryHandler(handle_inline_query))
-    app.add_error_handler(_error_handler)
-
     logger.info("Bot starting...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES, bootstrap_retries=-1)
+    while True:
+        try:
+            _build_app().run_polling(allowed_updates=Update.ALL_TYPES, bootstrap_retries=-1)
+            break  # clean shutdown (SIGTERM / SIGINT)
+        except (KeyboardInterrupt, SystemExit):
+            break
+        except Exception as e:
+            logger.error("Bot crashed: %s — restarting in %ds", e, _RESTART_DELAY)
+            time.sleep(_RESTART_DELAY)
+            logger.info("Bot restarting...")
 
 
 if __name__ == "__main__":

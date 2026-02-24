@@ -187,11 +187,13 @@ async def fetch_track_url(track_id: str, quality: str | None = None) -> tuple[di
         "albumReplayGain": data.get("albumReplayGain"),
         "albumPeak": data.get("albumPeakAmplitude"),
     }
+    codec = manifest.get("codecs", "flac")
+    ext = "flac" if codec.lower() == "flac" else "m4a"
     return {
         "type": "direct",
-        "ext": "flac",
+        "ext": ext,
         "url": urls[0],
-        "codec": manifest.get("codecs", "flac"),
+        "codec": codec,
     }, stream_meta
 
 
