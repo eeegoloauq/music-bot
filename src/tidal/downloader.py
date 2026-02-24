@@ -11,7 +11,7 @@ from config import QUALITY, WRITE_TAGS
 from tidal.client import _get_session
 from tidal.metadata import fetch_album, fetch_track_url, fetch_lyrics
 from tidal.files import _find_existing_track, _sanitize, _track_prefix
-from tidal.tagger import _write_tags, _patch_missing_tags
+from tidal.tagger import _write_tags, _write_m4a_tags, _patch_missing_tags
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +94,25 @@ async def _remux_to_flac(m4a_path: str) -> str:
     return flac_path
 
 
+def _write_audio_tags(filepath: str, dl_info: dict, track: dict, album: dict,
+                      stream_meta: dict, cover_data: bytes | None, lyrics: dict | None):
+    if dl_info["ext"] == "m4a":
+        _write_m4a_tags(filepath, track, album, stream_meta, cover_data, lyrics)
+    else:
+        _write_tags(filepath, track, album, stream_meta, cover_data, lyrics)
+
+
+def _fmt_label(dl_info: dict) -> str:
+    if dl_info["type"] == "dash":
+        return "FLAC 24-bit"
+    codec = dl_info.get("codec", "flac").lower()
+    if codec == "flac":
+        return "FLAC 16-bit"
+    if "alac" in codec:
+        return "ALAC"
+    return "M4A"
+
+
 async def _download_cover(cover_uuid: str, album_dir: str) -> bytes | None:
     """Download cover art if not already on disk. Returns image bytes or None."""
     if not cover_uuid:
@@ -161,16 +180,15 @@ async def download_single_track(track: dict, album_ctx: dict, dest_dir: str,
 
     elapsed = time.monotonic() - t0
     speed = (track_bytes / (1024 * 1024)) / elapsed if elapsed > 0 else 0
-    fmt = "24-bit" if dl_info["type"] == "dash" else "16-bit"
-    logger.info("Track: %s — %s | %.1fMB in %.1fs (%.1f MB/s) [FLAC %s%s]",
+    fmt = _fmt_label(dl_info)
+    logger.info("Track: %s — %s | %.1fMB in %.1fs (%.1f MB/s) [%s%s]",
                 track["artist"], track["title"], track_bytes / (1024 * 1024), elapsed, speed,
                 fmt, " lyrics" if lyrics else " no lyrics")
     os.chmod(filepath, 0o666)
 
     if WRITE_TAGS:
-        _write_tags(filepath, track, album_ctx, stream_meta, cover_data, lyrics)
-    format_label = f"FLAC {fmt}"
-    return filepath, True, format_label
+        _write_audio_tags(filepath, dl_info, track, album_ctx, stream_meta, cover_data, lyrics)
+    return filepath, True, fmt
 
 
 async def download_album(
@@ -270,17 +288,17 @@ async def download_album(
 
             elapsed = time.monotonic() - t0
             speed = (track_bytes / (1024 * 1024)) / elapsed if elapsed > 0 else 0
-            fmt = "24-bit" if dl_info["type"] == "dash" else "16-bit"
+            fmt = _fmt_label(dl_info)
             if not format_label:
-                format_label = f"FLAC {fmt}"
-            logger.info("  [%d/%d] %s — %.1fMB in %.1fs (%.1f MB/s) [FLAC %s%s]",
+                format_label = fmt
+            logger.info("  [%d/%d] %s — %.1fMB in %.1fs (%.1f MB/s) [%s%s]",
                         i, total, track["title"], track_bytes / (1024 * 1024), elapsed, speed,
                         fmt, " lyrics" if lyrics else " no lyrics")
             album_bytes += track_bytes
             os.chmod(filepath, 0o666)
 
             if WRITE_TAGS:
-                _write_tags(filepath, track, album, stream_meta, cover_data, lyrics)
+                _write_audio_tags(filepath, dl_info, track, album, stream_meta, cover_data, lyrics)
             downloaded += 1
         except Exception as e:
             logger.warning("  [%d/%d] track %s (id=%s) — failed: %s",

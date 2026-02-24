@@ -32,6 +32,7 @@ _BUILTIN_INSTANCES = [
 _instances: list[str] = []
 _instances_updated: float = 0
 _INSTANCES_TTL = 1800  # refresh every 30 min
+_dead_instances: set[str] = set()  # connection-failed instances, cleared on refresh
 
 _session: aiohttp.ClientSession | None = None
 _lrclib_sem: asyncio.Semaphore | None = None  # created lazily in async context
@@ -60,7 +61,8 @@ async def close():
 
 async def _refresh_instances() -> list[str]:
     """Fetch instance list from remote, fall back to builtin."""
-    global _instances, _instances_updated
+    global _instances, _instances_updated, _dead_instances
+    _dead_instances.clear()
     try:
         session = await _get_session()
         async with session.get(INSTANCES_URL, timeout=aiohttp.ClientTimeout(total=10)) as resp:
@@ -92,7 +94,15 @@ async def _api_get(path: str) -> dict:
     instances = await _get_instances()
     session = await _get_session()
     last_err = None
-    for inst in instances:
+
+    # Skip instances that failed with connection errors this session.
+    # If all are dead, clear and try everyone (avoids permanent lockout).
+    active = [i for i in instances if i not in _dead_instances]
+    if not active:
+        _dead_instances.clear()
+        active = instances
+
+    for inst in active:
         url = f"{inst}{path}"
         try:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
@@ -110,6 +120,7 @@ async def _api_get(path: str) -> dict:
         except Exception as e:
             last_err = f"{inst}: {e}"
             logger.warning("Instance %s failed: %s", inst, e)
+            _dead_instances.add(inst)
             continue
     _instances_updated = 0  # force refresh on next call
     raise RuntimeError(f"All instances failed. Last error: {last_err}")
