@@ -4,11 +4,13 @@ Telegram bot for [Navidrome](https://www.navidrome.org/) that downloads music fr
 
 <p align="center">
   <img src=".github/screenshot.png" width="300" alt="Bot demo">
+  <br>
+  <em>Album download with metadata tagging and share link</em>
 </p>
 
 ## Features
 
-- **Album & track downloads** — send a Tidal, Spotify, Apple Music, Deezer, or YouTube Music link, get FLACs with full metadata saved to your library
+- **Album & track downloads** — send a Tidal, Spotify, Apple Music, Deezer, YouTube Music, SoundCloud, or Amazon Music link, get FLACs with full metadata saved to your library
 - **Now Playing** — inline mode sends the currently playing track as audio
 - **Share links** — inline `share` mode sends a Navidrome share link with cover art preview
 - **Auto-share after download** — share link appended to the success message
@@ -49,6 +51,7 @@ If Navidrome is in the same compose stack, use `NAVIDROME_URL=http://navidrome:4
 
 ```bash
 pip install -r requirements.txt
+sudo apt install ffmpeg  # required for MP3 transcoding
 cp .env.example .env  # fill in values
 python src/bot.py
 ```
@@ -85,7 +88,7 @@ To enable share links, set `NAVIDROME_PUBLIC_URL` and enable sharing in Navidrom
 ## Usage
 
 - Send a `tidal.com/album/...` or `tidal.com/track/...` link to download
-- Send a Spotify, Apple Music, Deezer, or YouTube Music link — it will be resolved to Tidal via [song.link](https://song.link)
+- Send a Spotify, Apple Music, Deezer, YouTube Music, SoundCloud, or Amazon Music link — it will be resolved to Tidal via [song.link](https://song.link)
 - Type `@yourbotname` in any chat — sends currently playing track as audio
 - Type `@yourbotname share` — sends a Navidrome share link with cover art embed
 

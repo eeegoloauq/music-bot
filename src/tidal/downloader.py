@@ -84,11 +84,25 @@ async def _remux_to_flac(m4a_path: str) -> str:
     proc = await asyncio.create_subprocess_exec(
         "ffmpeg", "-i", m4a_path, "-c:a", "copy", "-f", "flac", "-y", tmp_path,
         stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
     )
-    await proc.wait()
+    try:
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise RuntimeError(f"ffmpeg remux timed out for {m4a_path}")
     if proc.returncode != 0:
-        raise RuntimeError(f"ffmpeg remux failed for {m4a_path}")
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        detail = stderr.decode(errors="replace").strip()[-200:] if stderr else ""
+        raise RuntimeError(f"ffmpeg remux failed for {m4a_path}: {detail}")
     os.replace(tmp_path, flac_path)
     os.remove(m4a_path)
     return flac_path
@@ -243,9 +257,12 @@ async def download_album(
         patch_results = await asyncio.gather(*[
             _patch_missing_tags(existing_map[track["id"]], track, album)
             for _, track in patch_tracks
-        ])
+        ], return_exceptions=True)
         for (i, track), added in zip(patch_tracks, patch_results):
-            if added:
+            if isinstance(added, BaseException):
+                logger.warning("  [%d/%d] %s — patch failed: %s",
+                               i, total, track["title"], added)
+            elif added:
                 logger.info("  [%d/%d] %s — patched: %s",
                             i, total, track["title"], ", ".join(added))
             else:
