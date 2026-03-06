@@ -8,7 +8,7 @@ Telegram bot for [Navidrome](https://www.navidrome.org/) that downloads music fr
 
 ## Features
 
-- **Album & track downloads** — send a Tidal or Monochrome link, get FLACs with full metadata saved to your library
+- **Album & track downloads** — send a Tidal, Spotify, Apple Music, Deezer, or YouTube Music link, get FLACs with full metadata saved to your library
 - **Now Playing** — inline mode sends the currently playing track as audio
 - **Share links** — inline `share` mode sends a Navidrome share link with cover art preview
 - **Auto-share after download** — share link appended to the success message
@@ -85,6 +85,7 @@ To enable share links, set `NAVIDROME_PUBLIC_URL` and enable sharing in Navidrom
 ## Usage
 
 - Send a `tidal.com/album/...` or `tidal.com/track/...` link to download
+- Send a Spotify, Apple Music, Deezer, or YouTube Music link — it will be resolved to Tidal via [song.link](https://song.link)
 - Type `@yourbotname` in any chat — sends currently playing track as audio
 - Type `@yourbotname share` — sends a Navidrome share link with cover art embed
 
