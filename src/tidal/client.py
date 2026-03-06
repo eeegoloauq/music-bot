@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 import time
 
 import aiohttp
@@ -10,6 +11,7 @@ INSTANCES_URL = "https://monochrome.samidy.com/instances.json"
 TIDAL_API_URL = "https://api.tidal.com/v1"
 TIDAL_TOKEN = "CzET4vdadNUFQ5JU"
 LRCLIB_URL = "https://lrclib.net/api/get"
+ODESLI_URL = "https://api.song.link/v1-alpha.1/links"
 
 _BUILTIN_INSTANCES = [
     "https://eu-central.monochrome.tf",
@@ -124,3 +126,41 @@ async def _api_get(path: str) -> dict:
             continue
     _instances_updated = 0  # force refresh on next call
     raise RuntimeError(f"All instances failed. Last error: {last_err}")
+
+
+async def resolve_link(url: str) -> tuple[str, str] | None:
+    """Resolve a music platform URL to a Tidal ID via Odesli (song.link).
+
+    Returns ("album", id) or ("track", id), or None if no Tidal match.
+    """
+    session = await _get_session()
+    try:
+        async with session.get(
+            ODESLI_URL,
+            params={"url": url},
+            timeout=aiohttp.ClientTimeout(connect=5, total=10),
+        ) as resp:
+            if resp.status != 200:
+                logger.warning("Odesli returned HTTP %d for %s", resp.status, url)
+                return None
+            data = await resp.json(content_type=None)
+    except asyncio.TimeoutError:
+        logger.warning("Odesli timed out for %s", url)
+        return None
+    except Exception as e:
+        logger.warning("Odesli request failed: %s", e)
+        return None
+
+    tidal_link = (data.get("linksByPlatform") or {}).get("tidal", {}).get("url", "")
+    if not tidal_link:
+        return None
+
+    m = re.search(r"/album/(\d+)", tidal_link)
+    if m:
+        return ("album", m.group(1))
+    m = re.search(r"/track/(\d+)", tidal_link)
+    if m:
+        return ("track", m.group(1))
+
+    logger.warning("Odesli returned unrecognized Tidal URL: %s", tidal_link)
+    return None

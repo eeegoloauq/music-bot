@@ -42,6 +42,19 @@ ALBUM_RE = re.compile(r"(?:monochrome\.samidy\.com|monochrome\.tf|tidal\.com)/al
 TRACK_RE = re.compile(r"(?:monochrome\.samidy\.com|monochrome\.tf|tidal\.com)/track/(\d+)")
 # Words after the link that trigger HI_RES_LOSSLESS for this download
 _HIRES_RE = re.compile(r"\b(hi|hq|hires|hi-res)\b", re.IGNORECASE)
+# Known music platform URLs that Odesli can resolve to Tidal
+_MUSIC_LINK_RE = re.compile(
+    r"https?://(?:"
+    r"open\.spotify\.com|spotify\.link"
+    r"|music\.apple\.com"
+    r"|(?:www\.)?deezer\.com"
+    r"|music\.youtube\.com"
+    r"|(?:www\.)?song\.link|(?:www\.)?odesli\.co|(?:www\.)?album\.link"
+    r"|soundcloud\.com"
+    r"|music\.amazon\.com"
+    r")/\S+",
+    re.IGNORECASE,
+)
 
 # song_id -> telegram file_id
 _file_id_cache: dict[str, str] = {}
@@ -128,6 +141,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         suffix = text[track_match.end():]
         quality = "HI_RES_LOSSLESS" if _HIRES_RE.search(suffix) else None
         await _download_track(update, track_match.group(1), quality=quality)
+    else:
+        music_match = _MUSIC_LINK_RE.search(text)
+        if music_match:
+            await _resolve_and_download(update, music_match.group(0), text[music_match.end():])
 
 
 async def _trigger_scan() -> str:
@@ -143,6 +160,30 @@ async def _trigger_scan() -> str:
     except Exception as e:
         logger.warning("Navidrome scan failed: %s", e)
         return "Library scan failed."
+
+
+async def _resolve_and_download(update: Update, url: str, suffix: str):
+    """Resolve a non-Tidal music link via Odesli, then download."""
+    status_msg = await update.message.reply_text("Resolving link...")
+    try:
+        result = await tidal.resolve_link(url)
+    except Exception as e:
+        logger.error("Odesli resolve failed for %s: %s", url, e)
+        await status_msg.edit_text(f"Failed to resolve link: {e}")
+        return
+
+    if result is None:
+        await status_msg.edit_text("Not found on Tidal.")
+        return
+
+    link_type, tidal_id = result
+    quality = "HI_RES_LOSSLESS" if _HIRES_RE.search(suffix) else None
+    await status_msg.delete()
+
+    if link_type == "album":
+        await _download_album(update, tidal_id, quality=quality)
+    else:
+        await _download_track(update, tidal_id, quality=quality)
 
 
 async def _download_album(update: Update, album_id: str, quality: str | None = None):
