@@ -95,7 +95,7 @@ def _write_tags(filepath: str, track: dict, album: dict,
 
         audio.save()
     except Exception:
-        logger.warning("Could not write tags to %s", filepath)
+        logger.warning("Could not write tags to %s", filepath, exc_info=True)
 
 
 def _write_m4a_tags(filepath: str, track: dict, album: dict,
@@ -184,7 +184,7 @@ def _write_m4a_tags(filepath: str, track: dict, album: dict,
 
         audio.save()
     except Exception:
-        logger.warning("Could not write M4A tags to %s", filepath)
+        logger.warning("Could not write M4A tags to %s", filepath, exc_info=True)
 
 
 async def _patch_missing_tags(filepath: str, track: dict, album: dict) -> list[str]:

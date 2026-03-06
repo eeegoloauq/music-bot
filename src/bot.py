@@ -410,7 +410,11 @@ async def _ensure_cached(bot, user_id: int, entry: dict) -> str | None:
         else:
             audio_coro = navidrome.stream_song(song_id)
 
-        audio_result, cover_result = await asyncio.gather(audio_coro, cover_coro)
+        audio_result, cover_result = await asyncio.gather(
+            audio_coro, cover_coro, return_exceptions=True,
+        )
+        if isinstance(audio_result, BaseException):
+            raise audio_result
         audio_data, filename = audio_result
         t1 = time.monotonic()
         size_mb = len(audio_data) / (1024 * 1024)
