@@ -3,6 +3,7 @@ import functools
 import logging
 import os
 import re
+import shutil
 import time
 from io import BytesIO
 from uuid import uuid4
@@ -114,7 +115,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<b>Inline mode</b>\n"
         f"<code>@{bot_me.username}</code> — send now playing as audio\n"
         f"<code>@{bot_me.username} share</code> — send share link with cover art\n"
-        f"<code>@{bot_me.username} song name</code> — search Tidal and download\n\n"
+        f"<code>@{bot_me.username} song name</code> — search Tidal and download\n"
+        f"<code>@{bot_me.username} del name</code> — delete album from library\n\n"
         "<b>Commands</b>\n"
         "/scan — trigger library rescan",
         parse_mode="HTML",
@@ -131,6 +133,12 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text or ""
 
+    if text.startswith(_DELETE_PREFIX):
+        rel_path = text[len(_DELETE_PREFIX):].strip()
+        if rel_path:
+            await _handle_delete(update, rel_path)
+        return
+
     album_match = ALBUM_RE.search(text)
     track_match = TRACK_RE.search(text) if not album_match else None
 
@@ -146,6 +154,103 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         music_match = _MUSIC_LINK_RE.search(text)
         if music_match:
             await _resolve_and_download(update, music_match.group(0), text[music_match.end():])
+
+
+_DELETE_PREFIX = "delete:"
+
+
+_AUDIO_EXTS = frozenset({".flac", ".mp3", ".m4a", ".ogg", ".opus", ".aac", ".wv", ".ape"})
+_TIDAL_ALBUM_RE = re.compile(r"tidal\.com/album/(\d+)")
+
+
+def _search_local_albums(query: str, limit: int = 5) -> list[dict]:
+    """Search local music library for albums matching query.
+
+    Returns list of {artist, album, path, tracks, tidal_album_id}.
+    """
+    from mutagen.flac import FLAC
+    from mutagen.mp4 import MP4
+
+    query_lower = query.lower()
+    results = []
+    try:
+        for artist_entry in os.scandir(MUSIC_DIR):
+            if not artist_entry.is_dir() or artist_entry.name.startswith((".", "lost")):
+                continue
+            for album_entry in os.scandir(artist_entry.path):
+                if not album_entry.is_dir():
+                    continue
+                combined = f"{artist_entry.name} {album_entry.name}".lower()
+                if query_lower in combined:
+                    track_count = 0
+                    tidal_album_id = ""
+                    for f in os.scandir(album_entry.path):
+                        if not f.is_file():
+                            continue
+                        ext = os.path.splitext(f.name)[1].lower()
+                        if ext in _AUDIO_EXTS:
+                            track_count += 1
+                            if not tidal_album_id:
+                                try:
+                                    if ext == ".flac":
+                                        comment = next(iter(FLAC(f.path).get("comment") or []), "")
+                                    elif ext == ".m4a":
+                                        comment = next(iter(MP4(f.path).get("\xa9cmt") or []), "")
+                                    else:
+                                        comment = ""
+                                    m = _TIDAL_ALBUM_RE.search(comment)
+                                    if m:
+                                        tidal_album_id = m.group(1)
+                                except Exception:
+                                    pass
+                    results.append({
+                        "artist": artist_entry.name,
+                        "album": album_entry.name,
+                        "path": album_entry.path,
+                        "tracks": track_count,
+                        "tidal_album_id": tidal_album_id,
+                    })
+                    if len(results) >= limit:
+                        return results
+    except OSError:
+        pass
+    return results
+
+
+async def _handle_delete(update: Update, rel_path: str):
+    """Delete a local album folder and trigger rescan."""
+    full_path = os.path.normpath(os.path.join(MUSIC_DIR, rel_path))
+
+    # Safety: must be inside MUSIC_DIR and at least 2 levels deep (Artist/Album)
+    if not full_path.startswith(os.path.normpath(MUSIC_DIR) + os.sep):
+        await update.message.reply_text("Invalid path.")
+        return
+    depth = os.path.relpath(full_path, MUSIC_DIR).count(os.sep)
+    if depth < 1:
+        await update.message.reply_text("Cannot delete top-level directories.")
+        return
+
+    if not os.path.isdir(full_path):
+        await update.message.reply_text(f"Not found: {rel_path}")
+        return
+
+    artist_dir = os.path.dirname(full_path)
+    album_name = os.path.basename(full_path)
+    artist_name = os.path.basename(artist_dir)
+
+    shutil.rmtree(full_path)
+    logger.info("Deleted album: %s/%s", artist_name, album_name)
+
+    # Remove empty artist folder
+    try:
+        if not os.listdir(artist_dir):
+            os.rmdir(artist_dir)
+            logger.info("Removed empty artist folder: %s", artist_name)
+    except OSError:
+        pass
+
+    scan_note = await _trigger_scan()
+    await update.message.reply_text(f"Deleted: {artist_name} — {album_name}\n{scan_note}")
 
 
 async def _trigger_scan() -> str:
@@ -477,13 +582,69 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
     query_lower = query.lower()
     share_mode = query_lower in ("s", "share")
 
-    # 1-2 chars: user is typing, don't trigger anything heavy
-    if 0 < len(query) <= 2 and not share_mode:
-        await update.inline_query.answer([], cache_time=5)
+    now_playing_mode = query_lower in ("np", "now")
+    delete_mode = query_lower == "del" or query_lower.startswith("del ")
+
+    # Delete mode: search local library
+    if delete_mode:
+        del_query = query[3:].strip()
+        if len(del_query) < 2:
+            await update.inline_query.answer([], cache_time=5)
+            return
+        local = _search_local_albums(del_query)
+        if local:
+            # Fetch cover URLs in parallel for albums with tidal IDs
+            cover_urls = {}
+            album_ids = [(item["path"], item["tidal_album_id"])
+                         for item in local if item["tidal_album_id"]]
+            if album_ids:
+                covers = await asyncio.gather(*[
+                    tidal.fetch_cover_url(aid) for _, aid in album_ids
+                ], return_exceptions=True)
+                for (path, _), url in zip(album_ids, covers):
+                    if isinstance(url, str) and url:
+                        cover_urls[path] = url
+
+            results = []
+            for item in local:
+                rel_path = os.path.relpath(item["path"], MUSIC_DIR)
+                results.append(
+                    InlineQueryResultArticle(
+                        id=str(uuid4()),
+                        title=f"{item['album']} ({item['tracks']} tracks)",
+                        description=item["artist"],
+                        thumbnail_url=cover_urls.get(item["path"]) or None,
+                        input_message_content=InputTextMessageContent(
+                            f"{_DELETE_PREFIX}{rel_path}",
+                        ),
+                    )
+                )
+            await update.inline_query.answer(results, cache_time=5)
+        else:
+            await update.inline_query.answer([
+                InlineQueryResultArticle(
+                    id=str(uuid4()),
+                    title="No albums found",
+                    description=f"Nothing matching '{del_query}' in library",
+                    input_message_content=InputTextMessageContent("..."),
+                )
+            ], cache_time=5)
         return
 
-    # Search mode: 3+ chars and not share
-    if len(query) > 2 and not share_mode:
+    # Empty or short non-keyword query: show hint
+    if not query or (0 < len(query) <= 2 and not share_mode and not now_playing_mode):
+        await update.inline_query.answer([
+            InlineQueryResultArticle(
+                id=str(uuid4()),
+                title="Search Tidal",
+                description="np = now playing, s = share, del = delete",
+                input_message_content=InputTextMessageContent("..."),
+            )
+        ], cache_time=30)
+        return
+
+    # Search mode: 3+ chars and not a keyword
+    if not share_mode and not now_playing_mode:
         try:
             search_data = await tidal.search(query, album_limit=3, track_limit=5)
         except Exception as e:

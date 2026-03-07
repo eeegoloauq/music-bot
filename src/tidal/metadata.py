@@ -299,6 +299,25 @@ async def search(query: str, album_limit: int = 3, track_limit: int = 5) -> dict
     return {"albums": albums, "tracks": tracks}
 
 
+async def fetch_cover_url(album_id: str, size: int = 320) -> str:
+    """Get Tidal cover art URL for an album. Returns URL or empty string."""
+    session = await _get_session()
+    url = f"{TIDAL_API_URL}/albums/{album_id}?countryCode=US"
+    headers = {"x-tidal-token": TIDAL_TOKEN}
+    try:
+        async with session.get(url, headers=headers,
+                               timeout=aiohttp.ClientTimeout(total=5)) as resp:
+            if resp.status != 200:
+                return ""
+            data = await resp.json(content_type=None)
+        cover = data.get("cover", "")
+        if cover:
+            return f"https://resources.tidal.com/images/{cover.replace('-', '/')}/{size}x{size}.jpg"
+    except Exception:
+        pass
+    return ""
+
+
 async def fetch_lyrics(track_name: str, artist_name: str, album_name: str,
                        duration: int) -> dict | None:
     """Fetch lyrics from lrclib.net. Returns dict with plainLyrics/syncedLyrics, or None."""
