@@ -64,6 +64,8 @@ async def fetch_album(album_id: str) -> dict:
 def _parse_mpd(mpd_xml: str) -> dict:
     """Parse DASH MPD manifest. Returns {init_url, segment_urls, codec}."""
     ns = {"mpd": "urn:mpeg:dash:schema:mpd:2011"}
+    if len(mpd_xml) > 512_000:
+        raise RuntimeError(f"MPD manifest too large ({len(mpd_xml)} bytes)")
     root = ET.fromstring(mpd_xml)
     for adapt in root.findall(".//mpd:AdaptationSet", ns):
         if "audio" not in adapt.get("contentType", "") and "audio" not in adapt.get("mimeType", ""):
@@ -251,7 +253,7 @@ async def fetch_lyrics(track_name: str, artist_name: str, album_name: str,
         "album_name": album_name,
         "duration": str(duration),
     }
-    headers = {"User-Agent": "music-bot v1.1.0 (https://github.com/eeegoloauq/music-bot)"}
+    headers = {"User-Agent": "music-bot v1.8 (https://github.com/eeegoloauq/music-bot)"}
     try:
         async with _get_lrclib_sem():
             async with session.get(LRCLIB_URL, params=params, headers=headers,

@@ -39,7 +39,7 @@ async def close():
 
 def _auth_params() -> dict[str, str]:
     salt = secrets.token_hex(8)
-    token = hashlib.md5((NAVI_PASS + salt).encode()).hexdigest()
+    token = hashlib.md5((NAVI_PASS + salt).encode(), usedforsecurity=False).hexdigest()
     return {
         "u": NAVI_LOGIN,
         "t": token,
