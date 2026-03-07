@@ -23,7 +23,7 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
-from telegram.error import NetworkError
+from telegram.error import NetworkError, TelegramError
 from telegram.request import HTTPXRequest
 
 from config import TG_TOKEN, ALLOWED_USERS, MUSIC_DIR, NAVI_LOGIN, NAVI_PASS, NAVI_PUBLIC_URL, INLINE_BITRATE
@@ -206,7 +206,7 @@ async def _download_album(update: Update, album_id: str, quality: str | None = N
                 f"Downloading: {album['artist']} — {album['title']}\n"
                 f"Tracks: {len(album['tracks'])}"
             )
-        except Exception:
+        except TelegramError:
             pass
 
         _progress_start = time.monotonic()
@@ -230,7 +230,7 @@ async def _download_album(update: Update, album_id: str, quality: str | None = N
                 if eta:
                     text += f" · {eta}"
                 await status_msg.edit_text(text)
-            except Exception:
+            except TelegramError:
                 pass
 
         # Step 2: download
@@ -271,7 +271,7 @@ async def _download_album(update: Update, album_id: str, quality: str | None = N
 
         try:
             await status_msg.edit_text(done_text)
-        except Exception:
+        except TelegramError:
             pass
 
         # Step 4: share link (non-critical)
@@ -279,7 +279,7 @@ async def _download_album(update: Update, album_id: str, quality: str | None = N
         if share_url:
             try:
                 await status_msg.edit_text(f"{done_text}\n\n{share_url}")
-            except Exception:
+            except TelegramError:
                 pass
 
 
@@ -300,7 +300,7 @@ async def _download_track(update: Update, track_id: str, quality: str | None = N
 
         try:
             await status_msg.edit_text(f"Downloading: {track['artist']} — {track['title']}")
-        except Exception:
+        except TelegramError:
             pass
 
         # Step 2: download
@@ -322,7 +322,7 @@ async def _download_track(update: Update, track_id: str, quality: str | None = N
 
         try:
             await status_msg.edit_text(done_text)
-        except Exception:
+        except TelegramError:
             pass
 
         share_url = await _try_share_album(
@@ -332,7 +332,7 @@ async def _download_track(update: Update, track_id: str, quality: str | None = N
         if share_url:
             try:
                 await status_msg.edit_text(f"{done_text}\n\n{share_url}")
-            except Exception:
+            except TelegramError:
                 pass
 
 
