@@ -475,9 +475,14 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     query = (update.inline_query.query or "").strip()
     query_lower = query.lower()
-    share_mode = "share" in query_lower
+    share_mode = query_lower in ("s", "share")
 
-    # Search mode: query longer than 2 chars and not "share"
+    # 1-2 chars: user is typing, don't trigger anything heavy
+    if 0 < len(query) <= 2 and not share_mode:
+        await update.inline_query.answer([], cache_time=5)
+        return
+
+    # Search mode: 3+ chars and not share
     if len(query) > 2 and not share_mode:
         try:
             search_data = await tidal.search(query, album_limit=3, track_limit=5)
