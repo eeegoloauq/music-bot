@@ -63,7 +63,7 @@ async def close():
 
 async def _refresh_instances() -> list[str]:
     """Fetch instance list from remote, fall back to builtin."""
-    global _instances, _instances_updated, _dead_instances
+    global _instances, _instances_updated
     _dead_instances.clear()
     try:
         session = await _get_session()

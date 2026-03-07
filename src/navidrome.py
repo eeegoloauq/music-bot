@@ -5,7 +5,7 @@ from urllib.parse import urljoin
 
 import aiohttp
 
-from config import NAVI_LOGIN, NAVI_PASS, NAVI_URL, NAVI_PUBLIC_URL, STREAM_BITRATE, INLINE_BITRATE
+from config import NAVI_LOGIN, NAVI_PASS, NAVI_URL, NAVI_PUBLIC_URL, STREAM_BITRATE
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +106,7 @@ async def stream_song(song_id: str) -> tuple[bytes, str]:
     params = _auth_params()
     params["id"] = song_id
     params["format"] = "mp3"
-    params["maxBitRate"] = INLINE_BITRATE
+    params["maxBitRate"] = STREAM_BITRATE
     session = await _get_session()
     async with session.get(url, params=params, timeout=_STREAM_TIMEOUT) as resp:
         content = await resp.read()

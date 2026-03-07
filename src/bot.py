@@ -5,17 +5,10 @@ import os
 import re
 import shutil
 import time
-from io import BytesIO
-from uuid import uuid4
 
 _RESTART_DELAY = 30  # seconds between automatic restarts after a crash
 
-from telegram import (
-    InlineQueryResultArticle,
-    InlineQueryResultCachedAudio,
-    InputTextMessageContent,
-    Update,
-)
+from telegram import Update
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -27,9 +20,10 @@ from telegram.ext import (
 from telegram.error import NetworkError, TelegramError
 from telegram.request import HTTPXRequest
 
-from config import TG_TOKEN, ALLOWED_USERS, MUSIC_DIR, NAVI_LOGIN, NAVI_PASS, NAVI_PUBLIC_URL, INLINE_BITRATE
+from config import TG_TOKEN, ALLOWED_USERS, MUSIC_DIR, NAVI_LOGIN, NAVI_PASS, NAVI_PUBLIC_URL
 import tidal
 import navidrome
+from inline import handle_inline_query, _DELETE_PREFIX
 
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
@@ -57,16 +51,8 @@ _MUSIC_LINK_RE = re.compile(
     re.IGNORECASE,
 )
 
-# song_id -> telegram file_id
-_file_id_cache: dict[str, str] = {}
-# song_id -> asyncio.Event (signals upload completion)
-_upload_events: dict[str, asyncio.Event] = {}
-# songs that failed upload (too large, unsupported, etc.) — skip retries this session
-_upload_failed: set[str] = set()
-
-_TG_MAX_AUDIO_BYTES = 50 * 1024 * 1024  # Telegram bot upload limit
-# entry_id -> share URL
-_share_url_cache: dict[str, str] = {}
+# album share URL cache for download handler
+_album_share_cache: dict[str, str] = {}
 # serialize album/track downloads so Tidal CDN doesn't throttle
 _download_semaphore = asyncio.Semaphore(1)
 
@@ -154,67 +140,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         music_match = _MUSIC_LINK_RE.search(text)
         if music_match:
             await _resolve_and_download(update, music_match.group(0), text[music_match.end():])
-
-
-_DELETE_PREFIX = "delete:"
-
-
-_AUDIO_EXTS = frozenset({".flac", ".mp3", ".m4a", ".ogg", ".opus", ".aac", ".wv", ".ape"})
-_TIDAL_ALBUM_RE = re.compile(r"tidal\.com/album/(\d+)")
-
-
-def _search_local_albums(query: str, limit: int = 5) -> list[dict]:
-    """Search local music library for albums matching query.
-
-    Returns list of {artist, album, path, tracks, tidal_album_id}.
-    """
-    from mutagen.flac import FLAC
-    from mutagen.mp4 import MP4
-
-    query_lower = query.lower()
-    results = []
-    try:
-        for artist_entry in os.scandir(MUSIC_DIR):
-            if not artist_entry.is_dir() or artist_entry.name.startswith((".", "lost")):
-                continue
-            for album_entry in os.scandir(artist_entry.path):
-                if not album_entry.is_dir():
-                    continue
-                combined = f"{artist_entry.name} {album_entry.name}".lower()
-                if query_lower in combined:
-                    track_count = 0
-                    tidal_album_id = ""
-                    for f in os.scandir(album_entry.path):
-                        if not f.is_file():
-                            continue
-                        ext = os.path.splitext(f.name)[1].lower()
-                        if ext in _AUDIO_EXTS:
-                            track_count += 1
-                            if not tidal_album_id:
-                                try:
-                                    if ext == ".flac":
-                                        comment = next(iter(FLAC(f.path).get("comment") or []), "")
-                                    elif ext == ".m4a":
-                                        comment = next(iter(MP4(f.path).get("\xa9cmt") or []), "")
-                                    else:
-                                        comment = ""
-                                    m = _TIDAL_ALBUM_RE.search(comment)
-                                    if m:
-                                        tidal_album_id = m.group(1)
-                                except Exception:
-                                    pass
-                    results.append({
-                        "artist": artist_entry.name,
-                        "album": album_entry.name,
-                        "path": album_entry.path,
-                        "tracks": track_count,
-                        "tidal_album_id": tidal_album_id,
-                    })
-                    if len(results) >= limit:
-                        return results
-    except OSError:
-        pass
-    return results
 
 
 async def _handle_delete(update: Update, rel_path: str):
@@ -451,11 +376,11 @@ async def _try_share_album(artist: str, title: str) -> str | None:
         album_id = await navidrome.search_album(artist, title)
         if not album_id:
             return None
-        if album_id in _share_url_cache:
-            return _share_url_cache[album_id]
+        if album_id in _album_share_cache:
+            return _album_share_cache[album_id]
         url = await navidrome.create_share(album_id, f"{artist} — {title}")
         if url:
-            _share_url_cache[album_id] = url
+            _album_share_cache[album_id] = url
         return url
     except navidrome.NavidromeAuthError:
         logger.warning("Navidrome share: wrong credentials")
@@ -463,327 +388,6 @@ async def _try_share_album(artist: str, title: str) -> str | None:
     except Exception as e:
         logger.warning("Failed to create share link: %s", e)
         return None
-
-
-async def _get_share_url(entry_id: str, description: str) -> str | None:
-    """Get or create a share URL for an entry, with caching."""
-    if entry_id in _share_url_cache:
-        return _share_url_cache[entry_id]
-    try:
-        url = await navidrome.create_share(entry_id, description)
-        if url:
-            _share_url_cache[entry_id] = url
-        return url
-    except navidrome.NavidromeAuthError:
-        logger.warning("Navidrome share: wrong credentials")
-        return None
-    except Exception as e:
-        logger.warning("Failed to create share link for %s: %s", entry_id, e)
-        return None
-
-
-
-async def _ensure_cached(bot, user_id: int, entry: dict) -> str | None:
-    """Make sure a song is uploaded to Telegram. Returns file_id or None."""
-    song_id = entry["songId"]
-
-    if song_id in _file_id_cache:
-        logger.info("Inline: %s — %s (cached)", entry["artist"], entry["title"])
-        return _file_id_cache[song_id]
-
-    if song_id in _upload_failed:
-        return None
-
-    # another query already uploading this song — wait for it
-    if song_id in _upload_events:
-        try:
-            await asyncio.wait_for(_upload_events[song_id].wait(), timeout=25)
-        except asyncio.TimeoutError:
-            return None
-        return _file_id_cache.get(song_id)
-
-    # we're the first — do the upload
-    event = asyncio.Event()
-    _upload_events[song_id] = event
-    try:
-        t0 = time.monotonic()
-        suffix = entry.get("suffix", "")
-        local_path = os.path.join(MUSIC_DIR, entry.get("path", "")) if entry.get("path") else ""
-        cover_coro = navidrome.get_cover_art(entry["coverArtId"]) if entry.get("coverArtId") else asyncio.sleep(0)
-
-        if suffix in ("m4a", "mp3") and local_path and os.path.exists(local_path):
-            audio_coro = navidrome.download_song(song_id, suffix)
-        else:
-            audio_coro = navidrome.stream_song(song_id)
-
-        audio_result, cover_result = await asyncio.gather(
-            audio_coro, cover_coro, return_exceptions=True,
-        )
-        if isinstance(audio_result, BaseException):
-            raise audio_result
-        audio_data, filename = audio_result
-        t1 = time.monotonic()
-        size_mb = len(audio_data) / (1024 * 1024)
-        dl_speed = size_mb / (t1 - t0) if (t1 - t0) > 0 else 0
-        logger.info("Inline: %s — %s | stream %.1fMB in %.1fs (%.1f MB/s)",
-                     entry["artist"], entry["title"], size_mb, t1 - t0, dl_speed)
-
-        if len(audio_data) > _TG_MAX_AUDIO_BYTES:
-            logger.warning("Inline: %s — %s | too large for Telegram (%dMB), skipping",
-                           entry["artist"], entry["title"], len(audio_data) // (1024 * 1024))
-            _upload_failed.add(song_id)
-            return None
-
-        audio_io = BytesIO(audio_data)
-        audio_io.name = filename
-        thumb_io = None
-        if isinstance(cover_result, bytes) and cover_result:
-            thumb_io = BytesIO(cover_result)
-            thumb_io.name = "cover.jpg"
-
-        msg = await bot.send_audio(
-            chat_id=user_id,
-            audio=audio_io,
-            title=entry["title"],
-            performer=entry["artist"],
-            thumbnail=thumb_io,
-            duration=entry.get("duration") or None,
-            disable_notification=True,
-        )
-        if msg.audio:
-            _file_id_cache[song_id] = msg.audio.file_id
-        else:
-            logger.error("Upload resulted in non-Audio type for %s — %s (id=%s)",
-                         entry["artist"], entry["title"], song_id)
-            await msg.delete()
-            return None
-        await msg.delete()
-        t2 = time.monotonic()
-        up_speed = size_mb / (t2 - t1) if (t2 - t1) > 0 else 0
-        logger.info("Inline: %s — %s | upload %.1fs (%.1f MB/s) | total %.1fs",
-                     entry["artist"], entry["title"], t2 - t1, up_speed, t2 - t0)
-        return _file_id_cache[song_id]
-    except Exception as e:
-        logger.warning("Upload failed for %s — %s (id=%s): %s",
-                       entry["artist"], entry["title"], song_id, e)
-        _upload_failed.add(song_id)
-        return None
-    finally:
-        event.set()
-        _upload_events.pop(song_id, None)
-
-
-async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id if update.effective_user else None
-    if user_id not in ALLOWED_USERS:
-        return
-
-    query = (update.inline_query.query or "").strip()
-    query_lower = query.lower()
-    share_mode = query_lower in ("s", "share")
-
-    now_playing_mode = query_lower in ("np", "now")
-    delete_mode = query_lower == "del" or query_lower.startswith("del ")
-
-    # Delete mode: search local library
-    if delete_mode:
-        del_query = query[3:].strip()
-        if len(del_query) < 2:
-            await update.inline_query.answer([], cache_time=5)
-            return
-        local = _search_local_albums(del_query)
-        if local:
-            # Fetch cover URLs in parallel for albums with tidal IDs
-            cover_urls = {}
-            album_ids = [(item["path"], item["tidal_album_id"])
-                         for item in local if item["tidal_album_id"]]
-            if album_ids:
-                covers = await asyncio.gather(*[
-                    tidal.fetch_cover_url(aid) for _, aid in album_ids
-                ], return_exceptions=True)
-                for (path, _), url in zip(album_ids, covers):
-                    if isinstance(url, str) and url:
-                        cover_urls[path] = url
-
-            results = []
-            for item in local:
-                rel_path = os.path.relpath(item["path"], MUSIC_DIR)
-                results.append(
-                    InlineQueryResultArticle(
-                        id=str(uuid4()),
-                        title=f"{item['album']} ({item['tracks']} tracks)",
-                        description=item["artist"],
-                        thumbnail_url=cover_urls.get(item["path"]) or None,
-                        input_message_content=InputTextMessageContent(
-                            f"{_DELETE_PREFIX}{rel_path}",
-                        ),
-                    )
-                )
-            await update.inline_query.answer(results, cache_time=5)
-        else:
-            await update.inline_query.answer([
-                InlineQueryResultArticle(
-                    id=str(uuid4()),
-                    title="No albums found",
-                    description=f"Nothing matching '{del_query}' in library",
-                    input_message_content=InputTextMessageContent("..."),
-                )
-            ], cache_time=5)
-        return
-
-    # Empty or short non-keyword query: show hint
-    if not query or (0 < len(query) <= 2 and not share_mode and not now_playing_mode):
-        await update.inline_query.answer([
-            InlineQueryResultArticle(
-                id=str(uuid4()),
-                title="Search Tidal",
-                description="np = now playing, s = share, del = delete",
-                input_message_content=InputTextMessageContent("..."),
-            )
-        ], cache_time=30)
-        return
-
-    # Search mode: 3+ chars and not a keyword
-    if not share_mode and not now_playing_mode:
-        try:
-            search_data = await tidal.search(query, album_limit=3, track_limit=5)
-        except Exception as e:
-            logger.warning("Tidal search failed in inline: %s", e)
-            search_data = {"albums": [], "tracks": []}
-
-        results = []
-        for a in search_data["albums"]:
-            results.append(
-                InlineQueryResultArticle(
-                    id=str(uuid4()),
-                    title=f"{a['title']} ({a['tracks']} tracks)",
-                    description=f"{a['artist']} — album",
-                    thumbnail_url=a["cover_url"] or None,
-                    input_message_content=InputTextMessageContent(
-                        f"https://tidal.com/album/{a['id']}",
-                    ),
-                )
-            )
-        for t in search_data["tracks"]:
-            mins, secs = divmod(t["duration"], 60)
-            results.append(
-                InlineQueryResultArticle(
-                    id=str(uuid4()),
-                    title=t["title"],
-                    description=f"{t['artist']} — {t['album']} · {mins}:{secs:02d}",
-                    thumbnail_url=t["cover_url"] or None,
-                    input_message_content=InputTextMessageContent(
-                        f"https://tidal.com/track/{t['id']}",
-                    ),
-                )
-            )
-
-        if not results:
-            results.append(
-                InlineQueryResultArticle(
-                    id=str(uuid4()),
-                    title="No results",
-                    description=f"Nothing found for '{query}'",
-                    input_message_content=InputTextMessageContent(
-                        f"No Tidal results for: {query}"
-                    ),
-                )
-            )
-        await update.inline_query.answer(results, cache_time=30)
-        return
-
-    try:
-        playing = await navidrome.get_now_playing()
-    except navidrome.NavidromeAuthError:
-        logger.warning("Navidrome inline: wrong credentials")
-        await update.inline_query.answer([
-            InlineQueryResultArticle(
-                id=str(uuid4()),
-                title="Navidrome: wrong credentials",
-                description="Check NAVIDROME_USER / NAVIDROME_PASS",
-                input_message_content=InputTextMessageContent(
-                    "Navidrome auth failed — check credentials."
-                ),
-            )
-        ], cache_time=5)
-        return
-    except Exception as e:
-        logger.warning("Navidrome unavailable for getNowPlaying: %s", e)
-        await update.inline_query.answer([
-            InlineQueryResultArticle(
-                id=str(uuid4()),
-                title="Navidrome unavailable",
-                description=str(e),
-                input_message_content=InputTextMessageContent(
-                    f"Navidrome unavailable: {e}"
-                ),
-            )
-        ], cache_time=5)
-        return
-
-    if not playing:
-        await update.inline_query.answer(
-            [InlineQueryResultArticle(
-                id=str(uuid4()),
-                title="Nothing playing",
-                description="No tracks currently playing on Navidrome",
-                input_message_content=InputTextMessageContent("Nothing is playing right now."),
-            )],
-            cache_time=5,
-        )
-        return
-
-    if share_mode:
-        results = []
-        for entry in playing:
-            desc = f"{entry['artist']} — {entry['title']}"
-            share_url = await _get_share_url(entry["songId"], desc)
-            if share_url:
-                results.append(
-                    InlineQueryResultArticle(
-                        id=str(uuid4()),
-                        title=entry["title"],
-                        description=f"{entry['artist']} — {entry['album']}",
-                        input_message_content=InputTextMessageContent(share_url),
-                    )
-                )
-        if not results:
-            results.append(
-                InlineQueryResultArticle(
-                    id=str(uuid4()),
-                    title="Sharing unavailable",
-                    description="NAVIDROME_PUBLIC_URL not configured or share failed",
-                    input_message_content=InputTextMessageContent(
-                        "Sharing is not available."
-                    ),
-                )
-            )
-        await update.inline_query.answer(results, cache_time=5)
-        return
-
-    # Audio mode (default)
-    results = []
-    for entry in playing:
-        file_id = await _ensure_cached(context.bot, user_id, entry)
-        if file_id:
-            results.append(
-                InlineQueryResultCachedAudio(
-                    id=str(uuid4()),
-                    audio_file_id=file_id,
-                )
-            )
-
-    if not results:
-        results.append(
-            InlineQueryResultArticle(
-                id=str(uuid4()),
-                title="Failed to load tracks",
-                description="Could not stream from Navidrome",
-                input_message_content=InputTextMessageContent("Failed to load tracks."),
-            )
-        )
-
-    await update.inline_query.answer(results, cache_time=5)
 
 
 async def _error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:

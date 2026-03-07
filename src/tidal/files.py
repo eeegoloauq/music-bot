@@ -37,6 +37,22 @@ def _comment_value(album_id: str) -> str:
     )
 
 
+def _tidal_cover_url(cover_uuid: str, size: int = 1280) -> str:
+    """Build Tidal CDN cover art URL from a raw cover UUID (with dashes)."""
+    if not cover_uuid:
+        return ""
+    return f"https://resources.tidal.com/images/{cover_uuid.replace('-', '/')}/{size}x{size}.jpg"
+
+
+def _ensure_album_dir(dest_dir: str, artist: str, album_title: str) -> str:
+    """Create Artist/Album directory with Samba-compatible permissions. Returns album_dir path."""
+    album_dir = os.path.join(dest_dir, artist, album_title)
+    os.makedirs(album_dir, exist_ok=True)
+    os.chmod(album_dir, 0o777)
+    os.chmod(os.path.join(dest_dir, artist), 0o777)
+    return album_dir
+
+
 def _find_existing_track(album_dir: str, track: dict) -> str | None:
     """Find an existing audio file for this track in album_dir.
 

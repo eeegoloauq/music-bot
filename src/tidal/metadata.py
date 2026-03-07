@@ -6,6 +6,7 @@ import xml.etree.ElementTree as ET
 import aiohttp
 
 from config import QUALITY
+from tidal.files import _tidal_cover_url
 from tidal.client import (
     _api_get, _get_session, _get_instances, _get_lrclib_sem,
     _dead_instances,
@@ -15,11 +16,17 @@ from tidal.client import (
 logger = logging.getLogger(__name__)
 
 
+def _parse_artists(artists_list: list, fallback: str = "Unknown Artist") -> tuple[str, list[str]]:
+    """Extract main artist string and featured artists list from Tidal artists array."""
+    main = [a["name"] for a in artists_list if a.get("type") == "MAIN"]
+    feat = [a["name"] for a in artists_list if a.get("type") == "FEATURED"]
+    artist = "; ".join(main) if main else fallback
+    return artist, feat
+
+
 async def fetch_album(album_id: str) -> dict:
     data = await _api_get(f"/album/?id={album_id}")
     cover_uuid = data.get("cover", "")
-    if cover_uuid:
-        cover_uuid = cover_uuid.replace("-", "/")
 
     album_artist = data.get("artist", {}).get("name", "Unknown Artist")
 
@@ -27,9 +34,7 @@ async def fetch_album(album_id: str) -> dict:
     for entry in data.get("items", []):
         item = entry.get("item", entry)
         artists_list = item.get("artists", [])
-        main_artists = [a["name"] for a in artists_list if a.get("type") == "MAIN"]
-        feat_artists = [a["name"] for a in artists_list if a.get("type") == "FEATURED"]
-        track_artist = "; ".join(main_artists) if main_artists else album_artist
+        track_artist, feat_artists = _parse_artists(artists_list, album_artist)
 
         tracks.append({
             "id": str(item.get("id", "")),
@@ -221,10 +226,8 @@ async def fetch_single_track(track_id: str) -> tuple[dict, dict]:
         album_ctx = await fetch_album(album_id)
 
     artists_list = data.get("artists", [])
-    main_artists = [a["name"] for a in artists_list if a.get("type") == "MAIN"]
-    feat_artists = [a["name"] for a in artists_list if a.get("type") == "FEATURED"]
     album_artist = album_ctx.get("artist", "Unknown Artist")
-    track_artist = "; ".join(main_artists) if main_artists else album_artist
+    track_artist, feat_artists = _parse_artists(artists_list, album_artist)
 
     track_info = {
         "id": str(data.get("id", track_id)),
@@ -265,23 +268,14 @@ async def search(query: str, album_limit: int = 3, track_limit: int = 5) -> dict
         logger.warning("Tidal search failed for '%s': %s", query, e)
         return {"albums": [], "tracks": []}
 
-    def _cover_url(cover_uuid: str) -> str:
-        if not cover_uuid:
-            return ""
-        return f"https://resources.tidal.com/images/{cover_uuid.replace('-', '/')}/320x320.jpg"
-
-    def _main_artist(artists: list) -> str:
-        main = [a["name"] for a in artists if a.get("type") == "MAIN"]
-        return "; ".join(main) if main else "Unknown"
-
     albums = []
     for item in data.get("albums", {}).get("items", [])[:album_limit]:
         albums.append({
             "id": str(item["id"]),
             "title": item.get("title", "Unknown"),
-            "artist": _main_artist(item.get("artists", [])),
+            "artist": _parse_artists(item.get("artists", []))[0],
             "tracks": item.get("numberOfTracks", 0),
-            "cover_url": _cover_url(item.get("cover", "")),
+            "cover_url": _tidal_cover_url(item.get("cover", ""), 320),
         })
 
     tracks = []
@@ -290,10 +284,10 @@ async def search(query: str, album_limit: int = 3, track_limit: int = 5) -> dict
         tracks.append({
             "id": str(item["id"]),
             "title": item.get("title", "Unknown"),
-            "artist": _main_artist(item.get("artists", [])),
+            "artist": _parse_artists(item.get("artists", []))[0],
             "album": album_data.get("title", ""),
             "duration": item.get("duration", 0),
-            "cover_url": _cover_url(album_data.get("cover", "")),
+            "cover_url": _tidal_cover_url(album_data.get("cover", ""), 320),
         })
 
     return {"albums": albums, "tracks": tracks}
@@ -310,9 +304,9 @@ async def fetch_cover_url(album_id: str, size: int = 320) -> str:
             if resp.status != 200:
                 return ""
             data = await resp.json(content_type=None)
-        cover = data.get("cover", "")
-        if cover:
-            return f"https://resources.tidal.com/images/{cover.replace('-', '/')}/{size}x{size}.jpg"
+        result = _tidal_cover_url(data.get("cover", ""), size)
+        if result:
+            return result
     except Exception:
         pass
     return ""
