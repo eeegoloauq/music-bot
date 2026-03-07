@@ -113,7 +113,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Send a Tidal link or any music link (Spotify, Apple Music, Deezer, etc.)\n\n"
         "<b>Inline mode</b>\n"
         f"<code>@{bot_me.username}</code> — send now playing as audio\n"
-        f"<code>@{bot_me.username} share</code> — send share link with cover art\n\n"
+        f"<code>@{bot_me.username} share</code> — send share link with cover art\n"
+        f"<code>@{bot_me.username} song name</code> — search Tidal and download\n\n"
         "<b>Commands</b>\n"
         "/scan — trigger library rescan",
         parse_mode="HTML",
@@ -472,8 +473,58 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
     if user_id not in ALLOWED_USERS:
         return
 
-    query = (update.inline_query.query or "").strip().lower()
-    share_mode = "share" in query
+    query = (update.inline_query.query or "").strip()
+    query_lower = query.lower()
+    share_mode = "share" in query_lower
+
+    # Search mode: query longer than 2 chars and not "share"
+    if len(query) > 2 and not share_mode:
+        try:
+            search_data = await tidal.search(query, album_limit=3, track_limit=5)
+        except Exception as e:
+            logger.warning("Tidal search failed in inline: %s", e)
+            search_data = {"albums": [], "tracks": []}
+
+        results = []
+        for a in search_data["albums"]:
+            results.append(
+                InlineQueryResultArticle(
+                    id=str(uuid4()),
+                    title=f"{a['title']} ({a['tracks']} tracks)",
+                    description=f"{a['artist']} — album",
+                    thumbnail_url=a["cover_url"] or None,
+                    input_message_content=InputTextMessageContent(
+                        f"https://tidal.com/album/{a['id']}",
+                    ),
+                )
+            )
+        for t in search_data["tracks"]:
+            mins, secs = divmod(t["duration"], 60)
+            results.append(
+                InlineQueryResultArticle(
+                    id=str(uuid4()),
+                    title=t["title"],
+                    description=f"{t['artist']} — {t['album']} · {mins}:{secs:02d}",
+                    thumbnail_url=t["cover_url"] or None,
+                    input_message_content=InputTextMessageContent(
+                        f"https://tidal.com/track/{t['id']}",
+                    ),
+                )
+            )
+
+        if not results:
+            results.append(
+                InlineQueryResultArticle(
+                    id=str(uuid4()),
+                    title="No results",
+                    description=f"Nothing found for '{query}'",
+                    input_message_content=InputTextMessageContent(
+                        f"No Tidal results for: {query}"
+                    ),
+                )
+            )
+        await update.inline_query.answer(results, cache_time=30)
+        return
 
     try:
         playing = await navidrome.get_now_playing()
