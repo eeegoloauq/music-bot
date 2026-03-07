@@ -99,7 +99,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"<b>Commands:</b>\n"
         f"/help — show all features\n"
         f"/scan — trigger library rescan\n\n"
-        f"Send a Tidal/Monochrome link to download.\n"
+        f"Send a Tidal link or any music link (Spotify, Apple Music, etc.) to download.\n"
         f"Type <code>@{bot_me.username}</code> in any chat to share now playing.",
         parse_mode="HTML",
     )
@@ -110,7 +110,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bot_me = await context.bot.get_me()
     await update.message.reply_text(
         "<b>Download</b>\n"
-        "Send a tidal.com or monochrome album/track link.\n\n"
+        "Send a Tidal link or any music link (Spotify, Apple Music, Deezer, etc.)\n\n"
         "<b>Inline mode</b>\n"
         f"<code>@{bot_me.username}</code> — send now playing as audio\n"
         f"<code>@{bot_me.username} share</code> — send share link with cover art\n\n"
