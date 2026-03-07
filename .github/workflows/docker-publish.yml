@@ -38,6 +38,17 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: .
+          load: true
+          tags: ${{ env.IMAGE_NAME }}:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test
+        run: docker run --rm ${{ env.IMAGE_NAME }}:test python3 -c "from bot import main; print('Smoke test passed')"
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
           push: true
           provenance: false
           tags: ${{ steps.meta.outputs.tags }}
