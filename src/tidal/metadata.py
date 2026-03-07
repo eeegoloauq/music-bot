@@ -243,6 +243,62 @@ async def fetch_single_track(track_id: str) -> tuple[dict, dict]:
     return track_info, album_ctx
 
 
+async def search(query: str, album_limit: int = 3, track_limit: int = 5) -> dict:
+    """Search Tidal for albums and tracks.
+
+    Returns {"albums": [...], "tracks": [...]}.
+    Each album: {id, title, artist, tracks, cover_url}
+    Each track: {id, title, artist, album, duration, cover_url}
+    """
+    session = await _get_session()
+    url = f"{TIDAL_API_URL}/search"
+    params = {"query": query, "countryCode": "US", "limit": str(max(album_limit, track_limit))}
+    headers = {"x-tidal-token": TIDAL_TOKEN}
+    try:
+        async with session.get(url, headers=headers, params=params,
+                               timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            if resp.status != 200:
+                logger.warning("Tidal search returned HTTP %d for '%s'", resp.status, query)
+                return {"albums": [], "tracks": []}
+            data = await resp.json(content_type=None)
+    except Exception as e:
+        logger.warning("Tidal search failed for '%s': %s", query, e)
+        return {"albums": [], "tracks": []}
+
+    def _cover_url(cover_uuid: str) -> str:
+        if not cover_uuid:
+            return ""
+        return f"https://resources.tidal.com/images/{cover_uuid.replace('-', '/')}/320x320.jpg"
+
+    def _main_artist(artists: list) -> str:
+        main = [a["name"] for a in artists if a.get("type") == "MAIN"]
+        return "; ".join(main) if main else "Unknown"
+
+    albums = []
+    for item in data.get("albums", {}).get("items", [])[:album_limit]:
+        albums.append({
+            "id": str(item["id"]),
+            "title": item.get("title", "Unknown"),
+            "artist": _main_artist(item.get("artists", [])),
+            "tracks": item.get("numberOfTracks", 0),
+            "cover_url": _cover_url(item.get("cover", "")),
+        })
+
+    tracks = []
+    for item in data.get("tracks", {}).get("items", [])[:track_limit]:
+        album_data = item.get("album", {})
+        tracks.append({
+            "id": str(item["id"]),
+            "title": item.get("title", "Unknown"),
+            "artist": _main_artist(item.get("artists", [])),
+            "album": album_data.get("title", ""),
+            "duration": item.get("duration", 0),
+            "cover_url": _cover_url(album_data.get("cover", "")),
+        })
+
+    return {"albums": albums, "tracks": tracks}
+
+
 async def fetch_lyrics(track_name: str, artist_name: str, album_name: str,
                        duration: int) -> dict | None:
     """Fetch lyrics from lrclib.net. Returns dict with plainLyrics/syncedLyrics, or None."""
