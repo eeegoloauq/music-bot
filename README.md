@@ -3,7 +3,7 @@
 [![GitHub Release](https://img.shields.io/github/v/release/eeegoloauq/music-bot)](https://github.com/eeegoloauq/music-bot/releases)
 [![Docker Image Size](https://ghcr-badge.egpl.dev/eeegoloauq/music-bot/size)](https://github.com/eeegoloauq/music-bot/pkgs/container/music-bot)
 
-Telegram bot for [Navidrome](https://www.navidrome.org/) that downloads music from Tidal via [Monochrome](https://monochrome.samidy.com), organizes your library, and shares what you're listening to.
+Telegram bot that builds and manages a [Navidrome](https://www.navidrome.org/) music library — download from Tidal, Spotify, Apple Music and more, search and delete albums, share now playing.
 
 <p align="center">
   <img src=".github/screenshot.png" width="300" alt="Bot demo">
@@ -14,8 +14,11 @@ Telegram bot for [Navidrome](https://www.navidrome.org/) that downloads music fr
 ## Features
 
 - **Album & track downloads** — send a Tidal, Spotify, Apple Music, Deezer, YouTube Music, SoundCloud, or Amazon Music link, get FLACs with full metadata saved to your library
-- **Now Playing** — inline mode sends the currently playing track as audio
-- **Share links** — inline `share` mode sends a Navidrome share link with cover art preview
+- **Inline mode** — type `@yourbotname` in any chat:
+  - **Now playing** — sends the currently playing track as audio
+  - **Share** — sends a Navidrome share link with cover art preview
+  - **Search** — find albums and tracks on Tidal, tap to download
+  - **Delete** — remove albums from your library
 - **Auto-share after download** — share link appended to the success message
 - **Private** — only users listed in `ALLOWED_USERS` can interact with the bot
 
@@ -92,8 +95,10 @@ To enable share links, set `NAVIDROME_PUBLIC_URL` and enable sharing in Navidrom
 
 - Send a `tidal.com/album/...` or `tidal.com/track/...` link to download
 - Send a Spotify, Apple Music, Deezer, YouTube Music, SoundCloud, or Amazon Music link — it will be resolved to Tidal via [song.link](https://song.link)
-- Type `@yourbotname` in any chat — sends currently playing track as audio
-- Type `@yourbotname share` — sends a Navidrome share link with cover art embed
+- `@yourbotname` — sends currently playing track as audio
+- `@yourbotname share` — sends a Navidrome share link with cover art embed
+- `@yourbotname song name` — search Tidal, tap a result to download
+- `@yourbotname del album name` — find and delete an album from your library
 
 ## Tags
 
