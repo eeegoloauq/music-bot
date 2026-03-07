@@ -3,7 +3,7 @@
 [![GitHub Release](https://img.shields.io/github/v/release/eeegoloauq/music-bot)](https://github.com/eeegoloauq/music-bot/releases)
 [![Docker Image Size](https://ghcr-badge.egpl.dev/eeegoloauq/music-bot/size)](https://github.com/eeegoloauq/music-bot/pkgs/container/music-bot)
 
-Telegram bot that builds and manages a [Navidrome](https://www.navidrome.org/) music library — download from Tidal, Spotify, Apple Music and more, search and delete albums, share now playing.
+Telegram bot that builds and manages a [Navidrome](https://www.navidrome.org/) music library — download from Tidal (via [Monochrome](https://monochrome.samidy.com)), Spotify, Apple Music and more, search and delete albums, share now playing.
 
 <p align="center">
   <img src=".github/screenshot.png" width="300" alt="Bot demo">
