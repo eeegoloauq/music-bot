@@ -10,20 +10,31 @@ from tidal.metadata import fetch_lyrics
 logger = logging.getLogger(__name__)
 
 
+def _format_artist(track: dict, album: dict) -> str:
+    """Build display artist string with featured artists."""
+    artist_str = track.get("artist", album.get("artist", "Unknown"))
+    feat = track.get("featuredArtists", [])
+    if feat:
+        artist_str += " feat. " + ", ".join(feat)
+    return artist_str
+
+
+def _format_title(track: dict) -> str:
+    """Build display title with version suffix."""
+    title_str = track["title"]
+    if track.get("version"):
+        title_str += f" ({track['version']})"
+    return title_str
+
+
 def _write_tags(filepath: str, track: dict, album: dict,
                 stream_meta: dict | None, cover_data: bytes | None,
                 lyrics: dict | None = None):
     """Write Vorbis Comment tags to a FLAC file. Only writes missing tags."""
     try:
         audio = FLAC(filepath)
-        artist_str = track.get("artist", album.get("artist", "Unknown"))
-        feat = track.get("featuredArtists", [])
-        if feat:
-            artist_str += " feat. " + ", ".join(feat)
-
-        title_str = track["title"]
-        if track.get("version"):
-            title_str += f" ({track['version']})"
+        artist_str = _format_artist(track, album)
+        title_str = _format_title(track)
 
         disc = track.get("discNumber", 1)
         num = track.get("trackNumber", 0)
@@ -105,14 +116,8 @@ def _write_m4a_tags(filepath: str, track: dict, album: dict,
     try:
         audio = MP4(filepath)
 
-        artist_str = track.get("artist", album.get("artist", "Unknown"))
-        feat = track.get("featuredArtists", [])
-        if feat:
-            artist_str += " feat. " + ", ".join(feat)
-
-        title_str = track["title"]
-        if track.get("version"):
-            title_str += f" ({track['version']})"
+        artist_str = _format_artist(track, album)
+        title_str = _format_title(track)
 
         disc = track.get("discNumber", 1)
         num = track.get("trackNumber", 0)

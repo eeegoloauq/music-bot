@@ -7,10 +7,10 @@ from urllib.parse import urlparse
 
 import aiohttp
 
-from config import QUALITY, WRITE_TAGS
+from config import WRITE_TAGS
 from tidal.client import _get_session
 from tidal.metadata import fetch_album, fetch_track_url, fetch_lyrics
-from tidal.files import _find_existing_track, _sanitize, _track_prefix
+from tidal.files import _find_existing_track, _sanitize, _track_prefix, _ensure_album_dir, _tidal_cover_url
 from tidal.tagger import _write_tags, _write_m4a_tags, _patch_missing_tags
 
 logger = logging.getLogger(__name__)
@@ -137,7 +137,7 @@ async def _download_cover(cover_uuid: str, album_dir: str) -> bytes | None:
     if os.path.exists(cover_path):
         with open(cover_path, "rb") as f:
             return f.read()
-    cover_url = f"https://resources.tidal.com/images/{cover_uuid}/1280x1280.jpg"
+    cover_url = _tidal_cover_url(cover_uuid)
     session = await _get_session()
     try:
         async with session.get(cover_url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
@@ -157,10 +157,7 @@ async def download_single_track(track: dict, album_ctx: dict, dest_dir: str,
     """Download and tag a single track. Returns (filepath, was_downloaded, format_label)."""
     artist = _sanitize(album_ctx.get("artist", track["artist"]))
     album_title = _sanitize(album_ctx.get("title", "Singles"))
-    album_dir = os.path.join(dest_dir, artist, album_title)
-    os.makedirs(album_dir, exist_ok=True)
-    os.chmod(album_dir, 0o777)
-    os.chmod(os.path.join(dest_dir, artist), 0o777)
+    album_dir = _ensure_album_dir(dest_dir, artist, album_title)
 
     existing = _find_existing_track(album_dir, track)
     if existing:
@@ -222,10 +219,7 @@ async def download_album(
         album = await fetch_album(album_id)
     artist = _sanitize(album["artist"])
     title = _sanitize(album["title"])
-    album_dir = os.path.join(dest_dir, artist, title)
-    os.makedirs(album_dir, exist_ok=True)
-    os.chmod(album_dir, 0o777)
-    os.chmod(os.path.join(dest_dir, artist), 0o777)
+    album_dir = _ensure_album_dir(dest_dir, artist, title)
 
     cover_data = await _download_cover(album.get("cover_uuid", ""), album_dir)
 
