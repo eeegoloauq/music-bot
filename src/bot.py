@@ -87,7 +87,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"/help — show all features\n"
         f"/scan — trigger library rescan\n\n"
         f"Send a Tidal link or any music link (Spotify, Apple Music, etc.) to download.\n"
-        f"Type <code>@{bot_me.username}</code> in any chat to share now playing.",
+        f"Type <code>@{bot_me.username}</code> in any chat for inline mode.",
         parse_mode="HTML",
     )
 
@@ -99,8 +99,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<b>Download</b>\n"
         "Send a Tidal link or any music link (Spotify, Apple Music, Deezer, etc.)\n\n"
         "<b>Inline mode</b>\n"
-        f"<code>@{bot_me.username}</code> — send now playing as audio\n"
-        f"<code>@{bot_me.username} share</code> — send share link with cover art\n"
+        f"<code>@{bot_me.username} np</code> — send now playing as audio\n"
+        f"<code>@{bot_me.username} s</code> — send share link with cover art\n"
         f"<code>@{bot_me.username} song name</code> — search Tidal and download\n"
         f"<code>@{bot_me.username} del name</code> — delete album from library\n\n"
         "<b>Commands</b>\n"

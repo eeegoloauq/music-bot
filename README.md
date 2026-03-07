@@ -57,7 +57,7 @@ If Navidrome is in the same compose stack, use `NAVIDROME_URL=http://navidrome:4
 
 ```bash
 pip install -r requirements.txt
-sudo apt install ffmpeg  # required for MP3 transcoding
+sudo apt install ffmpeg  # required for hi-res FLAC remuxing
 cp .env.example .env  # fill in values
 python src/bot.py
 ```
@@ -93,12 +93,18 @@ To enable share links, set `NAVIDROME_PUBLIC_URL` and enable sharing in Navidrom
 
 ## Usage
 
-- Send a `tidal.com/album/...` or `tidal.com/track/...` link to download
-- Send a Spotify, Apple Music, Deezer, YouTube Music, SoundCloud, or Amazon Music link — it will be resolved to Tidal via [song.link](https://song.link)
-- `@yourbotname` — sends currently playing track as audio
-- `@yourbotname share` — sends a Navidrome share link with cover art embed
-- `@yourbotname song name` — search Tidal, tap a result to download
-- `@yourbotname del album name` — find and delete an album from your library
+**Download** — send a Tidal link or any music link (Spotify, Apple Music, Deezer, etc.)
+
+**Inline mode:**
+
+| Query | Action |
+|---|---|
+| `@bot np` | Send now playing as audio |
+| `@bot s` | Send share link with cover art |
+| `@bot song name` | Search Tidal and download |
+| `@bot del name` | Delete album from library |
+
+**Commands:** `/scan` — trigger library rescan
 
 ## Tags
 
