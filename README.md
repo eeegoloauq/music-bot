@@ -1,5 +1,8 @@
 # Music Bot
 
+[![GitHub Release](https://img.shields.io/github/v/release/eeegoloauq/music-bot)](https://github.com/eeegoloauq/music-bot/releases)
+[![Docker Image Size](https://ghcr-badge.egpl.dev/eeegoloauq/music-bot/size)](https://github.com/eeegoloauq/music-bot/pkgs/container/music-bot)
+
 Telegram bot for [Navidrome](https://www.navidrome.org/) that downloads music from Tidal via [Monochrome](https://monochrome.samidy.com), organizes your library, and shares what you're listening to.
 
 <p align="center">
