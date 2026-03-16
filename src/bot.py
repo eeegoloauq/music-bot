@@ -23,7 +23,7 @@ from telegram.request import HTTPXRequest
 from config import TG_TOKEN, ALLOWED_USERS, MUSIC_DIR, NAVI_LOGIN, NAVI_PASS, NAVI_PUBLIC_URL
 import tidal
 import navidrome
-from inline import handle_inline_query, _DELETE_PREFIX
+from inline import handle_inline_query, _DELETE_PREFIX, add_recent_download
 
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
@@ -98,12 +98,14 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bot_me = await context.bot.get_me()
     await update.message.reply_text(
         "<b>Download</b>\n"
-        "Send a Tidal link or any music link (Spotify, Apple Music, Deezer, etc.)\n\n"
+        "Send a Tidal, Spotify, Apple Music, Deezer, Shazam or other music link.\n\n"
         "<b>Inline mode</b>\n"
-        f"<code>@{bot_me.username} np</code> — send now playing as audio\n"
-        f"<code>@{bot_me.username} s</code> — send share link with cover art\n"
-        f"<code>@{bot_me.username} song name</code> — search Tidal and download\n"
-        f"<code>@{bot_me.username} del name</code> — delete album from library\n\n"
+        f"<code>@{bot_me.username} np</code> — now playing as audio\n"
+        f"<code>@{bot_me.username} s</code> — share link for current track\n"
+        f"<code>@{bot_me.username} l</code> — lyrics for current track\n"
+        f"<code>@{bot_me.username} song name</code> — search Tidal\n"
+        f"<code>@{bot_me.username} lib name</code> — search library\n"
+        f"<code>@{bot_me.username} del name</code> — delete album\n\n"
         "<b>Commands</b>\n"
         "/scan — trigger library rescan",
         parse_mode="HTML",
@@ -296,6 +298,9 @@ async def _download_album(update: Update, album_id: str, quality: str | None = N
                     details += f" +{len(result['failed']) - 3} more"
                 parts.append(f"{len(result['failed'])} failed: {details}")
             done_text = f"Done! {album['artist']} — {album['title']}\n" + ", ".join(parts) + "."
+
+        # Track recent download for inline hint
+        add_recent_download(album_id, album["artist"], album["title"], album.get("cover_uuid", ""))
 
         # Step 3: scan (non-critical)
         if result["downloaded"] > 0:
