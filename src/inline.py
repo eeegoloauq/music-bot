@@ -271,7 +271,7 @@ async def _inline_hint(update: Update):
         cache_time=30,
         is_personal=True,
         button=InlineQueryResultsButton(
-            text="np · s · l · lib · del · search — tap for help",
+            text="np · s · l · lib · del — or just type to search",
             start_parameter="help",
         ),
     )
@@ -522,7 +522,7 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
     query = (update.inline_query.query or "").strip()
     query_lower = query.lower()
 
-    # Prefix-based mode dispatch
+    # Prefix modes (space-delimited, checked first)
     if query_lower == "del" or query_lower.startswith("del "):
         return await _inline_delete(update, query[3:].strip())
 
@@ -532,29 +532,31 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
             return await _inline_lib_search(update, lib_query)
         return await update.inline_query.answer([], cache_time=3, is_personal=True)
 
-    if query_lower.startswith("search "):
-        search_query = query[7:].strip()
-        if len(search_query) >= 2:
-            return await _inline_search(update, search_query)
-        return await update.inline_query.answer([], cache_time=3, is_personal=True)
+    # Short exact keywords (1-2 chars, never collide with 3+ char search)
+    if query_lower in ("n", "np"):
+        return await _np_or_share_or_lyrics(update, context, "np")
+    if query_lower == "s":
+        return await _np_or_share_or_lyrics(update, context, "share")
+    if query_lower == "l":
+        return await _np_or_share_or_lyrics(update, context, "lyrics")
 
-    # Modes that need Navidrome now-playing data
-    np_mode = query_lower in ("np", "now")
-    share_mode = query_lower in ("s", "share")
-    lyrics_mode = query_lower in ("l", "lyrics")
+    # 3+ chars = Tidal search (standard inline bot behavior)
+    if len(query) >= 3:
+        return await _inline_search(update, query)
 
-    if not (np_mode or share_mode or lyrics_mode):
-        return await _inline_hint(update)
+    # Empty or 1-2 chars with no keyword match = hint
+    return await _inline_hint(update)
 
+
+async def _np_or_share_or_lyrics(update: Update, context: ContextTypes.DEFAULT_TYPE, mode: str):
+    """Dispatch np/share/lyrics modes — all need Navidrome now-playing data."""
     playing = await _get_now_playing_cached()
     if not playing:
         return await update.inline_query.answer([], cache_time=3, is_personal=True)
-
-    # Only use the first (currently playing) track
     playing = playing[:1]
 
-    if share_mode:
+    if mode == "share":
         return await _inline_share(update, playing)
-    if lyrics_mode:
+    if mode == "lyrics":
         return await _inline_lyrics(update, playing)
     return await _inline_now_playing(update, context, playing)
