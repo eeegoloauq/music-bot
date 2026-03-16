@@ -21,8 +21,11 @@ import navidrome
 
 logger = logging.getLogger(__name__)
 
+# Bounded caches — evict oldest when full
+_CACHE_MAX = 2000
+
 # song_id -> telegram file_id
-_file_id_cache: dict[str, str] = {}
+_file_id_cache: OrderedDict[str, str] = OrderedDict()
 # song_id -> asyncio.Event (signals upload completion)
 _upload_events: dict[str, asyncio.Event] = {}
 # songs that failed upload — skip retries for 1 hour
@@ -31,7 +34,15 @@ _UPLOAD_FAILED_TTL = 3600  # seconds
 
 _TG_MAX_AUDIO_BYTES = 50 * 1024 * 1024  # Telegram bot upload limit
 # entry_id -> share URL
-_share_url_cache: dict[str, str] = {}
+_share_url_cache: OrderedDict[str, str] = OrderedDict()
+
+
+def _cache_set(cache: OrderedDict, key: str, value) -> None:
+    """Set a value in a bounded OrderedDict cache."""
+    cache[key] = value
+    cache.move_to_end(key)
+    while len(cache) > _CACHE_MAX:
+        cache.popitem(last=False)
 
 # Recent downloads for empty inline query (populated from bot.py after downloads)
 _MAX_RECENT = 8
@@ -156,7 +167,7 @@ async def _get_share_url(entry_id: str, description: str) -> str | None:
     try:
         url = await navidrome.create_share(entry_id, description)
         if url:
-            _share_url_cache[entry_id] = url
+            _cache_set(_share_url_cache, entry_id, url)
         return url
     except navidrome.NavidromeAuthError:
         logger.warning("Navidrome share: wrong credentials")
@@ -234,7 +245,7 @@ async def _ensure_cached(bot, user_id: int, entry: dict) -> str | None:
             disable_notification=True,
         )
         if msg.audio:
-            _file_id_cache[song_id] = msg.audio.file_id
+            _cache_set(_file_id_cache, song_id, msg.audio.file_id)
         else:
             logger.error("Upload resulted in non-Audio type for %s — %s (id=%s)",
                          entry["artist"], entry["title"], song_id)
