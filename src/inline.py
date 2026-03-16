@@ -10,6 +10,7 @@ from uuid import uuid4
 from telegram import (
     InlineQueryResultArticle,
     InlineQueryResultCachedAudio,
+    InlineQueryResultsButton,
     InputTextMessageContent,
     Update,
 )
@@ -44,9 +45,6 @@ def _cache_set(cache: OrderedDict, key: str, value) -> None:
     while len(cache) > _CACHE_MAX:
         cache.popitem(last=False)
 
-# Recent downloads for empty inline query (populated from bot.py after downloads)
-_MAX_RECENT = 8
-_recent_downloads: OrderedDict[str, dict] = OrderedDict()  # album_id -> info dict
 
 _DELETE_PREFIX = "delete:"
 
@@ -58,15 +56,6 @@ _np_cache: list[dict] = []
 _np_cache_time: float = 0
 _NP_CACHE_TTL = 2  # seconds
 
-
-def add_recent_download(album_id: str, artist: str, title: str, cover_uuid: str = ""):
-    """Called from bot.py after successful album/track download."""
-    _recent_downloads[album_id] = {
-        "artist": artist, "title": title, "cover_uuid": cover_uuid,
-    }
-    _recent_downloads.move_to_end(album_id)
-    while len(_recent_downloads) > _MAX_RECENT:
-        _recent_downloads.popitem(last=False)
 
 
 def _read_lyrics_from_file(filepath: str) -> str | None:
@@ -268,39 +257,22 @@ async def _ensure_cached(bot, user_id: int, entry: dict) -> str | None:
 
 
 async def _inline_hint(update: Update):
-    """Show mode hints + recent downloads for empty/short queries."""
-    results = [
-        InlineQueryResultArticle(
-            id=str(uuid4()),
-            title="np — now playing | s — share | l — lyrics",
-            description="lib <name> — library | del <name> — delete | <name> — search Tidal",
-            input_message_content=InputTextMessageContent(
-                "np = now playing, s = share, l = lyrics, lib = library, del = delete"
-            ),
+    """Show help button above empty results for empty/short queries."""
+    await update.inline_query.answer(
+        [],
+        cache_time=30,
+        is_personal=True,
+        button=InlineQueryResultsButton(
+            text="np / s / l / lib / del / search — tap for help",
+            start_parameter="help",
         ),
-    ]
-    # Append recent downloads (newest first)
-    from tidal.files import _tidal_cover_url
-    for album_id, info in reversed(_recent_downloads.items()):
-        cover_url = _tidal_cover_url(info["cover_uuid"], 320) if info.get("cover_uuid") else None
-        results.append(
-            InlineQueryResultArticle(
-                id=str(uuid4()),
-                title=info["title"],
-                description=info["artist"],
-                thumbnail_url=cover_url,
-                input_message_content=InputTextMessageContent(
-                    f"https://tidal.com/album/{album_id}",
-                ),
-            )
-        )
-    await update.inline_query.answer(results, cache_time=3)
+    )
 
 
 async def _inline_delete(update: Update, del_query: str):
     """Search local library and show albums for deletion."""
     if len(del_query) < 2:
-        await update.inline_query.answer([], cache_time=5)
+        await update.inline_query.answer([], cache_time=5, is_personal=True)
         return
     local = await asyncio.to_thread(_search_local_albums, del_query)
     if local:
@@ -329,16 +301,9 @@ async def _inline_delete(update: Update, del_query: str):
                     ),
                 )
             )
-        await update.inline_query.answer(results, cache_time=5)
+        await update.inline_query.answer(results, cache_time=5, is_personal=True)
     else:
-        await update.inline_query.answer([
-            InlineQueryResultArticle(
-                id=str(uuid4()),
-                title="No albums found",
-                description=f"Nothing matching '{del_query}' in library",
-                input_message_content=InputTextMessageContent("..."),
-            )
-        ], cache_time=5)
+        await update.inline_query.answer([], cache_time=5, is_personal=True)
 
 
 async def _inline_search(update: Update, query: str):
@@ -392,21 +357,12 @@ async def _inline_search(update: Update, query: str):
 
     # Signal more results available if we got a full page
     next_offset = ""
-    if len(albums) >= page_albums or len(tracks) >= page_tracks:
+    if len(albums) >= page_albums and len(tracks) >= page_tracks:
         next_offset = str(offset + page_size)
 
-    if not results and offset == 0:
-        results.append(
-            InlineQueryResultArticle(
-                id=str(uuid4()),
-                title="No results",
-                description=f"Nothing found for '{query}'",
-                input_message_content=InputTextMessageContent(
-                    f"No Tidal results for: {query}"
-                ),
-            )
-        )
-    await update.inline_query.answer(results, cache_time=30, next_offset=next_offset)
+    await update.inline_query.answer(
+        results, cache_time=30, next_offset=next_offset, is_personal=True,
+    )
 
 
 async def _inline_lyrics(update: Update, playing: list[dict]):
@@ -446,36 +402,21 @@ async def _inline_lyrics(update: Update, playing: list[dict]):
                     f"{entry['artist']} — {entry['title']}\n\n{plain}",
                 ),
             )
-        ], cache_time=10)
+        ], cache_time=10, is_personal=True)
     else:
-        await update.inline_query.answer([
-            InlineQueryResultArticle(
-                id=str(uuid4()),
-                title="No lyrics found",
-                description=f"{entry['artist']} — {entry['title']}",
-                input_message_content=InputTextMessageContent(
-                    f"No lyrics found for: {entry['artist']} — {entry['title']}"
-                ),
-            )
-        ], cache_time=10)
+        await update.inline_query.answer([], cache_time=10, is_personal=True)
 
 
 async def _inline_lib_search(update: Update, query: str):
     """Search Navidrome library and return results with share links."""
     try:
-        root = await navidrome._api_json("rest/search3", {
-            "query": query,
-            "albumCount": "5",
-            "songCount": "5",
-            "artistCount": "0",
-        })
+        search_result = await navidrome.search(query)
     except Exception as e:
         logger.warning("Navidrome library search failed: %s", e)
-        await update.inline_query.answer([], cache_time=5)
+        await update.inline_query.answer([], cache_time=5, is_personal=True)
         return
 
     results = []
-    search_result = root.get("searchResult3", {})
 
     for album in (search_result.get("album") or []):
         if isinstance(album, dict):
@@ -506,16 +447,7 @@ async def _inline_lib_search(update: Update, query: str):
                 )
             )
 
-    if not results:
-        results.append(
-            InlineQueryResultArticle(
-                id=str(uuid4()),
-                title="Nothing in library",
-                description=f"No results for '{query}'",
-                input_message_content=InputTextMessageContent("..."),
-            )
-        )
-    await update.inline_query.answer(results, cache_time=15)
+    await update.inline_query.answer(results, cache_time=15, is_personal=True)
 
 
 async def _inline_share(update: Update, playing: list[dict]):
@@ -533,18 +465,7 @@ async def _inline_share(update: Update, playing: list[dict]):
                     input_message_content=InputTextMessageContent(share_url),
                 )
             )
-    if not results:
-        results.append(
-            InlineQueryResultArticle(
-                id=str(uuid4()),
-                title="Sharing unavailable",
-                description="NAVIDROME_PUBLIC_URL not configured or share failed",
-                input_message_content=InputTextMessageContent(
-                    "Sharing is not available."
-                ),
-            )
-        )
-    await update.inline_query.answer(results, cache_time=5)
+    await update.inline_query.answer(results, cache_time=5, is_personal=True)
 
 
 async def _inline_now_playing(update: Update, context: ContextTypes.DEFAULT_TYPE,
@@ -568,7 +489,7 @@ async def _inline_now_playing(update: Update, context: ContextTypes.DEFAULT_TYPE
             uncached.append(entry)
 
     if cached_results:
-        await update.inline_query.answer(cached_results, cache_time=5)
+        await update.inline_query.answer(cached_results, cache_time=5, is_personal=True)
         return
 
     # Nothing cached — start uploads in background, show placeholder immediately
@@ -576,26 +497,10 @@ async def _inline_now_playing(update: Update, context: ContextTypes.DEFAULT_TYPE
         asyncio.create_task(_ensure_cached(context.bot, user_id, entry))
 
     if uncached:
-        entry = uncached[0]
-        await update.inline_query.answer([
-            InlineQueryResultArticle(
-                id=str(uuid4()),
-                title=f"{entry['artist']} — {entry['title']}",
-                description="Loading audio, try again in a few seconds...",
-                input_message_content=InputTextMessageContent(
-                    f"Now playing: {entry['artist']} — {entry['title']}"
-                ),
-            )
-        ], cache_time=3)
+        # Show placeholder while uploading — short cache so next query sees the file_id
+        await update.inline_query.answer([], cache_time=3, is_personal=True)
     else:
-        await update.inline_query.answer([
-            InlineQueryResultArticle(
-                id=str(uuid4()),
-                title="Failed to load tracks",
-                description="Could not stream from Navidrome",
-                input_message_content=InputTextMessageContent("Failed to load tracks."),
-            )
-        ], cache_time=5)
+        await update.inline_query.answer([], cache_time=5, is_personal=True)
 
 
 async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -618,7 +523,7 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
         lib_query = query[4:].strip()
         if len(lib_query) >= 2:
             return await _inline_lib_search(update, lib_query)
-        await update.inline_query.answer([], cache_time=3)
+        await update.inline_query.answer([], cache_time=3, is_personal=True)
         return
 
     if not query or (0 < len(query) <= 2 and not share_mode and not now_playing_mode and not lyrics_mode):
@@ -630,27 +535,11 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
     # Now-playing or share mode — need Navidrome data
     playing = await _get_now_playing_cached()
     if playing is None:
-        await update.inline_query.answer([
-            InlineQueryResultArticle(
-                id=str(uuid4()),
-                title="Navidrome unavailable",
-                description="Could not fetch now playing",
-                input_message_content=InputTextMessageContent(
-                    "Navidrome unavailable."
-                ),
-            )
-        ], cache_time=5)
+        await update.inline_query.answer([], cache_time=5, is_personal=True)
         return
 
     if not playing:
-        await update.inline_query.answer([
-            InlineQueryResultArticle(
-                id=str(uuid4()),
-                title="Nothing playing",
-                description="No tracks currently playing on Navidrome",
-                input_message_content=InputTextMessageContent("Nothing is playing right now."),
-            )
-        ], cache_time=5)
+        await update.inline_query.answer([], cache_time=3, is_personal=True)
         return
 
     # Only use the first (currently playing) track — avoid showing queued tracks

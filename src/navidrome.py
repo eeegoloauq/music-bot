@@ -169,6 +169,17 @@ async def create_share(entry_id: str, description: str = "") -> str | None:
     return share_url
 
 
+async def search(query: str, album_count: int = 5, song_count: int = 5) -> dict:
+    """Search Navidrome library. Returns searchResult3 dict."""
+    root = await _api_json("rest/search3", {
+        "query": query,
+        "albumCount": str(album_count),
+        "songCount": str(song_count),
+        "artistCount": "0",
+    })
+    return root.get("searchResult3", {})
+
+
 async def search_album(artist: str, title: str) -> str | None:
     """Search for an album in Navidrome. Returns album ID or None."""
     root = await _api_json("rest/search3", {

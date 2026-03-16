@@ -23,7 +23,7 @@ from telegram.request import HTTPXRequest
 from config import TG_TOKEN, ALLOWED_USERS, MUSIC_DIR, NAVI_LOGIN, NAVI_PASS, NAVI_PUBLIC_URL
 import tidal
 import navidrome
-from inline import handle_inline_query, _DELETE_PREFIX, add_recent_download
+from inline import handle_inline_query, _DELETE_PREFIX
 
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
@@ -85,6 +85,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         logger.info("Unauthorized /start from user %s", user_id)
         return
+    # Deep-link from inline help button: /start help
+    if context.args and context.args[0] == "help":
+        return await cmd_help(update, context)
     bot_me = await context.bot.get_me()
     await update.message.reply_text(
         f"<b>Commands:</b>\n"
@@ -279,13 +282,17 @@ async def _download_album(update: Update, album_id: str, quality: str | None = N
             await status_msg.edit_text(f"Failed to fetch album info: {e}")
             return
 
-        # Force re-download: remove existing album directory
+        # Force re-download: rename existing album directory to .bak
+        backup_dir = None
         if force:
             from tidal.files import _sanitize
             album_dir = os.path.join(MUSIC_DIR, _sanitize(album["artist"]), _sanitize(album["title"]))
             if os.path.isdir(album_dir):
-                shutil.rmtree(album_dir)
-                logger.info("Force re-download: removed %s", album_dir)
+                backup_dir = album_dir + ".bak"
+                if os.path.exists(backup_dir):
+                    shutil.rmtree(backup_dir)
+                os.rename(album_dir, backup_dir)
+                logger.info("Force re-download: renamed %s -> .bak", album_dir)
 
         try:
             await status_msg.edit_text(
@@ -326,8 +333,20 @@ async def _download_album(update: Update, album_id: str, quality: str | None = N
         )
         except Exception as e:
             logger.error("Album download failed (%s — %s): %s", album["artist"], album["title"], e)
+            # Restore backup on failure
+            if backup_dir and os.path.isdir(backup_dir):
+                target = backup_dir.removesuffix(".bak")
+                if os.path.exists(target):
+                    shutil.rmtree(target)
+                os.rename(backup_dir, target)
+                logger.info("Force re-download failed, restored backup: %s", target)
             await status_msg.edit_text(f"Download failed: {e}")
             return
+
+        # Clean up backup after successful download
+        if backup_dir and os.path.isdir(backup_dir):
+            shutil.rmtree(backup_dir)
+            logger.info("Force re-download succeeded, removed backup: %s", backup_dir)
 
         # Build result text
         if result["downloaded"] == 0 and not result["failed"]:
@@ -351,9 +370,6 @@ async def _download_album(update: Update, album_id: str, quality: str | None = N
                 parts.append(f"{len(result['failed'])} failed: {details}")
             done_text = f"Done! {album['artist']} — {album['title']}\n" + ", ".join(parts) + "."
 
-        # Track recent download for inline hint
-        add_recent_download(album_id, album["artist"], album["title"], album.get("cover_uuid", ""))
-
         # Step 3: scan (non-critical)
         if result["downloaded"] > 0:
             done_text += "\n" + await _trigger_scan()
@@ -372,7 +388,7 @@ async def _download_album(update: Update, album_id: str, quality: str | None = N
                     await update.message.reply_photo(photo=cover_f, caption=done_text)
                 await status_msg.delete()
                 sent_photo = True
-            except TelegramError:
+            except (TelegramError, OSError):
                 pass
         if not sent_photo:
             try:
