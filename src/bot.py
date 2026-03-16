@@ -54,8 +54,9 @@ _MUSIC_LINK_RE = re.compile(
     re.IGNORECASE,
 )
 
-# album share URL cache for download handler
+# album share URL cache for download handler (bounded)
 _album_share_cache: dict[str, str] = {}
+_CACHE_MAX = 500
 # serialize album/track downloads so Tidal CDN doesn't throttle
 _download_semaphore = asyncio.Semaphore(1)
 
@@ -461,6 +462,9 @@ async def _try_share_album(artist: str, title: str, skip_delay: bool = False) ->
         url = await navidrome.create_share(album_id, f"{artist} — {title}")
         if url:
             _album_share_cache[album_id] = url
+            if len(_album_share_cache) > _CACHE_MAX:
+                oldest = next(iter(_album_share_cache))
+                del _album_share_cache[oldest]
         return url
     except navidrome.NavidromeAuthError:
         logger.warning("Navidrome share: wrong credentials")
