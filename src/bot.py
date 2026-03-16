@@ -8,7 +8,7 @@ import time
 
 _RESTART_DELAY = 30  # seconds between automatic restarts after a crash
 
-from telegram import Update
+from telegram import BotCommand, Update
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -301,16 +301,25 @@ async def _download_album(update: Update, album_id: str, quality: str | None = N
         if result["downloaded"] > 0:
             done_text += "\n" + await _trigger_scan()
 
-        try:
-            await status_msg.edit_text(done_text)
-        except TelegramError:
-            pass
-
         # Step 4: share link (non-critical) — always try, even for "already in library"
         share_url = await _try_share_album(album["artist"], album["title"], skip_delay=result["downloaded"] == 0)
         if share_url:
+            done_text += f"\n\n{share_url}"
+
+        # Send cover art with result if available, otherwise plain text
+        cover_path = os.path.join(result["album_dir"], "cover.jpg")
+        sent_photo = False
+        if os.path.isfile(cover_path):
             try:
-                await status_msg.edit_text(f"{done_text}\n\n{share_url}")
+                with open(cover_path, "rb") as cover_f:
+                    await update.message.reply_photo(photo=cover_f, caption=done_text)
+                await status_msg.delete()
+                sent_photo = True
+            except TelegramError:
+                pass
+        if not sent_photo:
+            try:
+                await status_msg.edit_text(done_text)
             except TelegramError:
                 pass
 
@@ -400,6 +409,13 @@ async def _error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> 
     logger.exception("Unhandled exception", exc_info=context.error)
 
 
+async def _post_init(app: Application) -> None:
+    await app.bot.set_my_commands([
+        BotCommand("help", "Show all features"),
+        BotCommand("scan", "Trigger library rescan"),
+    ])
+
+
 async def _shutdown(app: Application) -> None:
     await tidal.close()
     await navidrome.close()
@@ -410,6 +426,7 @@ def _build_app() -> Application:
         Application.builder()
         .token(TG_TOKEN)
         .get_updates_request(HTTPXRequest(pool_timeout=5.0))
+        .post_init(_post_init)
         .post_shutdown(_shutdown)
         .build()
     )
