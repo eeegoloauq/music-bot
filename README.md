@@ -3,7 +3,7 @@
 [![GitHub Release](https://img.shields.io/github/v/release/eeegoloauq/music-bot)](https://github.com/eeegoloauq/music-bot/releases)
 [![Docker Image Size](https://ghcr-badge.egpl.dev/eeegoloauq/music-bot/size)](https://github.com/eeegoloauq/music-bot/pkgs/container/music-bot)
 
-Telegram bot that builds and manages a [Navidrome](https://www.navidrome.org/) music library — download from Tidal (via [Monochrome](https://monochrome.samidy.com)), Spotify, Apple Music and more, search and delete albums, share now playing.
+Telegram bot that builds and manages a [Navidrome](https://www.navidrome.org/) music library — download from Tidal (via [Monochrome](https://monochrome.samidy.com)), Spotify, Apple Music, Shazam and more, search and delete albums, share now playing.
 
 <p align="center">
   <img src=".github/screenshot.png" width="300" alt="Bot demo">
@@ -13,13 +13,17 @@ Telegram bot that builds and manages a [Navidrome](https://www.navidrome.org/) m
 
 ## Features
 
-- **Album & track downloads** — send a Tidal, Spotify, Apple Music, Deezer, YouTube Music, SoundCloud, or Amazon Music link, get FLACs with full metadata saved to your library
+- **Album & track downloads** — send a Tidal, Spotify, Apple Music, Deezer, YouTube Music, SoundCloud, Amazon Music, or Shazam link, get FLACs with full metadata saved to your library
+- **Batch download** — send multiple links in one message
+- **Force re-download** — add `re` after link to re-download existing albums/tracks
 - **Inline mode** — type `@yourbotname` in any chat:
-  - **Now playing** — sends the currently playing track as audio
-  - **Share** — sends a Navidrome share link with cover art preview
-  - **Search** — find albums and tracks on Tidal, tap to download
-  - **Delete** — remove albums from your library
-- **Auto-share after download** — share link appended to the success message
+  - **Search** — just type a name to find albums and tracks on Tidal
+  - **Now playing** (`np`) — sends the currently playing track as audio
+  - **Share** (`s`) — sends a Navidrome share link with cover art preview
+  - **Lyrics** (`l`) — shows lyrics for the current track
+  - **Library search** (`lib name`) — search your Navidrome library
+  - **Delete** (`del name`) — remove albums from your library
+- **Auto-share** — share link with cover art appended to download results
 - **Private** — only users listed in `ALLOWED_USERS` can interact with the bot
 
 ## Setup
@@ -93,18 +97,20 @@ To enable share links, set `NAVIDROME_PUBLIC_URL` and enable sharing in Navidrom
 
 ## Usage
 
-**Download** — send a Tidal link or any music link (Spotify, Apple Music, Deezer, etc.)
+**Download** — send a Tidal link or any supported music link. Add `hi` for hi-res, `re` to force re-download.
 
 **Inline mode:**
 
 | Query | Action |
 |---|---|
-| `@bot np` | Send now playing as audio |
-| `@bot s` | Send share link with cover art |
-| `@bot song name` | Search Tidal and download |
+| `@bot song name` | Search Tidal |
+| `@bot np` | Now playing as audio |
+| `@bot s` | Share link for current track |
+| `@bot l` | Lyrics for current track |
+| `@bot lib name` | Search Navidrome library |
 | `@bot del name` | Delete album from library |
 
-**Commands:** `/scan` — trigger library rescan
+**Commands:** `/scan` — library rescan, `/stats` — library statistics
 
 ## Tags
 
