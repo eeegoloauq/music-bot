@@ -219,14 +219,39 @@ async def _ensure_cached(bot, user_id: int, entry: dict) -> str | None:
 
 
 async def _inline_hint(update: Update):
-    """Show usage hint for empty/short queries."""
+    """Show clickable mode hints for empty/short queries."""
+    # InputTextMessageContent is required by Telegram API but won't fire
+    # because switch_inline_query_current_chat takes priority on tap
+    _placeholder = InputTextMessageContent("...")
     await update.inline_query.answer([
         InlineQueryResultArticle(
             id=str(uuid4()),
+            title="Now Playing",
+            description="Send current track as audio",
+            input_message_content=_placeholder,
+            switch_inline_query_current_chat="np",
+        ),
+        InlineQueryResultArticle(
+            id=str(uuid4()),
+            title="Share",
+            description="Send share link for current track",
+            input_message_content=_placeholder,
+            switch_inline_query_current_chat="s",
+        ),
+        InlineQueryResultArticle(
+            id=str(uuid4()),
             title="Search Tidal",
-            description="np = now playing, s = share, del = delete",
-            input_message_content=InputTextMessageContent("..."),
-        )
+            description="Type a song or album name",
+            input_message_content=_placeholder,
+            switch_inline_query_current_chat="",
+        ),
+        InlineQueryResultArticle(
+            id=str(uuid4()),
+            title="Delete",
+            description="Remove album from library",
+            input_message_content=_placeholder,
+            switch_inline_query_current_chat="del ",
+        ),
     ], cache_time=3)
 
 
@@ -270,6 +295,7 @@ async def _inline_delete(update: Update, del_query: str):
                 title="No albums found",
                 description=f"Nothing matching '{del_query}' in library",
                 input_message_content=InputTextMessageContent("..."),
+                switch_inline_query_current_chat="del ",
             )
         ], cache_time=5)
 
