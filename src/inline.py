@@ -511,6 +511,8 @@ async def _inline_share(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 InlineQueryResultCachedPhoto(
                     id=str(uuid4()),
                     photo_file_id=photo_file_id,
+                    title=entry["title"],
+                    description=f"{entry['artist']} — {entry['album']}",
                     caption=caption,
                 )
             ], cache_time=5, is_personal=True)
