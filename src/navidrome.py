@@ -109,6 +109,7 @@ async def stream_song(song_id: str) -> tuple[bytes, str]:
     params["maxBitRate"] = STREAM_BITRATE
     session = await _get_session()
     async with session.get(url, params=params, timeout=_STREAM_TIMEOUT) as resp:
+        resp.raise_for_status()
         content = await resp.read()
         disp = resp.headers.get("Content-Disposition", "")
         filename = "track.mp3"
@@ -126,6 +127,7 @@ async def download_song(song_id: str, suffix: str) -> tuple[bytes, str]:
     params["id"] = song_id
     session = await _get_session()
     async with session.get(url, params=params, timeout=_STREAM_TIMEOUT) as resp:
+        resp.raise_for_status()
         content = await resp.read()
         disp = resp.headers.get("Content-Disposition", "")
         filename = f"track.{suffix}"
@@ -141,6 +143,7 @@ async def get_cover_art(cover_id: str, size: int = 300) -> bytes:
     params["size"] = str(size)
     session = await _get_session()
     async with session.get(url, params=params, timeout=_DEFAULT_TIMEOUT) as resp:
+        resp.raise_for_status()
         return await resp.read()
 
 

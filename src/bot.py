@@ -47,6 +47,7 @@ _MUSIC_LINK_RE = re.compile(
     r"|(?:www\.)?song\.link|(?:www\.)?odesli\.co|(?:www\.)?album\.link"
     r"|soundcloud\.com"
     r"|music\.amazon\.com"
+    r"|(?:www\.)?shazam\.com"
     r")/\S+",
     re.IGNORECASE,
 )
@@ -305,8 +306,8 @@ async def _download_album(update: Update, album_id: str, quality: str | None = N
         except TelegramError:
             pass
 
-        # Step 4: share link (non-critical)
-        share_url = await _try_share_album(album["artist"], album["title"])
+        # Step 4: share link (non-critical) — always try, even for "already in library"
+        share_url = await _try_share_album(album["artist"], album["title"], skip_delay=result["downloaded"] == 0)
         if share_url:
             try:
                 await status_msg.edit_text(f"{done_text}\n\n{share_url}")
@@ -359,6 +360,7 @@ async def _download_track(update: Update, track_id: str, quality: str | None = N
         share_url = await _try_share_album(
             album_ctx.get("artist", track["artist"]),
             album_ctx.get("title", ""),
+            skip_delay=not was_downloaded,
         )
         if share_url:
             try:
@@ -367,12 +369,13 @@ async def _download_track(update: Update, track_id: str, quality: str | None = N
                 pass
 
 
-async def _try_share_album(artist: str, title: str) -> str | None:
+async def _try_share_album(artist: str, title: str, skip_delay: bool = False) -> str | None:
     """Wait for Navidrome to index, then create a share link for the album."""
     if not NAVI_PUBLIC_URL:
         return None
     try:
-        await asyncio.sleep(3)
+        if not skip_delay:
+            await asyncio.sleep(3)
         album_id = await navidrome.search_album(artist, title)
         if not album_id:
             return None

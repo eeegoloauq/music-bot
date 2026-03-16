@@ -49,28 +49,37 @@ async def _download_flac(url: str, filepath: str, max_retries: int = 3) -> int:
                 raise
 
 
-async def _download_dash(init_url: str, segment_urls: list[str], filepath: str) -> int:
+async def _download_dash(init_url: str, segment_urls: list[str], filepath: str,
+                         max_retries: int = 3) -> int:
     """Download DASH segments sequentially and concatenate into filepath atomically."""
     session = await _get_session()
     tmp_path = filepath + ".tmp"
-    total_bytes = 0
     all_urls = [init_url] + segment_urls
-    try:
-        with open(tmp_path, "wb") as f:
-            for url in all_urls:
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                    resp.raise_for_status()
-                    chunk = await resp.read()
-                    f.write(chunk)
-                    total_bytes += len(chunk)
-        os.replace(tmp_path, filepath)
-        return total_bytes
-    except Exception:
+    for attempt in range(1, max_retries + 1):
+        total_bytes = 0
         try:
-            os.remove(tmp_path)
-        except OSError:
-            pass
-        raise
+            with open(tmp_path, "wb") as f:
+                for url in all_urls:
+                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                        resp.raise_for_status()
+                        chunk = await resp.read()
+                        f.write(chunk)
+                        total_bytes += len(chunk)
+            os.replace(tmp_path, filepath)
+            return total_bytes
+        except (aiohttp.ClientError, ConnectionError, OSError) as e:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+            if attempt < max_retries:
+                delay = 2 ** attempt
+                logger.warning("DASH attempt %d/%d failed: %s — retrying in %ds",
+                               attempt, max_retries, e, delay)
+                await asyncio.sleep(delay)
+            else:
+                logger.error("DASH download failed after %d attempts: %s", max_retries, e)
+                raise
 
 
 async def _remux_to_flac(m4a_path: str) -> str:
