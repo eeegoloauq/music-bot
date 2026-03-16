@@ -128,7 +128,7 @@ async def _api_get(path: str) -> dict:
     raise RuntimeError(f"All instances failed. Last error: {last_err}")
 
 
-_SHAZAM_RE = re.compile(r"shazam\.com/(?:[a-z]{2}(?:-[a-z]{2})?/)?song/(\d+)")
+_SHAZAM_RE = re.compile(r"shazam\.com/(?:[a-z]{2}(?:-[a-z]{2})?/)?(?:song|track)/(\d+)")
 
 
 def _shazam_to_apple(url: str) -> str:
