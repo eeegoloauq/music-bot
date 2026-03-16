@@ -508,8 +508,20 @@ async def _inline_now_playing(update: Update, context: ContextTypes.DEFAULT_TYPE
         asyncio.create_task(_ensure_cached(context.bot, user_id, entry))
 
     if uncached:
-        # Show placeholder while uploading — short cache so next query sees the file_id
-        await update.inline_query.answer([], cache_time=3, is_personal=True)
+        # Show placeholder while uploading — Telegram re-queries after cache_time,
+        # picking up the cached file_id when upload completes.
+        # Must return a non-empty result so Telegram actually re-queries.
+        entry = uncached[0]
+        await update.inline_query.answer([
+            InlineQueryResultArticle(
+                id=str(uuid4()),
+                title=f"{entry['artist']} — {entry['title']}",
+                description="Loading...",
+                input_message_content=InputTextMessageContent(
+                    f"{entry['artist']} — {entry['title']}",
+                ),
+            )
+        ], cache_time=3, is_personal=True)
     else:
         await update.inline_query.answer([], cache_time=5, is_personal=True)
 
