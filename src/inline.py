@@ -58,23 +58,33 @@ _NP_CACHE_TTL = 2  # seconds
 
 
 
-def _read_tidal_album_id(filepath: str) -> str:
-    """Read Tidal album ID from file's comment tag. Returns '' if not found."""
+def _find_tidal_album_id_in_dir(album_dir: str) -> str:
+    """Find Tidal album ID from any audio file's comment tag in a directory."""
     from mutagen.flac import FLAC
     from mutagen.mp4 import MP4
 
-    try:
-        ext = os.path.splitext(filepath)[1].lower()
-        if ext == ".flac":
-            comment = next(iter(FLAC(filepath).get("comment") or []), "")
-        elif ext == ".m4a":
-            comment = next(iter(MP4(filepath).get("\xa9cmt") or []), "")
-        else:
-            return ""
-        m = _TIDAL_ALBUM_RE.search(comment)
-        return m.group(1) if m else ""
-    except Exception:
+    if not os.path.isdir(album_dir):
         return ""
+    try:
+        for f in os.scandir(album_dir):
+            if not f.is_file():
+                continue
+            ext = os.path.splitext(f.name)[1].lower()
+            try:
+                if ext == ".flac":
+                    comment = next(iter(FLAC(f.path).get("comment") or []), "")
+                elif ext == ".m4a":
+                    comment = next(iter(MP4(f.path).get("\xa9cmt") or []), "")
+                else:
+                    continue
+                m = _TIDAL_ALBUM_RE.search(comment)
+                if m:
+                    return m.group(1)
+            except Exception:
+                continue
+    except OSError:
+        pass
+    return ""
 
 
 def _read_lyrics_from_file(filepath: str) -> str | None:
@@ -490,29 +500,31 @@ async def _inline_share(update: Update, playing: list[dict]):
         await update.inline_query.answer([], cache_time=5, is_personal=True)
         return
 
-    # Get Tidal cover URL from local file's comment tag
+    # Get Tidal cover URL: find any audio file in the album dir, read comment tag
     cover_url = None
     if entry.get("path"):
-        local_path = os.path.join(MUSIC_DIR, entry["path"])
-        if os.path.exists(local_path):
-            album_id = await asyncio.to_thread(_read_tidal_album_id, local_path)
-            if album_id:
-                try:
-                    cover_url = await tidal.fetch_cover_url(album_id) or None
-                except Exception:
-                    pass
+        # path from Navidrome may not match disk filename, but parent dir is reliable
+        album_dir = os.path.join(MUSIC_DIR, os.path.dirname(entry["path"]))
+        album_id = await asyncio.to_thread(_find_tidal_album_id_in_dir, album_dir)
+        if album_id:
+            try:
+                cover_url = await tidal.fetch_cover_url(album_id) or None
+            except Exception:
+                pass
 
-    await update.inline_query.answer([
-        InlineQueryResultArticle(
-            id=str(uuid4()),
-            title=entry["title"],
-            description=f"{entry['artist']} — {entry['album']}",
-            thumbnail_url=cover_url,
-            input_message_content=InputTextMessageContent(
-                f"{entry['artist']} — {entry['title']}\n{share_url}",
-            ),
-        )
-    ], cache_time=5, is_personal=True)
+    result = InlineQueryResultArticle(
+        id=str(uuid4()),
+        title=entry["title"],
+        description=f"{entry['artist']} — {entry['album']}",
+        thumbnail_url=cover_url,
+        thumbnail_width=320,
+        thumbnail_height=320,
+        input_message_content=InputTextMessageContent(
+            f"{entry['artist']} — {entry['title']}\n{share_url}",
+        ),
+    )
+    logger.info("Share inline: cover_url=%s", cover_url)
+    await update.inline_query.answer([result], cache_time=5, is_personal=True)
 
 
 async def _inline_now_playing(update: Update, context: ContextTypes.DEFAULT_TYPE,
