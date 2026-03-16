@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_TIMEOUT = aiohttp.ClientTimeout(total=15)
 _STREAM_TIMEOUT = aiohttp.ClientTimeout(total=120)
+_MAX_AUDIO_BYTES = 100 * 1024 * 1024  # 100MB hard cap for audio responses
 
 _session: aiohttp.ClientSession | None = None
 
@@ -110,6 +111,8 @@ async def stream_song(song_id: str) -> tuple[bytes, str]:
     session = await _get_session()
     async with session.get(url, params=params, timeout=_STREAM_TIMEOUT) as resp:
         resp.raise_for_status()
+        if resp.content_length and resp.content_length > _MAX_AUDIO_BYTES:
+            raise RuntimeError(f"Audio too large: {resp.content_length // (1024*1024)}MB")
         content = await resp.read()
         disp = resp.headers.get("Content-Disposition", "")
         filename = "track.mp3"
@@ -128,6 +131,8 @@ async def download_song(song_id: str, suffix: str) -> tuple[bytes, str]:
     session = await _get_session()
     async with session.get(url, params=params, timeout=_STREAM_TIMEOUT) as resp:
         resp.raise_for_status()
+        if resp.content_length and resp.content_length > _MAX_AUDIO_BYTES:
+            raise RuntimeError(f"Audio too large: {resp.content_length // (1024*1024)}MB")
         content = await resp.read()
         disp = resp.headers.get("Content-Disposition", "")
         filename = f"track.{suffix}"

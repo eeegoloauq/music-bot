@@ -174,8 +174,16 @@ async def _ensure_cached(bot, user_id: int, entry: dict) -> str | None:
         logger.info("Inline: %s — %s (cached)", entry["artist"], entry["title"])
         return _file_id_cache[song_id]
 
-    if song_id in _upload_failed and (time.monotonic() - _upload_failed[song_id]) < _UPLOAD_FAILED_TTL:
-        return None
+    now = time.monotonic()
+    if song_id in _upload_failed:
+        if (now - _upload_failed[song_id]) < _UPLOAD_FAILED_TTL:
+            return None
+        del _upload_failed[song_id]
+    # Prune expired entries periodically (keep dict bounded)
+    if len(_upload_failed) > 200:
+        expired = [k for k, t in _upload_failed.items() if (now - t) >= _UPLOAD_FAILED_TTL]
+        for k in expired:
+            del _upload_failed[k]
 
     # another query already uploading this song — wait for it
     if song_id in _upload_events:
@@ -308,7 +316,10 @@ async def _inline_delete(update: Update, del_query: str):
 
 async def _inline_search(update: Update, query: str):
     """Search Tidal for albums and tracks with pagination."""
-    offset = int(update.inline_query.offset or "0")
+    try:
+        offset = int(update.inline_query.offset or "0")
+    except ValueError:
+        offset = 0
     page_albums = 3
     page_tracks = 5
     page_size = page_albums + page_tracks
