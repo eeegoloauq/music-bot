@@ -271,7 +271,7 @@ async def _inline_hint(update: Update):
         cache_time=30,
         is_personal=True,
         button=InlineQueryResultsButton(
-            text="np · s · l · lib · del — or just type to search",
+            text="np  s  l  lib  del — or type to search",
             start_parameter="help",
         ),
     )
@@ -483,45 +483,28 @@ async def _inline_now_playing(update: Update, context: ContextTypes.DEFAULT_TYPE
                                playing: list[dict]):
     """Stream and send now-playing tracks as cached audio."""
     user_id = update.effective_user.id
+    entry = playing[0]
+    song_id = entry["songId"]
 
-    # Check if any tracks are already cached
-    cached_results = []
-    uncached = []
-    for entry in playing:
-        song_id = entry["songId"]
-        if song_id in _file_id_cache:
-            cached_results.append(
-                InlineQueryResultCachedAudio(
-                    id=str(uuid4()),
-                    audio_file_id=_file_id_cache[song_id],
-                )
+    # Already cached — return instantly
+    if song_id in _file_id_cache:
+        await update.inline_query.answer([
+            InlineQueryResultCachedAudio(
+                id=str(uuid4()),
+                audio_file_id=_file_id_cache[song_id],
             )
-        elif song_id not in _upload_failed or (time.monotonic() - _upload_failed.get(song_id, 0)) >= _UPLOAD_FAILED_TTL:
-            uncached.append(entry)
-
-    if cached_results:
-        await update.inline_query.answer(cached_results, cache_time=5, is_personal=True)
+        ], cache_time=5, is_personal=True)
         return
 
-    # Nothing cached — start uploads in background, show placeholder immediately
-    for entry in uncached:
-        asyncio.create_task(_ensure_cached(context.bot, user_id, entry))
-
-    if uncached:
-        # Show placeholder while uploading — Telegram re-queries after cache_time,
-        # picking up the cached file_id when upload completes.
-        # Must return a non-empty result so Telegram actually re-queries.
-        entry = uncached[0]
+    # Upload synchronously — Telegram allows ~30s, upload takes 3-5s
+    file_id = await _ensure_cached(context.bot, user_id, entry)
+    if file_id:
         await update.inline_query.answer([
-            InlineQueryResultArticle(
+            InlineQueryResultCachedAudio(
                 id=str(uuid4()),
-                title=f"{entry['artist']} — {entry['title']}",
-                description="Loading...",
-                input_message_content=InputTextMessageContent(
-                    f"{entry['artist']} — {entry['title']}",
-                ),
+                audio_file_id=file_id,
             )
-        ], cache_time=3, is_personal=True)
+        ], cache_time=5, is_personal=True)
     else:
         await update.inline_query.answer([], cache_time=5, is_personal=True)
 
@@ -545,7 +528,7 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
         return await update.inline_query.answer([], cache_time=3, is_personal=True)
 
     # Short exact keywords (1-2 chars, never collide with 3+ char search)
-    if query_lower in ("n", "np"):
+    if query_lower == "np":
         return await _np_or_share_or_lyrics(update, context, "np")
     if query_lower == "s":
         return await _np_or_share_or_lyrics(update, context, "share")
