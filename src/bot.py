@@ -110,7 +110,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"<code>@{bot_me.username} np</code> — now playing as audio\n"
         f"<code>@{bot_me.username} s</code> — share link for current track\n"
         f"<code>@{bot_me.username} l</code> — lyrics for current track\n"
-        f"<code>@{bot_me.username} song name</code> — search Tidal\n"
+        f"<code>@{bot_me.username} search name</code> — search Tidal\n"
         f"<code>@{bot_me.username} lib name</code> — search library\n"
         f"<code>@{bot_me.username} del name</code> — delete album\n\n"
         "<b>Commands</b>\n"

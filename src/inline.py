@@ -271,7 +271,7 @@ async def _inline_hint(update: Update):
         cache_time=30,
         is_personal=True,
         button=InlineQueryResultsButton(
-            text="np / s / l / lib / del / search — tap for help",
+            text="np · s · l · lib · del · search — tap for help",
             start_parameter="help",
         ),
     )
@@ -500,7 +500,7 @@ async def _inline_now_playing(update: Update, context: ContextTypes.DEFAULT_TYPE
             uncached.append(entry)
 
     if cached_results:
-        await update.inline_query.answer(cached_results, cache_time=300, is_personal=True)
+        await update.inline_query.answer(cached_results, cache_time=5, is_personal=True)
         return
 
     # Nothing cached — start uploads in background, show placeholder immediately
@@ -521,45 +521,40 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     query = (update.inline_query.query or "").strip()
     query_lower = query.lower()
-    share_mode = query_lower in ("s", "share")
-    now_playing_mode = query_lower in ("np", "now")
-    lyrics_mode = query_lower in ("l", "lyrics")
-    delete_mode = query_lower == "del" or query_lower.startswith("del ")
-    lib_mode = query_lower.startswith("lib ")
 
-    if delete_mode:
+    # Prefix-based mode dispatch
+    if query_lower == "del" or query_lower.startswith("del "):
         return await _inline_delete(update, query[3:].strip())
 
-    if lib_mode:
+    if query_lower.startswith("lib "):
         lib_query = query[4:].strip()
         if len(lib_query) >= 2:
             return await _inline_lib_search(update, lib_query)
-        await update.inline_query.answer([], cache_time=3, is_personal=True)
-        return
+        return await update.inline_query.answer([], cache_time=3, is_personal=True)
 
-    if not query or (0 < len(query) <= 2 and not share_mode and not now_playing_mode and not lyrics_mode):
+    if query_lower.startswith("search "):
+        search_query = query[7:].strip()
+        if len(search_query) >= 2:
+            return await _inline_search(update, search_query)
+        return await update.inline_query.answer([], cache_time=3, is_personal=True)
+
+    # Modes that need Navidrome now-playing data
+    np_mode = query_lower in ("np", "now")
+    share_mode = query_lower in ("s", "share")
+    lyrics_mode = query_lower in ("l", "lyrics")
+
+    if not (np_mode or share_mode or lyrics_mode):
         return await _inline_hint(update)
 
-    if not share_mode and not now_playing_mode and not lyrics_mode:
-        return await _inline_search(update, query)
-
-    # Now-playing or share mode — need Navidrome data
     playing = await _get_now_playing_cached()
-    if playing is None:
-        await update.inline_query.answer([], cache_time=5, is_personal=True)
-        return
-
     if not playing:
-        await update.inline_query.answer([], cache_time=3, is_personal=True)
-        return
+        return await update.inline_query.answer([], cache_time=3, is_personal=True)
 
-    # Only use the first (currently playing) track — avoid showing queued tracks
+    # Only use the first (currently playing) track
     playing = playing[:1]
 
     if share_mode:
         return await _inline_share(update, playing)
-
     if lyrics_mode:
         return await _inline_lyrics(update, playing)
-
     return await _inline_now_playing(update, context, playing)
