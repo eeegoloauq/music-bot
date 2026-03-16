@@ -37,6 +37,8 @@ ALBUM_RE = re.compile(r"(?:monochrome\.samidy\.com|monochrome\.tf|tidal\.com)/al
 TRACK_RE = re.compile(r"(?:monochrome\.samidy\.com|monochrome\.tf|tidal\.com)/track/(\d+)")
 # Words after the link that trigger HI_RES_LOSSLESS for this download
 _HIRES_RE = re.compile(r"\b(hi|hq|hires|hi-res)\b", re.IGNORECASE)
+# Words that force re-download (delete existing + download fresh)
+_FORCE_RE = re.compile(r"\b(re|force|redownload)\b", re.IGNORECASE)
 # Known music platform URLs that Odesli can resolve to Tidal
 _MUSIC_LINK_RE = re.compile(
     r"https?://(?:"
@@ -98,7 +100,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bot_me = await context.bot.get_me()
     await update.message.reply_text(
         "<b>Download</b>\n"
-        "Send a Tidal, Spotify, Apple Music, Deezer, Shazam or other music link.\n\n"
+        "Send a Tidal, Spotify, Apple Music, Deezer, Shazam or other music link.\n"
+        "Add <b>hi</b> after link for hi-res, <b>re</b> to force re-download.\n\n"
         "<b>Inline mode</b>\n"
         f"<code>@{bot_me.username} np</code> — now playing as audio\n"
         f"<code>@{bot_me.username} s</code> — share link for current track\n"
@@ -107,7 +110,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"<code>@{bot_me.username} lib name</code> — search library\n"
         f"<code>@{bot_me.username} del name</code> — delete album\n\n"
         "<b>Commands</b>\n"
-        "/scan — trigger library rescan",
+        "/scan — trigger library rescan\n"
+        "/stats — library statistics",
         parse_mode="HTML",
     )
 
@@ -116,6 +120,44 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     note = await _trigger_scan()
     await update.message.reply_text(note)
+
+
+def _collect_stats() -> dict:
+    """Walk MUSIC_DIR and collect library statistics."""
+    artists = 0
+    albums = 0
+    tracks = 0
+    total_bytes = 0
+    for artist_entry in os.scandir(MUSIC_DIR):
+        if not artist_entry.is_dir() or artist_entry.name.startswith((".", "lost")):
+            continue
+        artists += 1
+        for album_entry in os.scandir(artist_entry.path):
+            if not album_entry.is_dir():
+                continue
+            albums += 1
+            for f in os.scandir(album_entry.path):
+                if f.is_file():
+                    ext = os.path.splitext(f.name)[1].lower()
+                    if ext in (".flac", ".mp3", ".m4a", ".ogg", ".opus"):
+                        tracks += 1
+                    try:
+                        total_bytes += f.stat().st_size
+                    except OSError:
+                        pass
+    return {"artists": artists, "albums": albums, "tracks": tracks, "bytes": total_bytes}
+
+
+@authorized
+async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    stats = await asyncio.to_thread(_collect_stats)
+    size_gb = stats["bytes"] / (1024 ** 3)
+    await update.message.reply_text(
+        f"Artists: {stats['artists']}\n"
+        f"Albums: {stats['albums']}\n"
+        f"Tracks: {stats['tracks']}\n"
+        f"Size: {size_gb:.1f} GB",
+    )
 
 
 @authorized
@@ -128,21 +170,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await _handle_delete(update, rel_path)
         return
 
-    album_match = ALBUM_RE.search(text)
-    track_match = TRACK_RE.search(text) if not album_match else None
+    quality = "HI_RES_LOSSLESS" if _HIRES_RE.search(text) else None
+    force = bool(_FORCE_RE.search(text))
 
-    if album_match:
-        suffix = text[album_match.end():]
-        quality = "HI_RES_LOSSLESS" if _HIRES_RE.search(suffix) else None
-        await _download_album(update, album_match.group(1), quality=quality)
-    elif track_match:
-        suffix = text[track_match.end():]
-        quality = "HI_RES_LOSSLESS" if _HIRES_RE.search(suffix) else None
-        await _download_track(update, track_match.group(1), quality=quality)
-    else:
-        music_match = _MUSIC_LINK_RE.search(text)
-        if music_match:
-            await _resolve_and_download(update, music_match.group(0), text[music_match.end():])
+    album_matches = ALBUM_RE.findall(text)
+    track_matches = TRACK_RE.findall(text) if not album_matches else []
+    music_matches = _MUSIC_LINK_RE.findall(text) if not album_matches and not track_matches else []
+
+    if album_matches:
+        for album_id in album_matches:
+            await _download_album(update, album_id, quality=quality, force=force)
+    elif track_matches:
+        for track_id in track_matches:
+            await _download_track(update, track_id, quality=quality, force=force)
+    elif music_matches:
+        for url in music_matches:
+            await _resolve_and_download(update, url, text, force=force)
 
 
 async def _handle_delete(update: Update, rel_path: str):
@@ -196,7 +239,7 @@ async def _trigger_scan() -> str:
         return "Library scan failed."
 
 
-async def _resolve_and_download(update: Update, url: str, suffix: str):
+async def _resolve_and_download(update: Update, url: str, suffix: str, force: bool = False):
     """Resolve a non-Tidal music link via Odesli, then download."""
     status_msg = await update.message.reply_text("Resolving link...")
     try:
@@ -215,12 +258,12 @@ async def _resolve_and_download(update: Update, url: str, suffix: str):
     await status_msg.delete()
 
     if link_type == "album":
-        await _download_album(update, tidal_id, quality=quality)
+        await _download_album(update, tidal_id, quality=quality, force=force)
     else:
-        await _download_track(update, tidal_id, quality=quality)
+        await _download_track(update, tidal_id, quality=quality, force=force)
 
 
-async def _download_album(update: Update, album_id: str, quality: str | None = None):
+async def _download_album(update: Update, album_id: str, quality: str | None = None, force: bool = False):
     if _download_semaphore.locked():
         status_msg = await update.message.reply_text("Queued, waiting for current download...")
     else:
@@ -234,6 +277,14 @@ async def _download_album(update: Update, album_id: str, quality: str | None = N
             logger.error("Failed to fetch album %s: %s", album_id, e)
             await status_msg.edit_text(f"Failed to fetch album info: {e}")
             return
+
+        # Force re-download: remove existing album directory
+        if force:
+            from tidal.files import _sanitize
+            album_dir = os.path.join(MUSIC_DIR, _sanitize(album["artist"]), _sanitize(album["title"]))
+            if os.path.isdir(album_dir):
+                shutil.rmtree(album_dir)
+                logger.info("Force re-download: removed %s", album_dir)
 
         try:
             await status_msg.edit_text(
@@ -329,7 +380,7 @@ async def _download_album(update: Update, album_id: str, quality: str | None = N
                 pass
 
 
-async def _download_track(update: Update, track_id: str, quality: str | None = None):
+async def _download_track(update: Update, track_id: str, quality: str | None = None, force: bool = False):
     if _download_semaphore.locked():
         status_msg = await update.message.reply_text("Queued, waiting for current download...")
     else:
@@ -343,6 +394,18 @@ async def _download_track(update: Update, track_id: str, quality: str | None = N
             logger.error("Failed to fetch track %s: %s", track_id, e)
             await status_msg.edit_text(f"Failed to fetch track info: {e}")
             return
+
+        # Force re-download: remove existing track file
+        if force:
+            from tidal.files import _sanitize, _find_existing_track
+            album_dir = os.path.join(
+                MUSIC_DIR, _sanitize(album_ctx.get("artist", track["artist"])),
+                _sanitize(album_ctx.get("title", "Singles")),
+            )
+            existing = _find_existing_track(album_dir, track) if os.path.isdir(album_dir) else None
+            if existing:
+                os.remove(existing)
+                logger.info("Force re-download: removed %s", existing)
 
         try:
             await status_msg.edit_text(f"Downloading: {track['artist']} — {track['title']}")
@@ -418,6 +481,7 @@ async def _post_init(app: Application) -> None:
     await app.bot.set_my_commands([
         BotCommand("help", "Show all features"),
         BotCommand("scan", "Trigger library rescan"),
+        BotCommand("stats", "Library statistics"),
     ])
 
 
@@ -438,6 +502,7 @@ def _build_app() -> Application:
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("scan", cmd_scan))
+    app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(InlineQueryHandler(handle_inline_query))
     app.add_error_handler(_error_handler)
