@@ -128,11 +128,23 @@ async def _api_get(path: str) -> dict:
     raise RuntimeError(f"All instances failed. Last error: {last_err}")
 
 
+_SHAZAM_RE = re.compile(r"shazam\.com/(?:[a-z]{2}(?:-[a-z]{2})?/)?song/(\d+)")
+
+
+def _shazam_to_apple(url: str) -> str:
+    """Convert Shazam URL to Apple Music URL (Shazam song ID = Apple Music ID)."""
+    m = _SHAZAM_RE.search(url)
+    if m:
+        return f"https://music.apple.com/us/song/{m.group(1)}"
+    return url
+
+
 async def resolve_link(url: str) -> tuple[str, str] | None:
     """Resolve a music platform URL to a Tidal ID via Odesli (song.link).
 
     Returns ("album", id) or ("track", id), or None if no Tidal match.
     """
+    url = _shazam_to_apple(url)
     session = await _get_session()
     try:
         async with session.get(

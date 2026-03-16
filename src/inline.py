@@ -24,8 +24,9 @@ logger = logging.getLogger(__name__)
 _file_id_cache: dict[str, str] = {}
 # song_id -> asyncio.Event (signals upload completion)
 _upload_events: dict[str, asyncio.Event] = {}
-# songs that failed upload (too large, unsupported, etc.) — skip retries this session
-_upload_failed: set[str] = set()
+# songs that failed upload — skip retries for 1 hour
+_upload_failed: dict[str, float] = {}  # song_id -> monotonic timestamp
+_UPLOAD_FAILED_TTL = 3600  # seconds
 
 _TG_MAX_AUDIO_BYTES = 50 * 1024 * 1024  # Telegram bot upload limit
 # entry_id -> share URL
@@ -135,7 +136,7 @@ async def _ensure_cached(bot, user_id: int, entry: dict) -> str | None:
         logger.info("Inline: %s — %s (cached)", entry["artist"], entry["title"])
         return _file_id_cache[song_id]
 
-    if song_id in _upload_failed:
+    if song_id in _upload_failed and (time.monotonic() - _upload_failed[song_id]) < _UPLOAD_FAILED_TTL:
         return None
 
     # another query already uploading this song — wait for it
@@ -175,7 +176,7 @@ async def _ensure_cached(bot, user_id: int, entry: dict) -> str | None:
         if len(audio_data) > _TG_MAX_AUDIO_BYTES:
             logger.warning("Inline: %s — %s | too large for Telegram (%dMB), skipping",
                            entry["artist"], entry["title"], len(audio_data) // (1024 * 1024))
-            _upload_failed.add(song_id)
+            _upload_failed[song_id] = time.monotonic()
             return None
 
         audio_io = BytesIO(audio_data)
@@ -368,7 +369,7 @@ async def _inline_now_playing(update: Update, context: ContextTypes.DEFAULT_TYPE
                     audio_file_id=_file_id_cache[song_id],
                 )
             )
-        elif song_id not in _upload_failed:
+        elif song_id not in _upload_failed or (time.monotonic() - _upload_failed.get(song_id, 0)) >= _UPLOAD_FAILED_TTL:
             uncached.append(entry)
 
     if cached_results:
@@ -447,6 +448,9 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
         ], cache_time=5)
         return
+
+    # Only use the first (currently playing) track — avoid showing queued tracks
+    playing = playing[:1]
 
     if share_mode:
         return await _inline_share(update, playing)
