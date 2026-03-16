@@ -489,7 +489,7 @@ async def _inline_now_playing(update: Update, context: ContextTypes.DEFAULT_TYPE
             uncached.append(entry)
 
     if cached_results:
-        await update.inline_query.answer(cached_results, cache_time=5, is_personal=True)
+        await update.inline_query.answer(cached_results, cache_time=300, is_personal=True)
         return
 
     # Nothing cached — start uploads in background, show placeholder immediately

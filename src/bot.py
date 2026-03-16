@@ -267,6 +267,23 @@ async def _resolve_and_download(update: Update, url: str, suffix: str, force: bo
         await _download_track(update, tidal_id, quality=quality, force=force)
 
 
+async def _send_result(update: Update, status_msg, text: str, album_dir: str) -> None:
+    """Send download result with cover art if available, otherwise plain text."""
+    cover_path = os.path.join(album_dir, "cover.jpg")
+    if os.path.isfile(cover_path):
+        try:
+            with open(cover_path, "rb") as cover_f:
+                await update.message.reply_photo(photo=cover_f, caption=text)
+            await status_msg.delete()
+            return
+        except (TelegramError, OSError):
+            pass
+    try:
+        await status_msg.edit_text(text)
+    except TelegramError:
+        pass
+
+
 async def _download_album(update: Update, album_id: str, quality: str | None = None, force: bool = False):
     if _download_semaphore.locked():
         status_msg = await update.message.reply_text("Queued, waiting for current download...")
@@ -379,22 +396,7 @@ async def _download_album(update: Update, album_id: str, quality: str | None = N
         if share_url:
             done_text += f"\n\n{share_url}"
 
-        # Send cover art with result if available, otherwise plain text
-        cover_path = os.path.join(result["album_dir"], "cover.jpg")
-        sent_photo = False
-        if os.path.isfile(cover_path):
-            try:
-                with open(cover_path, "rb") as cover_f:
-                    await update.message.reply_photo(photo=cover_f, caption=done_text)
-                await status_msg.delete()
-                sent_photo = True
-            except (TelegramError, OSError):
-                pass
-        if not sent_photo:
-            try:
-                await status_msg.edit_text(done_text)
-            except TelegramError:
-                pass
+        await _send_result(update, status_msg, done_text, result["album_dir"])
 
 
 async def _download_track(update: Update, track_id: str, quality: str | None = None, force: bool = False):
@@ -446,21 +448,15 @@ async def _download_track(update: Update, track_id: str, quality: str | None = N
         else:
             done_text = f"Already in library: {track['artist']} — {track['title']}"
 
-        try:
-            await status_msg.edit_text(done_text)
-        except TelegramError:
-            pass
-
         share_url = await _try_share_album(
             album_ctx.get("artist", track["artist"]),
             album_ctx.get("title", ""),
             skip_delay=not was_downloaded,
         )
         if share_url:
-            try:
-                await status_msg.edit_text(f"{done_text}\n\n{share_url}")
-            except TelegramError:
-                pass
+            done_text += f"\n\n{share_url}"
+
+        await _send_result(update, status_msg, done_text, os.path.dirname(path))
 
 
 async def _try_share_album(artist: str, title: str, skip_delay: bool = False) -> str | None:
