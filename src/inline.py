@@ -10,6 +10,7 @@ from uuid import uuid4
 from telegram import (
     InlineQueryResultArticle,
     InlineQueryResultCachedAudio,
+    InlineQueryResultCachedPhoto,
     InlineQueryResultsButton,
     InputTextMessageContent,
     Update,
@@ -36,6 +37,8 @@ _UPLOAD_FAILED_TTL = 3600  # seconds
 _TG_MAX_AUDIO_BYTES = 50 * 1024 * 1024  # Telegram bot upload limit
 # entry_id -> share URL
 _share_url_cache: OrderedDict[str, str] = OrderedDict()
+# cover_art_id -> telegram photo file_id
+_cover_file_id_cache: OrderedDict[str, str] = OrderedDict()
 
 
 def _cache_set(cache: OrderedDict, key: str, value) -> None:
@@ -164,6 +167,30 @@ async def _get_share_url(entry_id: str, description: str) -> str | None:
     except Exception as e:
         logger.warning("Failed to create share link for %s: %s", entry_id, e)
         return None
+
+
+async def _ensure_cover_uploaded(bot, user_id: int, cover_art_id: str) -> str | None:
+    """Upload cover art to Telegram and return photo file_id, with caching."""
+    if cover_art_id in _cover_file_id_cache:
+        return _cover_file_id_cache[cover_art_id]
+    try:
+        cover_bytes = await navidrome.get_cover_art(cover_art_id, size=600)
+        if not cover_bytes:
+            return None
+        cover_io = BytesIO(cover_bytes)
+        cover_io.name = "cover.jpg"
+        msg = await bot.send_photo(
+            chat_id=user_id, photo=cover_io, disable_notification=True,
+        )
+        if msg.photo:
+            file_id = msg.photo[-1].file_id
+            _cache_set(_cover_file_id_cache, cover_art_id, file_id)
+            await msg.delete()
+            return file_id
+        await msg.delete()
+    except Exception as e:
+        logger.warning("Cover upload failed for %s: %s", cover_art_id, e)
+    return None
 
 
 async def _ensure_cached(bot, user_id: int, entry: dict) -> str | None:
@@ -461,22 +488,43 @@ async def _inline_lib_search(update: Update, query: str):
     await update.inline_query.answer(results, cache_time=15, is_personal=True)
 
 
-async def _inline_share(update: Update, playing: list[dict]):
-    """Send share links for now-playing tracks."""
-    results = []
-    for entry in playing:
-        desc = f"{entry['artist']} — {entry['title']}"
-        share_url = await _get_share_url(entry["songId"], desc)
-        if share_url:
-            results.append(
-                InlineQueryResultArticle(
+async def _inline_share(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                        playing: list[dict]):
+    """Send share links for now-playing tracks with cover art."""
+    user_id = update.effective_user.id
+    entry = playing[0]
+    desc = f"{entry['artist']} — {entry['title']}"
+    share_url = await _get_share_url(entry["songId"], desc)
+    if not share_url:
+        await update.inline_query.answer([], cache_time=5, is_personal=True)
+        return
+
+    caption = f"{entry['artist']} — {entry['title']}\n{share_url}"
+
+    # Try to send as photo with cover art
+    if entry.get("coverArtId"):
+        photo_file_id = await _ensure_cover_uploaded(
+            context.bot, user_id, entry["coverArtId"],
+        )
+        if photo_file_id:
+            await update.inline_query.answer([
+                InlineQueryResultCachedPhoto(
                     id=str(uuid4()),
-                    title=entry["title"],
-                    description=f"{entry['artist']} — {entry['album']}",
-                    input_message_content=InputTextMessageContent(share_url),
+                    photo_file_id=photo_file_id,
+                    caption=caption,
                 )
-            )
-    await update.inline_query.answer(results, cache_time=5, is_personal=True)
+            ], cache_time=5, is_personal=True)
+            return
+
+    # Fallback to text with URL
+    await update.inline_query.answer([
+        InlineQueryResultArticle(
+            id=str(uuid4()),
+            title=entry["title"],
+            description=f"{entry['artist']} — {entry['album']}",
+            input_message_content=InputTextMessageContent(share_url),
+        )
+    ], cache_time=5, is_personal=True)
 
 
 async def _inline_now_playing(update: Update, context: ContextTypes.DEFAULT_TYPE,
@@ -551,7 +599,7 @@ async def _np_or_share_or_lyrics(update: Update, context: ContextTypes.DEFAULT_T
     playing = playing[:1]
 
     if mode == "share":
-        return await _inline_share(update, playing)
+        return await _inline_share(update, context, playing)
     if mode == "lyrics":
         return await _inline_lyrics(update, playing)
     return await _inline_now_playing(update, context, playing)
