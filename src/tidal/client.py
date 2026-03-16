@@ -128,14 +128,40 @@ async def _api_get(path: str) -> dict:
     raise RuntimeError(f"All instances failed. Last error: {last_err}")
 
 
-_SHAZAM_RE = re.compile(r"shazam\.com/(?:[a-z]{2}(?:-[a-z]{2})?/)?(?:song|track)/(\d+)")
+_SHAZAM_SONG_RE = re.compile(r"shazam\.com/(?:[a-z]{2}(?:-[a-z]{2})?/)?song/(\d+)")
+_SHAZAM_TRACK_RE = re.compile(r"shazam\.com/(?:[a-z]{2}(?:-[a-z]{2})?/)?track/(\d+)")
+_SHAZAM_DISCOVERY_URL = "https://www.shazam.com/discovery/v5/en-US/US/web/-/track"
 
 
-def _shazam_to_apple(url: str) -> str:
-    """Convert Shazam URL to Apple Music URL (Shazam song ID = Apple Music ID)."""
-    m = _SHAZAM_RE.search(url)
+async def _shazam_to_apple(url: str) -> str:
+    """Convert Shazam URL to Apple Music URL.
+
+    /song/ID — ID is already the Apple Music ID.
+    /track/ID — ID is a Shazam-internal ID, needs discovery API lookup.
+    """
+    m = _SHAZAM_SONG_RE.search(url)
     if m:
         return f"https://music.apple.com/us/song/{m.group(1)}"
+
+    m = _SHAZAM_TRACK_RE.search(url)
+    if m:
+        shazam_id = m.group(1)
+        session = await _get_session()
+        try:
+            async with session.get(
+                f"{_SHAZAM_DISCOVERY_URL}/{shazam_id}",
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json(content_type=None)
+                    for action in data.get("hub", {}).get("actions", []):
+                        if action.get("type") == "applemusicplay" and action.get("id"):
+                            logger.info("Shazam track %s -> Apple Music %s", shazam_id, action["id"])
+                            return f"https://music.apple.com/us/song/{action['id']}"
+        except Exception as e:
+            logger.warning("Shazam discovery API failed for %s: %s", shazam_id, e)
+        return url  # fallback: return original URL, Odesli will fail gracefully
+
     return url
 
 
@@ -144,7 +170,7 @@ async def resolve_link(url: str) -> tuple[str, str] | None:
 
     Returns ("album", id) or ("track", id), or None if no Tidal match.
     """
-    url = _shazam_to_apple(url)
+    url = await _shazam_to_apple(url)
     session = await _get_session()
     try:
         async with session.get(
