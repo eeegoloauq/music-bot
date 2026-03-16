@@ -8,6 +8,8 @@ from io import BytesIO
 from uuid import uuid4
 
 from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
     InlineQueryResultArticle,
     InlineQueryResultCachedAudio,
     InputTextMessageContent,
@@ -267,6 +269,13 @@ async def _ensure_cached(bot, user_id: int, entry: dict) -> str | None:
         _upload_events.pop(song_id, None)
 
 
+def _switch_button(text: str, query: str) -> InlineKeyboardMarkup:
+    """Create a single-button inline keyboard that switches to an inline query."""
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(text, switch_inline_query_current_chat=query),
+    ]])
+
+
 async def _inline_hint(update: Update):
     """Show clickable mode hints + recent downloads for empty/short queries."""
     _placeholder = InputTextMessageContent("...")
@@ -276,42 +285,42 @@ async def _inline_hint(update: Update):
             title="Now Playing",
             description="Send current track as audio",
             input_message_content=_placeholder,
-            switch_inline_query_current_chat="np",
+            reply_markup=_switch_button("Now Playing", "np"),
         ),
         InlineQueryResultArticle(
             id=str(uuid4()),
             title="Share",
             description="Send share link for current track",
             input_message_content=_placeholder,
-            switch_inline_query_current_chat="s",
+            reply_markup=_switch_button("Share", "s"),
         ),
         InlineQueryResultArticle(
             id=str(uuid4()),
             title="Lyrics",
             description="Show lyrics for current track",
             input_message_content=_placeholder,
-            switch_inline_query_current_chat="l",
+            reply_markup=_switch_button("Lyrics", "l"),
         ),
         InlineQueryResultArticle(
             id=str(uuid4()),
             title="Search Tidal",
             description="Type a song or album name",
             input_message_content=_placeholder,
-            switch_inline_query_current_chat="",
+            reply_markup=_switch_button("Search", ""),
         ),
         InlineQueryResultArticle(
             id=str(uuid4()),
             title="Library",
             description="Search your Navidrome library",
             input_message_content=_placeholder,
-            switch_inline_query_current_chat="lib ",
+            reply_markup=_switch_button("Library", "lib "),
         ),
         InlineQueryResultArticle(
             id=str(uuid4()),
             title="Delete",
             description="Remove album from library",
             input_message_content=_placeholder,
-            switch_inline_query_current_chat="del ",
+            reply_markup=_switch_button("Delete", "del "),
         ),
     ]
     # Append recent downloads (newest first)
@@ -372,7 +381,7 @@ async def _inline_delete(update: Update, del_query: str):
                 title="No albums found",
                 description=f"Nothing matching '{del_query}' in library",
                 input_message_content=InputTextMessageContent("..."),
-                switch_inline_query_current_chat="del ",
+                reply_markup=_switch_button("Try again", "del "),
             )
         ], cache_time=5)
 
@@ -549,7 +558,7 @@ async def _inline_lib_search(update: Update, query: str):
                 title="Nothing in library",
                 description=f"No results for '{query}'",
                 input_message_content=InputTextMessageContent("..."),
-                switch_inline_query_current_chat="lib ",
+                reply_markup=_switch_button("Try again", "lib "),
             )
         )
     await update.inline_query.answer(results, cache_time=15)
