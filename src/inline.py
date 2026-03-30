@@ -307,41 +307,67 @@ async def _inline_hint(update: Update):
     )
 
 
+async def _fetch_tidal_covers(tidal_ids: list[tuple[str, str]]) -> dict[str, str]:
+    """Batch-fetch Tidal cover URLs. Takes [(key, tidal_album_id), ...], returns {key: url}."""
+    if not tidal_ids:
+        return {}
+    covers = await asyncio.gather(*[
+        tidal.fetch_cover_url(aid) for _, aid in tidal_ids
+    ], return_exceptions=True)
+    result = {}
+    for (key, _), url in zip(tidal_ids, covers):
+        if isinstance(url, str) and url:
+            result[key] = url
+    return result
+
+
+def _album_result(title: str, artist: str, tracks: int,
+                  cover_url: str | None, message: str) -> InlineQueryResultArticle:
+    return InlineQueryResultArticle(
+        id=str(uuid4()),
+        title=f"{title} ({tracks} tracks)",
+        description=artist,
+        thumbnail_url=cover_url or None,
+        input_message_content=InputTextMessageContent(message),
+    )
+
+
+def _track_result(title: str, artist: str, album: str, duration: int,
+                  cover_url: str | None, message: str) -> InlineQueryResultArticle:
+    mins, secs = divmod(duration, 60)
+    return InlineQueryResultArticle(
+        id=str(uuid4()),
+        title=title,
+        description=f"{artist} — {album} · {mins}:{secs:02d}",
+        thumbnail_url=cover_url or None,
+        input_message_content=InputTextMessageContent(message),
+    )
+
+
 async def _inline_delete(update: Update, del_query: str):
     """Search local library and show albums for deletion."""
     if len(del_query) < 2:
         await update.inline_query.answer([], cache_time=5, is_personal=True)
         return
     local = await asyncio.to_thread(_search_local_albums, del_query)
-    if local:
-        cover_urls = {}
-        album_ids = [(item["path"], item["tidal_album_id"])
-                     for item in local if item["tidal_album_id"]]
-        if album_ids:
-            covers = await asyncio.gather(*[
-                tidal.fetch_cover_url(aid) for _, aid in album_ids
-            ], return_exceptions=True)
-            for (path, _), url in zip(album_ids, covers):
-                if isinstance(url, str) and url:
-                    cover_urls[path] = url
-
-        results = []
-        for item in local:
-            rel_path = os.path.relpath(item["path"], MUSIC_DIR)
-            results.append(
-                InlineQueryResultArticle(
-                    id=str(uuid4()),
-                    title=f"{item['album']} ({item['tracks']} tracks)",
-                    description=item["artist"],
-                    thumbnail_url=cover_urls.get(item["path"]) or None,
-                    input_message_content=InputTextMessageContent(
-                        f"{_DELETE_PREFIX}{rel_path}",
-                    ),
-                )
-            )
-        await update.inline_query.answer(results, cache_time=5, is_personal=True)
-    else:
+    if not local:
         await update.inline_query.answer([], cache_time=5, is_personal=True)
+        return
+
+    cover_urls = await _fetch_tidal_covers([
+        (item["path"], item["tidal_album_id"])
+        for item in local if item["tidal_album_id"]
+    ])
+
+    results = []
+    for item in local:
+        rel_path = os.path.relpath(item["path"], MUSIC_DIR)
+        results.append(_album_result(
+            item["album"], item["artist"], item["tracks"],
+            cover_urls.get(item["path"]),
+            f"{_DELETE_PREFIX}{rel_path}",
+        ))
+    await update.inline_query.answer(results, cache_time=5, is_personal=True)
 
 
 async def _inline_search(update: Update, query: str):
@@ -371,30 +397,15 @@ async def _inline_search(update: Update, query: str):
 
     results = []
     for a in albums:
-        results.append(
-            InlineQueryResultArticle(
-                id=str(uuid4()),
-                title=f"{a['title']} ({a['tracks']} tracks)",
-                description=f"{a['artist']} — album",
-                thumbnail_url=a["cover_url"] or None,
-                input_message_content=InputTextMessageContent(
-                    f"https://tidal.com/album/{a['id']}",
-                ),
-            )
-        )
+        results.append(_album_result(
+            a["title"], a["artist"], a["tracks"],
+            a["cover_url"], f"https://tidal.com/album/{a['id']}",
+        ))
     for t in tracks:
-        mins, secs = divmod(t["duration"], 60)
-        results.append(
-            InlineQueryResultArticle(
-                id=str(uuid4()),
-                title=t["title"],
-                description=f"{t['artist']} — {t['album']} · {mins}:{secs:02d}",
-                thumbnail_url=t["cover_url"] or None,
-                input_message_content=InputTextMessageContent(
-                    f"https://tidal.com/track/{t['id']}",
-                ),
-            )
-        )
+        results.append(_track_result(
+            t["title"], t["artist"], t["album"], t["duration"],
+            t["cover_url"], f"https://tidal.com/track/{t['id']}",
+        ))
 
     # Signal more results available if we got a full page
     next_offset = ""
@@ -449,7 +460,7 @@ async def _inline_lyrics(update: Update, playing: list[dict]):
 
 
 async def _inline_lib_search(update: Update, query: str):
-    """Search Navidrome library and return results with share links."""
+    """Search Navidrome library and return results with share links and Tidal covers."""
     try:
         search_result = await navidrome.search(query)
     except Exception as e:
@@ -457,36 +468,41 @@ async def _inline_lib_search(update: Update, query: str):
         await update.inline_query.answer([], cache_time=5, is_personal=True)
         return
 
+    albums = [a for a in (search_result.get("album") or []) if isinstance(a, dict)]
+    songs = [s for s in (search_result.get("song") or []) if isinstance(s, dict)]
+
+    # Extract Tidal album IDs from song comments for cover art
+    tidal_ids: dict[str, str] = {}  # navidrome albumId -> tidal album id
+    for song in songs:
+        album_id = song.get("albumId", "")
+        if album_id and album_id not in tidal_ids:
+            comment = song.get("comment", "")
+            m = _TIDAL_ALBUM_RE.search(comment) if comment else None
+            if m:
+                tidal_ids[album_id] = m.group(1)
+
+    cover_urls = await _fetch_tidal_covers(list(tidal_ids.items()))
+
     results = []
+    for album in albums:
+        nd_id = album.get("id", "")
+        share_url = await _get_share_url(nd_id, f"{album.get('artist', '')} — {album.get('name', '')}")
+        content = share_url or f"{album.get('artist', '')} — {album.get('name', '')}"
+        results.append(_album_result(
+            album.get("name", "Unknown"), album.get("artist", ""),
+            album.get("songCount", 0), cover_urls.get(nd_id),
+            content,
+        ))
 
-    for album in (search_result.get("album") or []):
-        if isinstance(album, dict):
-            album_id = album.get("id", "")
-            share_url = await _get_share_url(album_id, f"{album.get('artist', '')} — {album.get('name', '')}")
-            content = share_url or f"{album.get('artist', '')} — {album.get('name', '')}"
-            results.append(
-                InlineQueryResultArticle(
-                    id=str(uuid4()),
-                    title=album.get("name", "Unknown"),
-                    description=f"{album.get('artist', '')} — {album.get('songCount', '?')} tracks",
-                    input_message_content=InputTextMessageContent(content),
-                )
-            )
-
-    for song in (search_result.get("song") or []):
-        if isinstance(song, dict):
-            song_id = song.get("id", "")
-            share_url = await _get_share_url(song_id, f"{song.get('artist', '')} — {song.get('title', '')}")
-            content = share_url or f"{song.get('artist', '')} — {song.get('title', '')}"
-            mins, secs = divmod(song.get("duration", 0), 60)
-            results.append(
-                InlineQueryResultArticle(
-                    id=str(uuid4()),
-                    title=song.get("title", "Unknown"),
-                    description=f"{song.get('artist', '')} — {song.get('album', '')} · {mins}:{secs:02d}",
-                    input_message_content=InputTextMessageContent(content),
-                )
-            )
+    for song in songs:
+        song_id = song.get("id", "")
+        share_url = await _get_share_url(song_id, f"{song.get('artist', '')} — {song.get('title', '')}")
+        content = share_url or f"{song.get('artist', '')} — {song.get('title', '')}"
+        results.append(_track_result(
+            song.get("title", "Unknown"), song.get("artist", ""),
+            song.get("album", ""), song.get("duration", 0),
+            cover_urls.get(song.get("albumId", "")), content,
+        ))
 
     await update.inline_query.answer(results, cache_time=15, is_personal=True)
 

@@ -1,14 +1,26 @@
 # Music Bot
 
 [![GitHub Release](https://img.shields.io/github/v/release/eeegoloauq/music-bot)](https://github.com/eeegoloauq/music-bot/releases)
-[![Docker Image Size](https://ghcr-badge.egpl.dev/eeegoloauq/music-bot/size)](https://github.com/eeegoloauq/music-bot/pkgs/container/music-bot)
+[![GHCR](https://img.shields.io/badge/ghcr.io-music--bot-blue)](https://github.com/eeegoloauq/music-bot/pkgs/container/music-bot)
 
-Telegram bot that builds and manages a [Navidrome](https://www.navidrome.org/) music library — download from Tidal (via [Monochrome](https://monochrome.samidy.com)), Spotify, Apple Music, Shazam and more, search and delete albums, share now playing.
+Telegram bot that builds and manages a [Navidrome](https://www.navidrome.org/) music library — download from Tidal (via [Monochrome](https://monochrome.tf)), Spotify, Apple Music, Shazam and more, search and delete albums, share now playing.
 
 <p align="center">
-  <img src=".github/screenshot.png" width="300" alt="Bot demo">
+  <img src=".github/screenshots/search.jpg" width="300" alt="Inline search">
   <br>
-  <em>Album download with metadata tagging and share link</em>
+  <em>Inline search with cover art</em>
+</p>
+
+<p align="center">
+  <img src=".github/screenshots/download.jpg" width="300" alt="Album download">
+  <br>
+  <em>Album download with metadata and share link</em>
+</p>
+
+<p align="center">
+  <img src=".github/screenshots/lyrics.jpg" width="300" alt="Now playing with lyrics">
+  <br>
+  <em>Now playing and lyrics via inline mode</em>
 </p>
 
 ## Features
