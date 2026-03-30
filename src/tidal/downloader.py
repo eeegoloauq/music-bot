@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 import aiohttp
 
 from config import WRITE_TAGS
-from tidal.client import _get_session
+from tidal.client import _get_session, clear_soft_failed
 from tidal.metadata import fetch_album, fetch_track_url, fetch_lyrics
 from tidal.files import _find_existing_track, _sanitize, _track_prefix, _ensure_album_dir, _tidal_cover_url
 from tidal.tagger import _write_tags, _write_m4a_tags, _patch_missing_tags
@@ -224,6 +224,7 @@ async def download_album(
 
     Returns {"album_dir", "downloaded", "skipped", "failed", "total", "format", "with_lyrics"}.
     """
+    clear_soft_failed()  # fresh start — don't penalize instances from previous album
     if album is None:
         album = await fetch_album(album_id)
     artist = _sanitize(album["artist"])

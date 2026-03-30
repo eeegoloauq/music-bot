@@ -7,13 +7,22 @@ import aiohttp
 
 logger = logging.getLogger(__name__)
 
-INSTANCES_URL = "https://monochrome.samidy.com/instances.json"
+INSTANCES_URLS = [
+    "https://tidal-uptime.jiffy-puffs-1j.workers.dev/",
+    "https://tidal-uptime.props-76styles.workers.dev/",
+]
 TIDAL_API_URL = "https://api.tidal.com/v1"
 TIDAL_TOKEN = "CzET4vdadNUFQ5JU"
 LRCLIB_URL = "https://lrclib.net/api/get"
 ODESLI_URL = "https://api.song.link/v1-alpha.1/links"
 
 _BUILTIN_INSTANCES = [
+    # v2.7 — monochrome.tf own backends (discovered from website HAR)
+    "https://frankfurt-1.monochrome.tf",
+    "https://ohio-1.monochrome.tf",
+    "https://singapore-1.monochrome.tf",
+    "https://hifi.geeked.wtf",
+    # v2.5-2.7 — public instances from instances.json
     "https://eu-central.monochrome.tf",
     "https://us-west.monochrome.tf",
     "https://arran.monochrome.tf",
@@ -35,6 +44,7 @@ _instances: list[str] = []
 _instances_updated: float = 0
 _INSTANCES_TTL = 1800  # refresh every 30 min
 _dead_instances: set[str] = set()  # connection-failed instances, cleared on refresh
+_soft_failed: set[str] = set()  # instances that returned non-200 (403 etc), tried last
 
 _session: aiohttp.ClientSession | None = None
 _lrclib_sem: asyncio.Semaphore | None = None  # created lazily in async context
@@ -62,21 +72,33 @@ async def close():
 
 
 async def _refresh_instances() -> list[str]:
-    """Fetch instance list from remote, fall back to builtin."""
+    """Fetch live instance list from uptime API, fall back to builtin."""
     global _instances, _instances_updated
-    _dead_instances.clear()
-    try:
-        session = await _get_session()
-        async with session.get(INSTANCES_URL, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-            data = await resp.json(content_type=None)
-        fetched = [url.rstrip("/") for url in data.get("api", [])]
-        if fetched:
-            _instances = fetched
-            _instances_updated = time.monotonic()
-            logger.info("Loaded %d instances from remote", len(_instances))
-            return _instances
-    except Exception as e:
-        logger.warning("Failed to fetch instances: %s", e)
+    session = await _get_session()
+    for url in INSTANCES_URLS:
+        try:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                data = await resp.json(content_type=None)
+            # Uptime API returns {api: [{url, version}, ...], down: [{url, ...}, ...]}
+            api_entries = data.get("api", [])
+            fetched = [e["url"].rstrip("/") if isinstance(e, dict) else e.rstrip("/")
+                       for e in api_entries]
+            down_entries = data.get("down", [])
+            down_urls = {e["url"].rstrip("/") if isinstance(e, dict) else e.rstrip("/")
+                         for e in down_entries}
+            if fetched:
+                if set(fetched) != set(_instances):
+                    _dead_instances.clear()
+                    _soft_failed.clear()
+                # Pre-mark known-down instances
+                _dead_instances.update(down_urls & set(_BUILTIN_INSTANCES))
+                _instances = fetched
+                _instances_updated = time.monotonic()
+                logger.info("Loaded %d instances from uptime API (%d down)",
+                            len(_instances), len(down_urls))
+                return _instances
+        except Exception as e:
+            logger.warning("Failed to fetch instances from %s: %s", url, e)
     if not _instances:
         _instances = list(_BUILTIN_INSTANCES)
         _instances_updated = time.monotonic()
@@ -88,6 +110,11 @@ async def _get_instances() -> list[str]:
     if not _instances or (time.monotonic() - _instances_updated) > _INSTANCES_TTL:
         await _refresh_instances()
     return _instances
+
+
+def clear_soft_failed():
+    """Clear soft-failed instance list. Call at start of each album download."""
+    _soft_failed.clear()
 
 
 async def _api_get(path: str) -> dict:
@@ -102,19 +129,29 @@ async def _api_get(path: str) -> dict:
     active = [i for i in instances if i not in _dead_instances]
     if not active:
         _dead_instances.clear()
+        _soft_failed.clear()
         active = instances
 
-    for inst in active:
+    # Skip soft-failed instances — they already returned errors this session.
+    # If all are soft-failed, clear and give everyone a fresh chance.
+    candidates = [i for i in active if i not in _soft_failed]
+    if not candidates:
+        _soft_failed.clear()
+        candidates = active
+
+    for inst in candidates:
         url = f"{inst}{path}"
         try:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(connect=4, total=20)) as resp:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(connect=4, total=10)) as resp:
                 if resp.status != 200:
                     last_err = f"HTTP {resp.status} from {inst}"
+                    _soft_failed.add(inst)
                     continue
                 body = await resp.json(content_type=None)
                 if isinstance(body, dict) and "detail" in body:
                     last_err = f"{inst}: {body['detail']}"
                     logger.warning("Instance %s: %s", inst, body["detail"])
+                    _soft_failed.add(inst)
                     continue
                 if isinstance(body, dict) and "data" in body:
                     return body["data"]

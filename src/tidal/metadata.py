@@ -9,7 +9,7 @@ from config import QUALITY
 from tidal.files import _tidal_cover_url
 from tidal.client import (
     _api_get, _get_session, _get_instances, _get_lrclib_sem,
-    _dead_instances,
+    _dead_instances, _soft_failed,
     TIDAL_API_URL, TIDAL_TOKEN, LRCLIB_URL,
 )
 
@@ -109,16 +109,18 @@ async def _fetch_hires(track_id: str) -> tuple[dict, dict] | None:
     instances = await _get_instances()
     session = await _get_session()
     path = f"/track/?id={track_id}&quality=HI_RES_LOSSLESS"
-    for inst in instances:
-        if inst in _dead_instances:
-            continue
+    active = [i for i in instances if i not in _dead_instances]
+    candidates = [i for i in active if i not in _soft_failed]
+    for inst in candidates:
         url = f"{inst}{path}"
         try:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(connect=4, total=20)) as resp:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(connect=4, total=10)) as resp:
                 if resp.status != 200:
+                    _soft_failed.add(inst)
                     continue
                 body = await resp.json(content_type=None)
             if isinstance(body, dict) and "detail" in body:
+                _soft_failed.add(inst)
                 continue
             data = body.get("data", body)
             manifest_b64 = data.get("manifest", "")
