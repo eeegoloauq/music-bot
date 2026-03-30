@@ -10,7 +10,7 @@ from tidal.files import _tidal_cover_url
 from tidal.client import (
     _api_get, _get_session, _get_instances, _get_lrclib_sem,
     _dead_instances, _soft_failed,
-    TIDAL_API_URL, TIDAL_TOKEN, LRCLIB_URL,
+    LRCLIB_URL,
 )
 
 logger = logging.getLogger(__name__)
@@ -212,14 +212,8 @@ async def fetch_track_url(track_id: str, quality: str | None = None) -> tuple[di
 
 
 async def fetch_single_track(track_id: str) -> tuple[dict, dict]:
-    """Fetch a single track's metadata via Tidal public API + parent album."""
-    session = await _get_session()
-    url = f"{TIDAL_API_URL}/tracks/{track_id}?countryCode=US"
-    headers = {"x-tidal-token": TIDAL_TOKEN}
-    async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-        if resp.status != 200:
-            raise RuntimeError(f"Tidal API returned {resp.status} for track {track_id}")
-        data = await resp.json(content_type=None)
+    """Fetch a single track's metadata via hifi-api /info/ + parent album."""
+    data = await _api_get(f"/info/?id={track_id}")
 
     album_data = data.get("album", {})
     album_id = str(album_data.get("id", ""))
@@ -249,29 +243,32 @@ async def fetch_single_track(track_id: str) -> tuple[dict, dict]:
 
 
 async def search(query: str, album_limit: int = 3, track_limit: int = 5) -> dict:
-    """Search Tidal for albums and tracks.
+    """Search Tidal for albums and tracks via hifi-api.
 
     Returns {"albums": [...], "tracks": [...]}.
     Each album: {id, title, artist, tracks, cover_url}
     Each track: {id, title, artist, album, duration, cover_url}
     """
-    session = await _get_session()
-    url = f"{TIDAL_API_URL}/search"
-    params = {"query": query, "countryCode": "US", "limit": str(max(album_limit, track_limit))}
-    headers = {"x-tidal-token": TIDAL_TOKEN}
-    try:
-        async with session.get(url, headers=headers, params=params,
-                               timeout=aiohttp.ClientTimeout(total=10)) as resp:
-            if resp.status != 200:
-                logger.warning("Tidal search returned HTTP %d for '%s'", resp.status, query)
-                return {"albums": [], "tracks": []}
-            data = await resp.json(content_type=None)
-    except Exception as e:
-        logger.warning("Tidal search failed for '%s': %s", query, e)
-        return {"albums": [], "tracks": []}
+    import asyncio
+
+    async def _search_albums():
+        try:
+            return await _api_get(f"/search/?al={query}&limit={album_limit}")
+        except Exception as e:
+            logger.warning("Album search failed for '%s': %s", query, e)
+            return {}
+
+    async def _search_tracks():
+        try:
+            return await _api_get(f"/search/?s={query}&limit={track_limit}")
+        except Exception as e:
+            logger.warning("Track search failed for '%s': %s", query, e)
+            return {}
+
+    al_data, tr_data = await asyncio.gather(_search_albums(), _search_tracks())
 
     albums = []
-    for item in data.get("albums", {}).get("items", [])[:album_limit]:
+    for item in al_data.get("albums", {}).get("items", [])[:album_limit]:
         albums.append({
             "id": str(item["id"]),
             "title": item.get("title", "Unknown"),
@@ -280,8 +277,9 @@ async def search(query: str, album_limit: int = 3, track_limit: int = 5) -> dict
             "cover_url": _tidal_cover_url(item.get("cover", ""), 320),
         })
 
+    track_items = tr_data.get("items", [])
     tracks = []
-    for item in data.get("tracks", {}).get("items", [])[:track_limit]:
+    for item in track_items[:track_limit]:
         album_data = item.get("album", {})
         tracks.append({
             "id": str(item["id"]),
@@ -296,22 +294,12 @@ async def search(query: str, album_limit: int = 3, track_limit: int = 5) -> dict
 
 
 async def fetch_cover_url(album_id: str, size: int = 320) -> str:
-    """Get Tidal cover art URL for an album. Returns URL or empty string."""
-    session = await _get_session()
-    url = f"{TIDAL_API_URL}/albums/{album_id}?countryCode=US"
-    headers = {"x-tidal-token": TIDAL_TOKEN}
+    """Get Tidal cover art URL for an album via hifi-api. Returns URL or empty string."""
     try:
-        async with session.get(url, headers=headers,
-                               timeout=aiohttp.ClientTimeout(total=5)) as resp:
-            if resp.status != 200:
-                return ""
-            data = await resp.json(content_type=None)
-        result = _tidal_cover_url(data.get("cover", ""), size)
-        if result:
-            return result
+        data = await _api_get(f"/album/?id={album_id}")
+        return _tidal_cover_url(data.get("cover", ""), size)
     except Exception:
-        pass
-    return ""
+        return ""
 
 
 async def fetch_lyrics(track_name: str, artist_name: str, album_name: str,
