@@ -11,8 +11,6 @@ INSTANCES_URLS = [
     "https://tidal-uptime.jiffy-puffs-1j.workers.dev/",
     "https://tidal-uptime.props-76styles.workers.dev/",
 ]
-TIDAL_API_URL = "https://api.tidal.com/v1"
-TIDAL_TOKEN = "CzET4vdadNUFQ5JU"
 LRCLIB_URL = "https://lrclib.net/api/get"
 ODESLI_URL = "https://api.song.link/v1-alpha.1/links"
 
