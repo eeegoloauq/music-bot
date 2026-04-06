@@ -15,7 +15,7 @@ from tidal.tagger import _write_tags, _write_m4a_tags, _patch_missing_tags
 
 logger = logging.getLogger(__name__)
 
-ProgressCallback = Callable[[int, int, str], Awaitable[None]] | None
+ProgressCallback = Callable[[int, int, int, int, str], Awaitable[None]] | None
 
 
 async def _download_flac(url: str, filepath: str, max_retries: int = 3) -> int:
@@ -284,9 +284,11 @@ async def download_album(
         for _, track in to_download
     }
 
-    for i, track in to_download:
+    download_total = len(to_download)
+
+    for download_idx, (i, track) in enumerate(to_download, 1):
         if progress:
-            await progress(i, total, track["title"])
+            await progress(i, total, download_idx, download_total, track["title"])
 
         disc = track.get("discNumber", 1)
         num = track.get("trackNumber", 0)
