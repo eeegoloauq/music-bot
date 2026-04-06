@@ -321,11 +321,11 @@ async def _download_album(update: Update, album_id: str, quality: str | None = N
 
         _progress_start = time.monotonic()
 
-        async def progress(current, total, track_title):
-            done = current - 1  # tracks finished before this one
+        async def progress(current, total, download_current, download_total, track_title):
+            done = download_current - 1  # downloads finished before this one
             elapsed = time.monotonic() - _progress_start
             if done > 0:
-                eta_sec = (elapsed / done) * (total - done)
+                eta_sec = (elapsed / done) * (download_total - done)
                 if eta_sec >= 60:
                     eta = f"~{int(eta_sec // 60)}m {int(eta_sec % 60)}s left"
                 else:

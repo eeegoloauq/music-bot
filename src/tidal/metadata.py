@@ -25,13 +25,26 @@ def _parse_artists(artists_list: list, fallback: str = "Unknown Artist") -> tupl
 
 
 async def fetch_album(album_id: str) -> dict:
-    data = await _api_get(f"/album/?id={album_id}")
+    limit = 500
+    data = await _api_get(f"/album/?id={album_id}&limit={limit}")
+    items = list(data.get("items", []))
+    total_tracks = int(data.get("numberOfTracks") or 0)
+    offset = len(items)
+
+    while total_tracks and offset < total_tracks:
+        page = await _api_get(f"/album/?id={album_id}&limit={limit}&offset={offset}")
+        page_items = page.get("items", [])
+        if not page_items:
+            break
+        items.extend(page_items)
+        offset += len(page_items)
+
     cover_uuid = data.get("cover", "")
 
     album_artist = data.get("artist", {}).get("name", "Unknown Artist")
 
     tracks = []
-    for entry in data.get("items", []):
+    for entry in items:
         item = entry.get("item", entry)
         artists_list = item.get("artists", [])
         track_artist, feat_artists = _parse_artists(artists_list, album_artist)
@@ -60,7 +73,7 @@ async def fetch_album(album_id: str) -> dict:
         "copyright": data.get("copyright", ""),
         "upc": data.get("upc", ""),
         "numberOfVolumes": data.get("numberOfVolumes", 1),
-        "numberOfTracks": data.get("numberOfTracks", len(tracks)),
+        "numberOfTracks": total_tracks or len(tracks),
         "type": data.get("type", ""),
         "tracks": tracks,
     }
