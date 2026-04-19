@@ -6,3 +6,9 @@ tmp/
 test/
 .venv/
 venv/
+.claude/
+node_modules/
+package.json
+package-lock.json
+AGENTS.md
+src/tidal/AGENTS.md
