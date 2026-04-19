@@ -225,8 +225,8 @@ async def _ensure_cached(bot, user_id: int, entry: dict) -> str | None:
 
     # we're the first — do the upload
     event = asyncio.Event()
-    _upload_events[song_id] = event
     try:
+        _upload_events[song_id] = event
         t0 = time.monotonic()
         suffix = entry.get("suffix", "")
         local_path = os.path.join(MUSIC_DIR, entry.get("path", "")) if entry.get("path") else ""
