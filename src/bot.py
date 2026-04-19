@@ -195,17 +195,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def _handle_delete(update: Update, rel_path: str):
     """Delete a local album folder and trigger rescan."""
     full_path = os.path.normpath(os.path.join(MUSIC_DIR, rel_path))
+    # Resolve symlinks so a planted link like /music/X -> /etc can't escape the check.
+    real_path = os.path.realpath(full_path)
+    real_music_dir = os.path.realpath(MUSIC_DIR)
 
-    # Safety: must be inside MUSIC_DIR and at least 2 levels deep (Artist/Album)
-    if not full_path.startswith(os.path.normpath(MUSIC_DIR) + os.sep):
+    if not real_path.startswith(real_music_dir + os.sep):
         await update.message.reply_text("Invalid path.")
         return
-    depth = os.path.relpath(full_path, MUSIC_DIR).count(os.sep)
+    depth = os.path.relpath(real_path, real_music_dir).count(os.sep)
     if depth < 1:
         await update.message.reply_text("Cannot delete top-level directories.")
         return
 
-    if not os.path.isdir(full_path):
+    if os.path.islink(full_path) or not os.path.isdir(full_path):
         await update.message.reply_text(f"Not found: {rel_path}")
         return
 
