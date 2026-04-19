@@ -60,6 +60,13 @@ _album_share_cache: dict[str, str] = {}
 _CACHE_MAX = 500
 # serialize album/track downloads so Tidal CDN doesn't throttle
 _download_semaphore = asyncio.Semaphore(1)
+# album/track IDs currently downloading or queued — drops duplicate pastes
+_in_flight: set[str] = set()
+
+
+def _short(e: BaseException, limit: int = 120) -> str:
+    s = str(e)
+    return s if len(s) <= limit else s[: limit - 3] + "..."
 
 
 def authorized(func):
@@ -257,7 +264,7 @@ async def _resolve_and_download(update: Update, url: str, suffix: str, force: bo
         result = await tidal.resolve_link(url)
     except Exception as e:
         logger.error("Odesli resolve failed for %s: %s", url, e)
-        await status_msg.edit_text(f"Failed to resolve link: {e}")
+        await status_msg.edit_text(f"Failed to resolve link: {_short(e)}")
         return
 
     if result is None:
@@ -292,6 +299,18 @@ async def _send_result(update: Update, status_msg, text: str, album_dir: str) ->
 
 
 async def _download_album(update: Update, album_id: str, quality: str | None = None, force: bool = False):
+    key = f"album:{album_id}"
+    if key in _in_flight:
+        await update.message.reply_text("Already queued.")
+        return
+    _in_flight.add(key)
+    try:
+        await _do_download_album(update, album_id, quality=quality, force=force)
+    finally:
+        _in_flight.discard(key)
+
+
+async def _do_download_album(update: Update, album_id: str, quality: str | None = None, force: bool = False):
     if _download_semaphore.locked():
         status_msg = await update.message.reply_text("Queued, waiting for current download...")
     else:
@@ -303,7 +322,7 @@ async def _download_album(update: Update, album_id: str, quality: str | None = N
             album = await tidal.fetch_album(album_id)
         except Exception as e:
             logger.error("Failed to fetch album %s: %s", album_id, e)
-            await status_msg.edit_text(f"Failed to fetch album info: {e}")
+            await status_msg.edit_text(f"Failed to fetch album info: {_short(e)}")
             return
 
         # Force re-download: rename existing album directory to .bak
@@ -370,7 +389,7 @@ async def _download_album(update: Update, album_id: str, quality: str | None = N
                     shutil.rmtree(target)
                 os.rename(backup_dir, target)
                 logger.info("Force re-download failed, restored backup: %s", target)
-            await status_msg.edit_text(f"Download failed: {e}")
+            await status_msg.edit_text(f"Download failed: {_short(e)}")
             return
 
         # Clean up backup after successful download
@@ -413,6 +432,18 @@ async def _download_album(update: Update, album_id: str, quality: str | None = N
 
 
 async def _download_track(update: Update, track_id: str, quality: str | None = None, force: bool = False):
+    key = f"track:{track_id}"
+    if key in _in_flight:
+        await update.message.reply_text("Already queued.")
+        return
+    _in_flight.add(key)
+    try:
+        await _do_download_track(update, track_id, quality=quality, force=force)
+    finally:
+        _in_flight.discard(key)
+
+
+async def _do_download_track(update: Update, track_id: str, quality: str | None = None, force: bool = False):
     if _download_semaphore.locked():
         status_msg = await update.message.reply_text("Queued, waiting for current download...")
     else:
@@ -424,7 +455,7 @@ async def _download_track(update: Update, track_id: str, quality: str | None = N
             track, album_ctx = await tidal.fetch_single_track(track_id)
         except Exception as e:
             logger.error("Failed to fetch track %s: %s", track_id, e)
-            await status_msg.edit_text(f"Failed to fetch track info: {e}")
+            await status_msg.edit_text(f"Failed to fetch track info: {_short(e)}")
             return
 
         # Force re-download: remove existing track file
@@ -450,7 +481,7 @@ async def _download_track(update: Update, track_id: str, quality: str | None = N
         )
         except Exception as e:
             logger.error("Track download failed (%s — %s): %s", track["artist"], track["title"], e)
-            await status_msg.edit_text(f"Download failed: {e}")
+            await status_msg.edit_text(f"Download failed: {_short(e)}")
             return
 
         if was_downloaded:
