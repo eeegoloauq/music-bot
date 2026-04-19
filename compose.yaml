@@ -1,0 +1,15 @@
+services:
+  music-bot:
+    build:
+      context: .
+      args:
+        HTTP_PROXY: http://192.168.1.99:1080
+        HTTPS_PROXY: http://192.168.1.99:1080
+    container_name: music-bot
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - /media/music:/music
+    extra_hosts:
+      - host.docker.internal:host-gateway
+networks: {}
