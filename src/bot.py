@@ -215,16 +215,20 @@ async def _handle_delete(update: Update, rel_path: str):
     album_name = os.path.basename(full_path)
     artist_name = os.path.basename(artist_dir)
 
-    shutil.rmtree(full_path)
+    await asyncio.to_thread(shutil.rmtree, full_path)
     logger.info("Deleted album: %s/%s", artist_name, album_name)
 
-    # Remove empty artist folder
-    try:
-        if not os.listdir(artist_dir):
-            os.rmdir(artist_dir)
-            logger.info("Removed empty artist folder: %s", artist_name)
-    except OSError:
-        pass
+    def _remove_if_empty(d: str) -> bool:
+        try:
+            if not os.listdir(d):
+                os.rmdir(d)
+                return True
+        except OSError:
+            pass
+        return False
+
+    if await asyncio.to_thread(_remove_if_empty, artist_dir):
+        logger.info("Removed empty artist folder: %s", artist_name)
 
     scan_note = await _trigger_scan()
     await update.message.reply_text(f"Deleted: {artist_name} — {album_name}\n{scan_note}")
