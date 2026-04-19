@@ -486,9 +486,20 @@ async def _try_share_album(artist: str, title: str, skip_delay: bool = False) ->
         return None
 
 
+async def _reset_bot_pools(app: Application) -> None:
+    """Drop pooled HTTPX connections so a dead TCP tunnel isn't reused after the link recovers."""
+    for req in app.bot._request:
+        try:
+            await req.shutdown()
+            await req.initialize()
+        except Exception:
+            pass
+
+
 async def _error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     if isinstance(context.error, NetworkError):
         logger.warning("Network error (will retry): %s", context.error)
+        await _reset_bot_pools(context.application)
         return
     logger.exception("Unhandled exception", exc_info=context.error)
 
@@ -510,7 +521,12 @@ def _build_app() -> Application:
     app = (
         Application.builder()
         .token(TG_TOKEN)
-        .get_updates_request(HTTPXRequest(pool_timeout=5.0))
+        .get_updates_request(HTTPXRequest(
+            connect_timeout=10.0,
+            read_timeout=20.0,
+            write_timeout=10.0,
+            pool_timeout=5.0,
+        ))
         .post_init(_post_init)
         .post_shutdown(_shutdown)
         .build()
