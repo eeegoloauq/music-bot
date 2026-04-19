@@ -24,6 +24,7 @@ from config import TG_TOKEN, ALLOWED_USERS, MUSIC_DIR, NAVI_LOGIN, NAVI_PASS, NA
 import tidal
 import navidrome
 from inline import handle_inline_query, _DELETE_PREFIX
+from tidal.files import _sanitize, _find_existing_track
 
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
@@ -308,7 +309,6 @@ async def _download_album(update: Update, album_id: str, quality: str | None = N
         # Force re-download: rename existing album directory to .bak
         backup_dir = None
         if force:
-            from tidal.files import _sanitize
             album_dir = os.path.join(MUSIC_DIR, _sanitize(album["artist"]), _sanitize(album["title"]))
             if os.path.isdir(album_dir):
                 backup_dir = album_dir + ".bak"
@@ -326,10 +326,17 @@ async def _download_album(update: Update, album_id: str, quality: str | None = N
             pass
 
         _progress_start = time.monotonic()
+        _last_edit = [0.0]
 
         async def progress(current, total, download_current, download_total, track_title):
+            # Throttle mid-album edits so Telegram doesn't rate-limit; always
+            # emit the first and last so the user sees start and completion.
+            now = time.monotonic()
+            if current not in (1, total) and (now - _last_edit[0]) < 3.0:
+                return
+            _last_edit[0] = now
             done = download_current - 1  # downloads finished before this one
-            elapsed = time.monotonic() - _progress_start
+            elapsed = now - _progress_start
             if done > 0:
                 eta_sec = (elapsed / done) * (download_total - done)
                 if eta_sec >= 60:
@@ -422,7 +429,6 @@ async def _download_track(update: Update, track_id: str, quality: str | None = N
 
         # Force re-download: remove existing track file
         if force:
-            from tidal.files import _sanitize, _find_existing_track
             album_dir = os.path.join(
                 MUSIC_DIR, _sanitize(album_ctx.get("artist", track["artist"])),
                 _sanitize(album_ctx.get("title", "Singles")),

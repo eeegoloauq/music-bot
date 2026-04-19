@@ -168,7 +168,7 @@ async def download_single_track(track: dict, album_ctx: dict, dest_dir: str,
     album_title = _sanitize(album_ctx.get("title", "Singles"))
     album_dir = _ensure_album_dir(dest_dir, artist, album_title)
 
-    existing = _find_existing_track(album_dir, track)
+    existing = await asyncio.to_thread(_find_existing_track, album_dir, track)
     if existing:
         added = await _patch_missing_tags(existing, track, album_ctx)
         if added:
@@ -248,7 +248,7 @@ async def download_album(
     to_download: list[tuple[int, dict]] = []
 
     for i, track in enumerate(album["tracks"], 1):
-        existing = _find_existing_track(album_dir, track)
+        existing = await asyncio.to_thread(_find_existing_track, album_dir, track)
         if existing:
             existing_map[track["id"]] = existing
         else:

@@ -15,6 +15,8 @@ from telegram import (
     Update,
 )
 from telegram.ext import ContextTypes
+from mutagen.flac import FLAC
+from mutagen.mp4 import MP4
 
 from config import ALLOWED_USERS, MUSIC_DIR
 import tidal
@@ -60,9 +62,6 @@ _NP_CACHE_TTL = 2  # seconds
 
 def _find_tidal_album_id_in_dir(album_dir: str) -> str:
     """Find Tidal album ID from any audio file's comment tag in a directory."""
-    from mutagen.flac import FLAC
-    from mutagen.mp4 import MP4
-
     if not os.path.isdir(album_dir):
         return ""
     try:
@@ -89,9 +88,6 @@ def _find_tidal_album_id_in_dir(album_dir: str) -> str:
 
 def _read_lyrics_from_file(filepath: str) -> str | None:
     """Read plain or synced lyrics from a FLAC/M4A file."""
-    from mutagen.flac import FLAC
-    from mutagen.mp4 import MP4
-
     try:
         ext = os.path.splitext(filepath)[1].lower()
         if ext == ".flac":
@@ -129,9 +125,6 @@ def _search_local_albums(query: str, limit: int = 5) -> list[dict]:
 
     Returns list of {artist, album, path, tracks, tidal_album_id}.
     """
-    from mutagen.flac import FLAC
-    from mutagen.mp4 import MP4
-
     query_lower = query.lower()
     results = []
     try:
@@ -201,6 +194,7 @@ async def _ensure_cached(bot, user_id: int, entry: dict) -> str | None:
     song_id = entry["songId"]
 
     if song_id in _file_id_cache:
+        _file_id_cache.move_to_end(song_id)
         logger.info("Inline: %s — %s (cached)", entry["artist"], entry["title"])
         return _file_id_cache[song_id]
 

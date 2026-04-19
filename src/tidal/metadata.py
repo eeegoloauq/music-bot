@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import json
 import logging
@@ -262,8 +263,6 @@ async def search(query: str, album_limit: int = 3, track_limit: int = 5) -> dict
     Each album: {id, title, artist, tracks, cover_url}
     Each track: {id, title, artist, album, duration, cover_url}
     """
-    import asyncio
-
     async def _search_albums():
         try:
             return await _api_get(f"/search/?al={query}&limit={album_limit}")
