@@ -1,10 +1,9 @@
 """Public metadata API: ``fetch_album``, ``fetch_single_track``, ``search``,
 ``fetch_cover_url``, ``fetch_lyrics``. Backed by Deezer's open API + lrclib.
 
-The ``cover_uuid`` field in returned dicts is a historical name — it holds a
-full Deezer CDN URL string. ``client.cover_url`` resizes it on demand for
-thumbnails. ``library.files._cover_url`` keeps a passthrough branch for raw
-Tidal UUIDs in case any pre-migration data flows through.
+The ``cover_uuid`` field in returned dicts holds a full Deezer CDN URL — the
+name is historical (it predates the Deezer migration). ``client.cover_url``
+and ``library.files._cover_url`` resize it for thumbnails / full art.
 """
 
 import asyncio

@@ -18,7 +18,7 @@ Before non-trivial changes:
 
 Telegram bot that ingests music links from supported platforms (Tidal, Spotify, Apple Music, Deezer, YouTube Music, SoundCloud, Shazam, etc.), resolves them to canonical album/track metadata via **Deezer's open API**, downloads the audio from **Soulseek peers via slskd**, tags files with the canonical metadata, and drops them into a local Navidrome library.
 
-## Architecture (April 2026 — post-Monochrome)
+## Architecture
 
 ```
 Telegram message
@@ -64,9 +64,9 @@ src/navidrome.py      — triggers Subsonic-style scan after writes
 
 - **Quality cap**: `MAX_BIT_DEPTH` and `MAX_SAMPLE_RATE_HZ` env vars filter Soulseek peers above the cap. Defaults `24` / `96000` cover all reasonable hi-res; `16` / `44100` for redbook-only deployments.
 - **slskd quirks** (handled in `soulseek/client.py`): completed searches must be deleted before new ones to avoid silent empty `responses` arrays; explicit `stop()` is required to transition InProgress→Complete and expose responses.
-- **Proxy support**: every aiohttp session respects `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` env vars (the aiohttp default). If a deployment's proxy gets throttled by a specific upstream (Odesli, Deezer CDN, etc.), add the host to `NO_PROXY` so those requests go direct.
-- **Tag normalisation**: in force-mode the FLAC/M4A taggers wipe all existing tags before writing. They preserve a small allow-list (`composer`, `lyricist`, `performer`, peer's `comment` appended after our identifier).
-- **Cover art**: stored in album dict as `cover_uuid` (historical field name) but actually holds the full Deezer CDN URL; `library.files._cover_url` passes URLs through and resizes via the Deezer URL pattern. The legacy Tidal-UUID branch is dead but kept for safety.
+- **Proxy support**: every aiohttp session uses `trust_env=True` so it respects `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` env vars (aiohttp's default is `False` — env vars get ignored without it). If a deployment's proxy gets throttled by a specific upstream (Odesli, Deezer CDN, lrclib), add that host to `NO_PROXY` so those requests go direct.
+- **Tag normalisation**: in force-mode the FLAC / M4A / mp3 taggers wipe all existing tags before writing. They preserve a small allow-list (`composer`, `lyricist`, `performer`, peer's `comment` appended after our identifier).
+- **Cover art**: stored in album dict as `cover_uuid` (historical field name) — actually holds the full Deezer CDN URL. `library.files._cover_url` and `metadata.client.cover_url` resize it for thumbnails / full-size art.
 
 ## How to deploy
 
