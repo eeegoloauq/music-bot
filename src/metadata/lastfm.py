@@ -66,8 +66,10 @@ _NOISE_TAGS = frozenset({
     "need to hear", "want", "wishlist",
 })
 
-# Year-only tags ("2010", "1990s") aren't musical genres.
-_YEAR_RE = re.compile(r"^(?:19|20)\d{2}s?$")
+# Bare release years like "1992" / "2013" duplicate what's already in the
+# DATE / YEAR tag. Decades like "1990s" / "90s" / "2000s" describe a sonic
+# era and stay (think "90s rock", "70s funk").
+_YEAR_RE = re.compile(r"^(?:19|20)\d{2}$")
 # "best of …" anything: subjective annotation, not a genre.
 _BEST_OF_RE = re.compile(r"^best\s+", re.IGNORECASE)
 # "favourite|favorite [songs|albums|…]" — subjective, not musical.
@@ -106,7 +108,11 @@ def _is_noise(tag: str, artist: str, album: str) -> bool:
 
 
 def _normalize_tag(tag: str) -> str:
-    return tag.strip().title()
+    # ``str.title()`` upper-cases letters after digits, so "90s" comes back as
+    # "90S". Lower-case any single trailing letter that follows a digit so
+    # decade tags read naturally.
+    out = tag.strip().title()
+    return re.sub(r"(\d)([A-Z])(?=\b)", lambda m: m.group(1) + m.group(2).lower(), out)
 
 
 def _get_sem() -> asyncio.Semaphore:
