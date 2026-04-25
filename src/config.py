@@ -20,3 +20,12 @@ STREAM_BITRATE = os.getenv("STREAM_BITRATE", "320")
 NAVI_PUBLIC_URL = os.getenv("NAVIDROME_PUBLIC_URL", "").rstrip("/") or ""
 QUALITY = os.getenv("QUALITY", "LOSSLESS")  # LOSSLESS | HI_RES_LOSSLESS
 WRITE_TAGS = os.getenv("WRITE_TAGS", "true").lower() not in ("false", "0", "no")
+
+# Quality cap for Soulseek peer selection. Files exceeding either cap are
+# excluded from scoring. 0 disables the cap on that dimension.
+# Defaults: 24-bit / 96 kHz — covers all reasonable hi-res masters; rejects
+# 24/192 monsters that double the file size with no audible benefit on
+# consumer playback (especially Bluetooth, where the codec downsamples
+# anyway). Set MAX_BIT_DEPTH=16 + MAX_SAMPLE_RATE_HZ=44100 for redbook-only.
+MAX_BIT_DEPTH = int(os.getenv("MAX_BIT_DEPTH", "24"))
+MAX_SAMPLE_RATE_HZ = int(os.getenv("MAX_SAMPLE_RATE_HZ", "96000"))

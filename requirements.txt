@@ -2,3 +2,4 @@ python-telegram-bot>=21.0
 aiohttp
 mutagen
 python-dotenv
+slskd-api
