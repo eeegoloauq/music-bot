@@ -5,19 +5,19 @@
 
 Telegram bot that builds and manages a [Navidrome](https://www.navidrome.org/) music library — download from Tidal (via [Monochrome](https://monochrome.tf)), Spotify, Apple Music, Shazam and more, search and delete albums, share now playing.
 
-<h3 align="center">Search to download</h3>
+<h2 align="center">Search to download</h2>
 <p align="center">
-  <img src=".github/screenshots/search.jpg" width="400" alt="Inline search">
+  <img src=".github/screenshots/search.jpg" width="480" alt="Inline search">
 </p>
 
-<h3 align="center">Download into your library</h3>
+<h2 align="center">Download into your library</h2>
 <p align="center">
-  <img src=".github/screenshots/download.jpg" width="400" alt="Album download">
+  <img src=".github/screenshots/download.jpg" width="480" alt="Album download">
 </p>
 
-<h3 align="center">Share what you're listening to</h3>
+<h2 align="center">Share what you're listening to</h2>
 <p align="center">
-  <img src=".github/screenshots/share.jpg" width="400" alt="Share now playing">
+  <img src=".github/screenshots/share.jpg" width="480" alt="Share now playing">
 </p>
 
 ## Features
