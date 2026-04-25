@@ -282,7 +282,6 @@ def _match_folder_to_tracks(
     """
     available = [f for f in folder.files if f.is_lossless]
     if not available:
-        # fall back to all audio if no lossless
         available = list(folder.files)
     used: set[int] = set()
     matched: list[SearchResult | None] = []

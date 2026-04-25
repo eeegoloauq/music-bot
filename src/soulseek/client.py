@@ -18,23 +18,23 @@ from dataclasses import dataclass, field
 
 import slskd_api
 
+from config import MAX_FILE_BYTES
+
 logger = logging.getLogger(__name__)
 
 
-# Audio extensions whitelisted for download.
-# LOSSLESS_EXTS is restricted to formats the tagger handles natively (FLAC).
-# WAV/AIFF are technically lossless but the bot has no WAV/AIFF tag writer —
-# they would land on disk as .flac-named files with WAV bytes inside, breaking
-# Navidrome's parse. ALAC content typically uses the .m4a container so its
-# files are handled via the M4A tagger when explicitly accepted.
-# Anything else (.exe/.zip/.rar/.iso/...) is filtered before being scored
-# or enqueued.
+# LOSSLESS_EXTS is FLAC-only because the tagger has no native WAV/AIFF writer
+# — accepting them would put WAV bytes inside .flac-named files. ALAC ships in
+# .m4a so it's handled through the M4A path.
 LOSSLESS_EXTS = {"flac"}
 LOSSY_EXTS = {"mp3", "aac", "m4a", "ogg", "opus", "wma", "alac", "wav", "aiff"}
 AUDIO_EXTS = LOSSLESS_EXTS | LOSSY_EXTS
 
-# Cover art that may live alongside FLAC files inside a peer's album folder.
 IMAGE_EXTS = {"jpg", "jpeg", "png", "webp"}
+
+# Username is dropped into ``<download_dir>/<username>/...`` paths, so anything
+# outside this character set could escape the download root or waste a fs walk.
+_SAFE_USERNAME_RE = re.compile(r"[^A-Za-z0-9._-]")
 
 
 @dataclass
@@ -248,10 +248,13 @@ def _flatten(responses: list[dict], lossless_only: bool = True) -> list[SearchRe
             ext = fname.rsplit(".", 1)[-1].lower() if "." in fname else ""
             if ext not in allowed:
                 continue
+            size = int(f.get("size", 0) or 0)
+            if MAX_FILE_BYTES and size > MAX_FILE_BYTES:
+                continue
             out.append(SearchResult(
                 username=username,
                 filename=fname,
-                size=int(f.get("size", 0) or 0),
+                size=size,
                 bit_rate=f.get("bitRate"),
                 bit_depth=f.get("bitDepth"),
                 sample_rate=f.get("sampleRate"),
@@ -401,6 +404,16 @@ async def cancel_download(username: str, filename: str, remove: bool = True) -> 
 
 # --- file location -----------------------------------------------------------
 
+def _safe_username(username: str) -> str:
+    """Constrain a peer-supplied username to chars safe for path joins.
+    Stripping path separators alone isn't enough — a literal ``..`` survives
+    the char filter and still resolves to the parent dir on join.
+    """
+    cleaned = _SAFE_USERNAME_RE.sub("_", username)[:128]
+    cleaned = cleaned.lstrip(".")
+    return cleaned or "_unknown"
+
+
 def find_local_file(download_dir: str, username: str, remote_filename: str) -> str | None:
     """Locate the on-disk file slskd wrote for a completed transfer.
 
@@ -411,7 +424,7 @@ def find_local_file(download_dir: str, username: str, remote_filename: str) -> s
     basename = remote_filename.rsplit("\\", 1)[-1] if "\\" in remote_filename \
                else remote_filename.rsplit("/", 1)[-1]
 
-    user_dir = os.path.join(download_dir, username)
+    user_dir = os.path.join(download_dir, _safe_username(username))
     if os.path.isdir(user_dir):
         for root, _, files in os.walk(user_dir):
             if basename in files:

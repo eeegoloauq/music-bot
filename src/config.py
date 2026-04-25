@@ -18,14 +18,13 @@ ALLOWED_USERS = [
 MUSIC_DIR = os.getenv("MUSIC_DIR", "/music")
 STREAM_BITRATE = os.getenv("STREAM_BITRATE", "320")
 NAVI_PUBLIC_URL = os.getenv("NAVIDROME_PUBLIC_URL", "").rstrip("/") or ""
-QUALITY = os.getenv("QUALITY", "LOSSLESS")  # LOSSLESS | HI_RES_LOSSLESS
-WRITE_TAGS = os.getenv("WRITE_TAGS", "true").lower() not in ("false", "0", "no")
 
-# Quality cap for Soulseek peer selection. Files exceeding either cap are
-# excluded from scoring. 0 disables the cap on that dimension.
-# Defaults: 24-bit / 96 kHz — covers all reasonable hi-res masters; rejects
-# 24/192 monsters that double the file size with no audible benefit on
-# consumer playback (especially Bluetooth, where the codec downsamples
-# anyway). Set MAX_BIT_DEPTH=16 + MAX_SAMPLE_RATE_HZ=44100 for redbook-only.
+# Soulseek peer quality cap — files above either limit are excluded from
+# scoring. Defaults cover all reasonable hi-res masters; set 16 / 44100 for
+# redbook-only. 0 disables the cap on that dimension.
 MAX_BIT_DEPTH = int(os.getenv("MAX_BIT_DEPTH", "24"))
 MAX_SAMPLE_RATE_HZ = int(os.getenv("MAX_SAMPLE_RATE_HZ", "96000"))
+
+# Hard upper bound on a single peer file (bytes). Keeps a misconfigured /
+# malicious peer from offering a 50 GB "track". 0 disables the cap.
+MAX_FILE_BYTES = int(os.getenv("MAX_FILE_BYTES", str(2 * 1024 * 1024 * 1024)))

@@ -1,16 +1,15 @@
-"""High-level matching: turn a Tidal album/track into the best slskd choice.
+"""High-level matching: turn a Deezer album/track into the best slskd choice.
 
 Two-stage strategy for albums:
 
-  1. Album-folder search (``"Artist Album"``) — try to find a single peer who
-     owns the whole album. If we find one with high confidence, use it;
-     downloading from one peer is faster (single connection, single queue) and
-     the metadata is more consistent.
+  1. Album-folder search (``"Artist Album"``) — find a single peer who owns the
+     whole album. One peer beats stitched-from-many: single connection, single
+     queue position, consistent metadata.
 
-  2. Per-track fallback — if no peer has the full album, iterate per track and
-     pick the best match each time.
+  2. Per-track fallback — when no peer has the full album, iterate per track
+     and pick the best match each time.
 
-For single-track downloads we go directly to per-track search.
+Single-track downloads skip stage 1 entirely.
 """
 
 import asyncio
@@ -113,15 +112,27 @@ async def find_album(
     track_titles = [t.get("title", "") for t in tracks]
 
     queries = _build_album_queries(artist, title)
-    all_folders: dict[tuple[str, str], slskd.PeerFolder] = {}
 
-    for q in queries:
-        responses = await slskd.search(q, timeout_secs=20, response_limit=200)
+    # Run queries in parallel under the same Semaphore(2) + stagger envelope
+    # we use for per-track searches — slskd 429s above ~3 starts/s.
+    sem = asyncio.Semaphore(2)
+
+    async def _run_query(idx: int, q: str) -> list[slskd.PeerFolder]:
+        await asyncio.sleep(idx * 0.4)
+        async with sem:
+            responses = await slskd.search(q, timeout_secs=20, response_limit=200)
         results = slskd.parse_files(responses, lossless_only=True)
-        for f in slskd.group_by_folder(results):
+        return slskd.group_by_folder(results)
+
+    folder_groups = await asyncio.gather(
+        *[_run_query(i, q) for i, q in enumerate(queries)]
+    )
+
+    all_folders: dict[tuple[str, str], slskd.PeerFolder] = {}
+    for group in folder_groups:
+        for f in group:
             key = (f.username, f.directory)
-            if key not in all_folders:
-                all_folders[key] = f
+            all_folders.setdefault(key, f)
 
     if not all_folders:
         return None, []
