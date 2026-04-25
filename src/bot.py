@@ -21,7 +21,8 @@ from telegram.error import NetworkError, TelegramError
 from telegram.request import HTTPXRequest
 
 from config import TG_TOKEN, ALLOWED_USERS, MUSIC_DIR, NAVI_LOGIN, NAVI_PASS, NAVI_PUBLIC_URL
-import tidal
+import metadata as tidal   # new Deezer-backed metadata module (was: import tidal)
+import soulseek
 import navidrome
 from inline import handle_inline_query, _DELETE_PREFIX
 from tidal.files import _sanitize, _find_existing_track
@@ -34,16 +35,17 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("telegram").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
-ALBUM_RE = re.compile(r"(?:monochrome\.samidy\.com|monochrome\.tf|tidal\.com)/album/(\d+)")
-TRACK_RE = re.compile(r"(?:monochrome\.samidy\.com|monochrome\.tf|tidal\.com)/track/(\d+)")
 # Words after the link that trigger HI_RES_LOSSLESS for this download
 _HIRES_RE = re.compile(r"\b(hi|hq|hires|hi-res)\b", re.IGNORECASE)
 # Words that force re-download (delete existing + download fresh)
 _FORCE_RE = re.compile(r"\b(re|force|redownload)\b", re.IGNORECASE)
-# Known music platform URLs that Odesli can resolve to Tidal
+# Music platform URLs we accept as download triggers. All are routed through
+# metadata.resolve_link, which understands them natively (Deezer, plain ID
+# extraction) or delegates to Odesli (Tidal/Spotify/Apple/YT/Shazam/etc).
 _MUSIC_LINK_RE = re.compile(
     r"https?://(?:"
-    r"open\.spotify\.com|spotify\.link"
+    r"(?:listen\.|www\.)?tidal\.com"
+    r"|open\.spotify\.com|spotify\.link"
     r"|music\.apple\.com"
     r"|(?:www\.)?deezer\.com"
     r"|music\.youtube\.com"
@@ -65,7 +67,14 @@ _in_flight: set[str] = set()
 
 
 def _short(e: BaseException, limit: int = 120) -> str:
-    s = str(e)
+    """Render an exception for user-facing chat messages.
+
+    Strips full URLs because aiohttp / requests stringify exceptions with the
+    failed URL embedded — and `trust_env=True` sessions can include the proxy
+    host in those URLs. The chat is private to allowed users but there's no
+    reason to leak proxy/internal hostnames into bot replies.
+    """
+    s = re.sub(r"https?://\S+", "<url>", str(e))
     return s if len(s) <= limit else s[: limit - 3] + "..."
 
 
@@ -185,17 +194,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     quality = "HI_RES_LOSSLESS" if _HIRES_RE.search(text) else None
     force = bool(_FORCE_RE.search(text))
 
-    album_matches = ALBUM_RE.findall(text)
-    track_matches = TRACK_RE.findall(text) if not album_matches else []
-    music_matches = _MUSIC_LINK_RE.findall(text) if not album_matches and not track_matches else []
-
-    if album_matches:
-        for album_id in album_matches:
-            await _download_album(update, album_id, quality=quality, force=force)
-    elif track_matches:
-        for track_id in track_matches:
-            await _download_track(update, track_id, quality=quality, force=force)
-    elif music_matches:
+    music_matches = _MUSIC_LINK_RE.findall(text)
+    if music_matches:
         for url in music_matches:
             await _resolve_and_download(update, url, text, force=force)
 
@@ -268,7 +268,7 @@ async def _resolve_and_download(update: Update, url: str, suffix: str, force: bo
         return
 
     if result is None:
-        await status_msg.edit_text("Not found on Tidal.")
+        await status_msg.edit_text("Could not resolve link.")
         return
 
     link_type, tidal_id = result
@@ -347,37 +347,55 @@ async def _do_download_album(update: Update, album_id: str, quality: str | None 
         _progress_start = time.monotonic()
         _last_edit = [0.0]
 
-        async def progress(current, total, download_current, download_total, track_title):
+        async def progress(current, total, download_current, download_total, track_title,
+                            transfer=None):
             # Throttle mid-album edits so Telegram doesn't rate-limit; always
             # emit the first and last so the user sees start and completion.
             now = time.monotonic()
-            if current not in (1, total) and (now - _last_edit[0]) < 3.0:
+            is_track_edge = current in (1, total) and transfer is None
+            if not is_track_edge and (now - _last_edit[0]) < 3.0:
                 return
             _last_edit[0] = now
-            done = download_current - 1  # downloads finished before this one
+            done = download_current - 1
             elapsed = now - _progress_start
-            if done > 0:
-                eta_sec = (elapsed / done) * (download_total - done)
+            # Track-level live info from slskd: download speed + ETA for this file.
+            track_extras = ""
+            if transfer:
+                speed_bps = transfer.get("speed_bps", 0) or 0
+                eta_sec = transfer.get("eta_sec", 0) or 0
+                pct = transfer.get("pct", 0) or 0
+                if speed_bps > 0:
+                    if speed_bps >= 1_048_576:
+                        speed_s = f"{speed_bps / 1_048_576:.1f} MB/s"
+                    else:
+                        speed_s = f"{speed_bps / 1024:.0f} KB/s"
+                    track_extras = f" · {pct:.0f}% · {speed_s}"
+                    if eta_sec:
+                        if eta_sec >= 60:
+                            track_extras += f" · ~{eta_sec // 60}m {eta_sec % 60}s"
+                        else:
+                            track_extras += f" · ~{eta_sec}s"
+            # Album-level ETA based on completed tracks
+            album_eta = ""
+            if done > 0 and not transfer:
+                eta_sec = int((elapsed / done) * (download_total - done))
                 if eta_sec >= 60:
-                    eta = f"~{int(eta_sec // 60)}m {int(eta_sec % 60)}s left"
+                    album_eta = f" · ~{eta_sec // 60}m {eta_sec % 60}s left"
                 else:
-                    eta = f"~{int(eta_sec)}s left"
-            else:
-                eta = ""
+                    album_eta = f" · ~{eta_sec}s left"
             try:
                 text = (
                     f"Downloading: {album['artist']} — {album['title']}\n"
                     f"[{current}/{total}] {track_title}"
+                    f"{track_extras}{album_eta}"
                 )
-                if eta:
-                    text += f" · {eta}"
                 await status_msg.edit_text(text)
             except TelegramError:
                 pass
 
         # Step 2: download
         try:
-            result = await tidal.download_album(
+            result = await soulseek.download_album(
             album_id, MUSIC_DIR, progress=progress, album=album, quality=quality
         )
         except Exception as e:
@@ -476,7 +494,7 @@ async def _do_download_track(update: Update, track_id: str, quality: str | None 
 
         # Step 2: download
         try:
-            path, was_downloaded, fmt = await tidal.download_single_track(
+            path, was_downloaded, fmt = await soulseek.download_single_track(
             track, album_ctx, MUSIC_DIR, quality=quality
         )
         except Exception as e:
@@ -557,6 +575,7 @@ async def _post_init(app: Application) -> None:
 
 async def _shutdown(app: Application) -> None:
     await tidal.close()
+    await soulseek.close()
     await navidrome.close()
 
 

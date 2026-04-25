@@ -110,11 +110,6 @@ async def _get_instances() -> list[str]:
     return _instances
 
 
-def clear_soft_failed():
-    """Clear soft-failed instance list. Call at start of each album download."""
-    _soft_failed.clear()
-
-
 async def _api_get(path: str) -> dict:
     """GET from Monochrome API with instance failover. Unwraps {"data": ...}."""
     global _instances_updated

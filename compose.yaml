@@ -1,4 +1,20 @@
 services:
+  slskd:
+    image: slskd/slskd:latest
+    container_name: slskd
+    restart: unless-stopped
+    environment:
+      SLSKD_SLSK_USERNAME: "${SOULSEEK_USERNAME}"
+      SLSKD_SLSK_PASSWORD: "${SOULSEEK_PASSWORD}"
+      SLSKD_NO_AUTH: "true"
+    volumes:
+      - ./slskd-config:/app
+      - /media/music/.slskd-downloads:/downloads
+      - /media/music:/shared:ro
+    ports:
+      - "127.0.0.1:5030:5030"
+      - "50300:50300"
+
   music-bot:
     build:
       context: .
@@ -8,8 +24,21 @@ services:
     container_name: music-bot
     restart: unless-stopped
     env_file: .env
+    environment:
+      SLSKD_HOST: "http://slskd:5030"
+      SLSKD_DOWNLOAD_DIR: "/music/.slskd-downloads"
+      # Quality cap on Soulseek peer selection. Files exceeding either
+      # cap are skipped during scoring. Defaults below match the upstream
+      # config: 24-bit / 96 kHz covers all reasonable hi-res masters and
+      # rejects 24/192 monsters that double the file size with no audible
+      # benefit on consumer playback. Set 16 / 44100 for redbook-only
+      # (smaller files, more peers available).
+      MAX_BIT_DEPTH: "24"
+      MAX_SAMPLE_RATE_HZ: "96000"
     volumes:
       - /media/music:/music
     extra_hosts:
       - host.docker.internal:host-gateway
+    depends_on:
+      - slskd
 networks: {}

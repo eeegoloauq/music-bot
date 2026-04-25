@@ -29,16 +29,36 @@ def _format_title(track: dict) -> str:
 
 def _write_tags(filepath: str, track: dict, album: dict,
                 stream_meta: dict | None, cover_data: bytes | None,
-                lyrics: dict | None = None):
-    """Write Vorbis Comment tags to a FLAC file. Only writes missing tags."""
+                lyrics: dict | None = None, force: bool = False):
+    """Write Vorbis Comment tags to a FLAC file.
+
+    force=False: only fills in missing tags (preserves anything already there).
+    force=True : wipes existing tags first, then writes a clean canonical set
+                  derived from album/track metadata (Soulseek path, where the
+                  peer's tagging is unreliable and inconsistent across formats).
+    """
     try:
         audio = FLAC(filepath)
+        # Capture a small allow-list of peer tags before the wipe — these are
+        # things uploaders sometimes hand-curate that no streaming-service API
+        # provides (composer/lyricist/performer credits, free-form comments).
+        peer_keep: dict[str, str] = {}
+        if force:
+            for k in ("comment", "composer", "lyricist", "performer"):
+                v = audio.get(k)
+                if v:
+                    peer_keep[k] = v[0]
+            for k in list(audio.keys()):
+                del audio[k]
+            audio.clear_pictures()
         artist_str = _format_artist(track, album)
         title_str = _format_title(track)
 
         disc = track.get("discNumber", 1)
         num = track.get("trackNumber", 0)
 
+        release_date = album.get("releaseDate", "")
+        release_year = release_date.split("-")[0] if release_date else ""
         tags = {
             "artist": artist_str,
             "albumartist": album.get("artist", track.get("artist", "Unknown")),
@@ -48,15 +68,36 @@ def _write_tags(filepath: str, track: dict, album: dict,
             "discnumber": str(disc),
             "totaltracks": str(album.get("numberOfTracks", 0)),
             "totaldiscs": str(album.get("numberOfVolumes", 1)),
-            "date": album.get("releaseDate", ""),
+            # Navidrome's album persistent-ID hashes both `date` and
+            # `releasedate`. If the field is missing on FLAC but present on
+            # M4A (Navidrome derives release_date from ©day on M4A), the same
+            # album splits in two. Writing both keeps FLAC and M4A grouped.
+            "date": release_year,
+            "year": release_year,
+            "originaldate": release_date,
+            "releasedate": release_date,
             "copyright": track.get("copyright") or album.get("copyright", ""),
             "isrc": track.get("isrc", ""),
             "barcode": album.get("upc", ""),
         }
+        # Genres (multi-value Vorbis comment)
+        genres = album.get("genres") or []
+        if genres:
+            audio["genre"] = genres
+        if album.get("label"):
+            tags["publisher"] = album["label"]
 
         album_id = album.get("id", "")
         if album_id:
-            tags["comment"] = _comment_value(album_id)
+            our_comment = _comment_value(album_id)
+            peer_comment = peer_keep.get("comment", "").strip()
+            # Append peer's hand-written comment after our identifier so the
+            # bot still finds its files but the uploader's note ("vinyl rip",
+            # "from CD" etc) survives.
+            if peer_comment and "music-bot" not in peer_comment.lower():
+                tags["comment"] = f"{our_comment} · {peer_comment}"
+            else:
+                tags["comment"] = our_comment
 
         if album.get("type"):
             tags["releasetype"] = album["type"].lower()
@@ -64,6 +105,17 @@ def _write_tags(filepath: str, track: dict, album: dict,
             tags["bpm"] = str(track["bpm"])
         if track.get("explicit"):
             tags["itunesadvisory"] = "1"
+
+        # ReplayGain from Deezer's gain field. Peak is missing from the API —
+        # players that need it will compute on first play. RG2 reference.
+        tg = track.get("track_gain")
+        if tg is not None:
+            tags["replaygain_track_gain"] = f"{tg:+.2f} dB"
+        ag = album.get("album_gain")
+        if ag is not None:
+            tags["replaygain_album_gain"] = f"{ag:+.2f} dB"
+        if tg is not None or ag is not None:
+            tags["replaygain_reference_loudness"] = "89.0 dB"
 
         rg = stream_meta or {}
         if rg.get("trackReplayGain") is not None:
@@ -76,30 +128,40 @@ def _write_tags(filepath: str, track: dict, album: dict,
             tags["replaygain_album_peak"] = f"{rg['albumPeak']:.6f}"
 
         for key, val in tags.items():
-            if val:
-                if key == "comment" or key not in audio:
-                    audio[key] = val
+            if not val:
+                continue
+            if force or key == "comment" or key not in audio:
+                audio[key] = val
 
-        if cover_data and not audio.pictures:
-            pic = Picture()
-            pic.type = 3
-            pic.mime = "image/jpeg"
-            pic.data = cover_data
-            audio.add_picture(pic)
+        if cover_data:
+            if force and audio.pictures:
+                audio.clear_pictures()
+            if not audio.pictures:
+                pic = Picture()
+                pic.type = 3
+                pic.mime = "image/jpeg"
+                pic.data = cover_data
+                audio.add_picture(pic)
+
+        # Restore peer-curated credits the streaming API never provides.
+        for k in ("composer", "lyricist", "performer"):
+            val = peer_keep.get(k, "").strip()
+            if val:
+                audio[k] = val
 
         if lyrics:
             synced = lyrics.get("syncedLyrics")
             plain = lyrics.get("plainLyrics")
             if synced:
                 # lyrics = LRC so Navidrome detects timestamps → serves as synced via API
-                if "lyrics" not in audio:
+                if force or "lyrics" not in audio:
                     audio["lyrics"] = synced
-                if "syncedlyrics" not in audio:
+                if force or "syncedlyrics" not in audio:
                     audio["syncedlyrics"] = synced  # for foobar2000, Poweramp, etc.
-                if plain and "unsyncedlyrics" not in audio:
+                if plain and (force or "unsyncedlyrics" not in audio):
                     audio["unsyncedlyrics"] = plain  # fallback for plain-only players
             elif plain:
-                if "lyrics" not in audio:
+                if force or "lyrics" not in audio:
                     audio["lyrics"] = plain
         elif "lrclibchecked" not in audio:
             audio["lrclibchecked"] = "1"
@@ -111,10 +173,29 @@ def _write_tags(filepath: str, track: dict, album: dict,
 
 def _write_m4a_tags(filepath: str, track: dict, album: dict,
                     stream_meta: dict | None, cover_data: bytes | None,
-                    lyrics: dict | None = None):
-    """Write iTunes-style tags to an M4A file. Only writes missing tags."""
+                    lyrics: dict | None = None, force: bool = False):
+    """Write iTunes-style tags to an M4A file.
+
+    force=False: only fills in missing tags.
+    force=True : wipes existing tags first, then writes a clean canonical set.
+    """
     try:
         audio = MP4(filepath)
+        peer_keep: dict[str, str] = {}
+        if force:
+            # Capture peer-curated credits before the wipe — same reason as FLAC.
+            def _decode(v):
+                if not v: return ""
+                v0 = v[0]
+                if isinstance(v0, MP4FreeForm):
+                    return bytes(v0).decode("utf-8", errors="ignore")
+                return str(v0)
+            peer_keep["comment"] = _decode(audio.get("\xa9cmt"))
+            peer_keep["composer"] = _decode(audio.get("\xa9wrt"))
+            peer_keep["lyricist"] = _decode(audio.get("----:com.apple.iTunes:LYRICIST"))
+            peer_keep["performer"] = _decode(audio.get("----:com.apple.iTunes:PERFORMER"))
+            for k in list(audio.keys()):
+                del audio[k]
 
         artist_str = _format_artist(track, album)
         title_str = _format_title(track)
@@ -124,35 +205,42 @@ def _write_m4a_tags(filepath: str, track: dict, album: dict,
         total_tracks = album.get("numberOfTracks", 0)
         total_discs = album.get("numberOfVolumes", 1)
 
+        release_date = album.get("releaseDate", "")
         # Standard iTunes string tags
         str_tags = {
             "\xa9nam": title_str,
             "\xa9ART": artist_str,
             "aART": album.get("artist", track.get("artist", "Unknown")),
             "\xa9alb": album.get("title", "Singles"),
-            "\xa9day": album.get("releaseDate", ""),
+            "\xa9day": release_date,
             "cprt": track.get("copyright") or album.get("copyright", ""),
         }
         album_id = album.get("id", "")
         if album_id:
-            str_tags["\xa9cmt"] = _comment_value(album_id)
+            our_comment = _comment_value(album_id)
+            peer_comment = peer_keep.get("comment", "").strip()
+            if peer_comment and "music-bot" not in peer_comment.lower():
+                str_tags["\xa9cmt"] = f"{our_comment} · {peer_comment}"
+            else:
+                str_tags["\xa9cmt"] = our_comment
 
         for key, val in str_tags.items():
-            if val:
-                if key == "\xa9cmt" or key not in audio:
-                    audio[key] = [val]
+            if not val:
+                continue
+            if force or key == "\xa9cmt" or key not in audio:
+                audio[key] = [val]
 
-        if "trkn" not in audio:
+        if force or "trkn" not in audio:
             audio["trkn"] = [(num, total_tracks)]
-        if "disk" not in audio:
+        if force or "disk" not in audio:
             audio["disk"] = [(disc, total_discs)]
-        if track.get("explicit") and "rtng" not in audio:
+        if track.get("explicit") and (force or "rtng" not in audio):
             audio["rtng"] = [1]
 
         # Free-form tags (----:com.apple.iTunes:NAME)
         def _ff(name: str, value: str):
             key = f"----:com.apple.iTunes:{name}"
-            if key not in audio:
+            if force or key not in audio:
                 audio[key] = [MP4FreeForm(value.encode("utf-8"))]
 
         if track.get("isrc"):
@@ -163,29 +251,43 @@ def _write_m4a_tags(filepath: str, track: dict, album: dict,
             _ff("RELEASETYPE", album["type"].lower())
         if track.get("bpm"):
             _ff("BPM", str(track["bpm"]))
+        if album.get("label"):
+            _ff("LABEL", album["label"])
+        # Genre — iTunes ©gen takes a single string; join Deezer's list.
+        genres = album.get("genres") or []
+        if genres and (force or "\xa9gen" not in audio):
+            audio["\xa9gen"] = ["; ".join(genres)]
 
-        rg = stream_meta or {}
-        if rg.get("trackReplayGain") is not None:
-            _ff("REPLAYGAIN_TRACK_GAIN", f"{rg['trackReplayGain']:.2f} dB")
-        if rg.get("trackPeak") is not None:
-            _ff("REPLAYGAIN_TRACK_PEAK", f"{rg['trackPeak']:.6f}")
-        if rg.get("albumReplayGain") is not None:
-            _ff("REPLAYGAIN_ALBUM_GAIN", f"{rg['albumReplayGain']:.2f} dB")
-        if rg.get("albumPeak") is not None:
-            _ff("REPLAYGAIN_ALBUM_PEAK", f"{rg['albumPeak']:.6f}")
+        # ReplayGain from Deezer (track) + computed album-mean.
+        tg = track.get("track_gain")
+        if tg is not None:
+            _ff("REPLAYGAIN_TRACK_GAIN", f"{tg:+.2f} dB")
+        ag = album.get("album_gain")
+        if ag is not None:
+            _ff("REPLAYGAIN_ALBUM_GAIN", f"{ag:+.2f} dB")
+        if tg is not None or ag is not None:
+            _ff("REPLAYGAIN_REFERENCE_LOUDNESS", "89.0 dB")
 
         # Cover art
-        if cover_data and "covr" not in audio:
+        if cover_data and (force or "covr" not in audio):
             audio["covr"] = [MP4Cover(cover_data, imageformat=MP4Cover.FORMAT_JPEG)]
 
         # Lyrics
         if lyrics:
-            if lyrics.get("plainLyrics") and "\xa9lyr" not in audio:
+            if lyrics.get("plainLyrics") and (force or "\xa9lyr" not in audio):
                 audio["\xa9lyr"] = [lyrics["plainLyrics"]]
             if lyrics.get("syncedLyrics"):
                 _ff("SYNCEDLYRICS", lyrics["syncedLyrics"])
         elif "----:com.apple.iTunes:LRCLIBCHECKED" not in audio:
             _ff("LRCLIBCHECKED", "1")
+
+        # Restore peer-curated credits.
+        if peer_keep.get("composer"):
+            audio["\xa9wrt"] = [peer_keep["composer"]]
+        if peer_keep.get("lyricist"):
+            _ff("LYRICIST", peer_keep["lyricist"])
+        if peer_keep.get("performer"):
+            _ff("PERFORMER", peer_keep["performer"])
 
         audio.save()
     except Exception:
@@ -217,6 +319,21 @@ async def _patch_flac_tags(filepath: str, track: dict, album: dict) -> list[str]
             if audio.get("comment") != [new_comment]:
                 audio["comment"] = new_comment
                 added.append("comment")
+
+        # Normalize album/albumartist/artist casing+spelling against current
+        # metadata. Otherwise old "MIRY" tagged files coexist with new "Miry"
+        # ones and Navidrome treats them as separate albums.
+        canonical = {
+            "album": album.get("title"),
+            "albumartist": album.get("artist"),
+            "artist": _format_artist(track, album),
+        }
+        for k, want in canonical.items():
+            if not want:
+                continue
+            if audio.get(k) != [want]:
+                audio[k] = want
+                added.append(k)
 
         # Migrate existing files: if lyrics=plain but syncedlyrics=LRC,
         # promote LRC to lyrics so Navidrome serves it as synced via API.
@@ -267,6 +384,20 @@ async def _patch_m4a_tags(filepath: str, track: dict, album: dict) -> list[str]:
             if audio.get("\xa9cmt") != [new_comment]:
                 audio["\xa9cmt"] = [new_comment]
                 added.append("comment")
+
+        # Normalize album/albumartist/artist casing — same reason as FLAC patch.
+        canonical = {
+            "\xa9alb": album.get("title"),
+            "aART": album.get("artist"),
+            "\xa9ART": _format_artist(track, album),
+        }
+        for k, want in canonical.items():
+            if not want:
+                continue
+            if audio.get(k) != [want]:
+                audio[k] = [want]
+                added.append({"\xa9alb": "album", "aART": "albumartist",
+                              "\xa9ART": "artist"}.get(k, k))
 
         lrclib_key = "----:com.apple.iTunes:LRCLIBCHECKED"
         has_lyrics = "\xa9lyr" in audio

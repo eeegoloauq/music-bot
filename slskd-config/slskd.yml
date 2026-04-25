@@ -1,0 +1,32 @@
+# slskd configuration. Soulseek username/password come from SLSKD_SLSK_USERNAME
+# and SLSKD_SLSK_PASSWORD env vars (set by docker-compose from .env).
+#
+# Web UI is reachable at http://127.0.0.1:5030 on the host (auth disabled —
+# only listens on internal docker network + localhost).
+
+remote_configuration: false
+
+soulseek:
+  description: "music collector"
+  listen_port: 50300
+
+shares:
+  directories:
+    - "/shared"
+
+directories:
+  downloads: /downloads
+  incomplete: /downloads/.incomplete
+
+web:
+  authentication:
+    disabled: true
+  port: 5030
+  https:
+    disabled: true
+
+filters:
+  search:
+    request:
+      # Reject queries from peers shorter than 3 chars (anti-noise)
+      - ^.{1,2}$

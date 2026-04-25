@@ -19,7 +19,7 @@ from mutagen.flac import FLAC
 from mutagen.mp4 import MP4
 
 from config import ALLOWED_USERS, MUSIC_DIR
-import tidal
+import metadata as tidal   # new Deezer-backed metadata module
 import navidrome
 
 logger = logging.getLogger(__name__)
@@ -51,7 +51,10 @@ def _cache_set(cache: OrderedDict, key: str, value) -> None:
 _DELETE_PREFIX = "delete:"
 
 _AUDIO_EXTS = frozenset({".flac", ".mp3", ".m4a", ".ogg", ".opus", ".aac", ".wv", ".ape"})
-_TIDAL_ALBUM_RE = re.compile(r"tidal\.com/album/(\d+)")
+_TIDAL_ALBUM_RE = re.compile(
+    r"(?:tidal\.com|(?:www\.)?deezer\.com)/album/(\d+)",
+    re.IGNORECASE,
+)
 
 # Cache now-playing to avoid repeated Navidrome calls during rapid inline re-queries
 _np_cache: list[dict] = []
@@ -393,12 +396,12 @@ async def _inline_search(update: Update, query: str):
     for a in albums:
         results.append(_album_result(
             a["title"], a["artist"], a["tracks"],
-            a["cover_url"], f"https://tidal.com/album/{a['id']}",
+            a["cover_url"], f"https://www.deezer.com/album/{a['id']}",
         ))
     for t in tracks:
         results.append(_track_result(
             t["title"], t["artist"], t["album"], t["duration"],
-            t["cover_url"], f"https://tidal.com/track/{t['id']}",
+            t["cover_url"], f"https://www.deezer.com/track/{t['id']}",
         ))
 
     # Signal more results available if we got a full page
