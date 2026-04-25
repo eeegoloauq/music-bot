@@ -16,6 +16,8 @@ import re
 
 import aiohttp
 
+from metadata.client import _get_session
+
 logger = logging.getLogger(__name__)
 
 LASTFM_API_KEY = os.getenv("LASTFM_API_KEY", "")
@@ -23,27 +25,7 @@ LASTFM_URL = "https://ws.audioscrobbler.com/2.0/"
 # Last.fm rejects aiohttp's default UA with HTTP 403.
 _LASTFM_HEADERS = {"User-Agent": "music-bot v1.8 (https://github.com/eeegoloauq/music-bot)"}
 
-# Dedicated session: Last.fm needs to go through the host's HTTP_PROXY because
-# the container's direct egress IP gets classified as VPN/datacenter and the
-# API blocks it with HTTP 403. The other metadata APIs (Deezer, Odesli) take
-# the opposite path — they throttle the shared proxy IP, so they bypass it
-# via metadata.client._get_session(trust_env=False).
-_lastfm_session: aiohttp.ClientSession | None = None
 _lastfm_sem: asyncio.Semaphore | None = None
-
-
-async def _get_lastfm_session() -> aiohttp.ClientSession:
-    global _lastfm_session
-    if _lastfm_session is None or _lastfm_session.closed:
-        _lastfm_session = aiohttp.ClientSession(trust_env=True)
-    return _lastfm_session
-
-
-async def close():
-    global _lastfm_session
-    if _lastfm_session and not _lastfm_session.closed:
-        await _lastfm_session.close()
-        _lastfm_session = None
 
 # Crowd-sourced tags are noisy. Drop the ones that don't describe the music.
 _NOISE_TAGS = frozenset({
@@ -145,7 +127,7 @@ async def fetch_album_tags(
         "format": "json",
         "autocorrect": "1",
     }
-    session = await _get_lastfm_session()
+    session = await _get_session()
     try:
         async with _get_sem():
             async with session.get(

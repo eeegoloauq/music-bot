@@ -100,10 +100,9 @@ def _format_lossy_summary(candidates: list) -> str:
 def _short(e: BaseException, limit: int = 120) -> str:
     """Render an exception for user-facing chat messages.
 
-    Strips full URLs because aiohttp / requests stringify exceptions with the
-    failed URL embedded — and `trust_env=True` sessions can include the proxy
-    host in those URLs. The chat is private to allowed users but there's no
-    reason to leak proxy/internal hostnames into bot replies.
+    Strips full URLs — aiohttp / requests embed the failed URL in their
+    str(exception), which can leak proxy hosts, internal Navidrome URLs, or
+    auth tokens that snuck into a query string.
     """
     s = re.sub(r"https?://\S+", "<url>", str(e))
     return s if len(s) <= limit else s[: limit - 3] + "..."
