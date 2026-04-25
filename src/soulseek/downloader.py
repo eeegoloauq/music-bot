@@ -27,7 +27,9 @@ from library.files import (
     _find_existing_track, _sanitize, _track_prefix, _ensure_album_dir,
     _cover_url,
 )
-from library.tagger import _patch_missing_tags, _write_tags, _write_m4a_tags
+from library.tagger import (
+    _patch_missing_tags, _write_tags, _write_m4a_tags, _write_mp3_tags,
+)
 
 from soulseek import client as slskd
 from soulseek.client import SearchResult
@@ -153,6 +155,8 @@ def _write_tags_force(filepath: str, track: dict, album: dict,
     """
     if ext == "m4a":
         _write_m4a_tags(filepath, track, album, None, cover_data, lyrics, force=True)
+    elif ext == "mp3":
+        _write_mp3_tags(filepath, track, album, None, cover_data, lyrics, force=True)
     else:
         _write_tags(filepath, track, album, None, cover_data, lyrics, force=True)
 
@@ -197,7 +201,7 @@ async def _download_chosen(
     num = track.get("trackNumber", 0)
     track_title = _sanitize(track["title"])
     prefix = _track_prefix(disc, num, album.get("numberOfVolumes", 1))
-    ext = chosen.extension if chosen.extension in ("flac", "m4a") else "flac"
+    ext = chosen.extension if chosen.extension in ("flac", "m4a", "mp3") else "flac"
     dest_path = os.path.join(album_dir, f"{prefix} {track_title}.{ext}")
 
     _move_into_library(src_path, dest_path)
@@ -260,14 +264,34 @@ async def _try_candidates(
 
 # --- public API ------------------------------------------------------------
 
+async def find_lossy_candidates(track: dict, album_ctx: dict) -> list[SearchResult]:
+    """Return mp3/m4a peer candidates for a track. Used by the mp3-fallback
+    prompt to preview availability before asking the user to accept.
+    """
+    auto, alternatives = await find_track(
+        track, album_artist=album_ctx.get("artist"), accept_lossy=True,
+    )
+    out: list[SearchResult] = []
+    if auto:
+        out.append(auto.result)
+    out.extend(a.result for a in alternatives)
+    return out
+
+
 async def download_single_track(
     track: dict,
     album_ctx: dict,
     dest_dir: str,
+    accept_lossy: bool = False,
+    precomputed_candidates: list[SearchResult] | None = None,
 ) -> tuple[str, bool, str]:
     """Download one track. Returns ``(filepath, was_downloaded, format_label)``.
     If the file already exists in the library, patch missing tags and return
     ``was_downloaded=False``.
+
+    ``accept_lossy=True`` tells the matcher to look for mp3≥256kbps + m4a
+    instead of FLAC. ``precomputed_candidates`` skips the slskd search step
+    when the caller already ran ``find_lossy_candidates`` (mp3-fallback path).
     """
     artist = _sanitize(album_ctx.get("artist", track["artist"]))
     album_title = _sanitize(album_ctx.get("title", "Singles"))
@@ -290,13 +314,23 @@ async def download_single_track(
         track.get("duration", 0),
     ))
 
-    auto, alternatives = await find_track(track, album_artist=album_ctx.get("artist"))
-    candidates: list[SearchResult] = []
-    if auto:
-        candidates.append(auto.result)
-    candidates.extend(a.result for a in alternatives)
+    if precomputed_candidates is not None:
+        candidates = list(precomputed_candidates)
+    else:
+        auto, alternatives = await find_track(
+            track, album_artist=album_ctx.get("artist"), accept_lossy=accept_lossy,
+        )
+        candidates = []
+        if auto:
+            candidates.append(auto.result)
+        candidates.extend(a.result for a in alternatives)
+
     if not candidates:
         lyrics_task.cancel()
+        if accept_lossy:
+            raise RuntimeError(
+                f"No mp3/m4a fallback either for {track['artist']} — {track['title']}"
+            )
         raise RuntimeError(
             f"No FLAC found on Soulseek for {track['artist']} — {track['title']}"
         )

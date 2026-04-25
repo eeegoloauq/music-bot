@@ -143,16 +143,26 @@ def _exceeds_cap(bit_depth: int | None, sample_rate: int | None) -> bool:
 
 
 def _quality_score(bit_depth: int | None, sample_rate: int | None) -> float:
-    """Flat 10-point reward for any lossless format that's within the cap.
+    """Flat 10-point reward for any lossless format within the cap.
 
-    No hi-res bias: 24-bit/96kHz scores the same as 16-bit/44.1kHz. The
-    extension filter upstream (``LOSSLESS_EXTS``) already guarantees we're
-    only seeing lossless candidates here, so this is essentially "is the
-    peer reporting reasonable audio info" rather than a discriminator.
+    No hi-res bias: 24/96 scores the same as 16/44.1 — Bluetooth headphones
+    can't transmit hi-res anyway, ABX studies score them at chance level.
     """
     if _exceeds_cap(bit_depth, sample_rate):
-        return -1000.0   # sentinel — caller filters this out
+        return -1000.0
     return 10.0
+
+
+def _quality_score_for_result(r: SearchResult) -> float:
+    """Quality score that handles both lossless and lossy candidates.
+
+    Lossless within cap: 10pt. Lossy (mp3/m4a, only reachable when accept_lossy
+    is on): flat 5pt — the duration / filename / reliability signals decide
+    ranking once we've already accepted the format compromise.
+    """
+    if r.is_lossless:
+        return _quality_score(r.bit_depth, r.sample_rate)
+    return 5.0
 
 
 def _reliability_score(
@@ -243,7 +253,7 @@ def score_track_results(
             continue
 
         score = d_score
-        score += _quality_score(r.bit_depth, r.sample_rate)
+        score += _quality_score_for_result(r)
         score += _reliability_score(r.has_free_slot, r.upload_speed, r.queue_length)
         score += _path_relevance(dir_lower, fname_lower, track_artist, track_title)
         score *= _version_penalty(fname_lower, title_lower)
