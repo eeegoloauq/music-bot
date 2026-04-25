@@ -39,7 +39,7 @@ from metadata.lastfm import fetch_album_tags
 from library.files import (
     _comment_value, _resolve_dir_canonical, _sanitize, _normalize_title,
 )
-from library.tagger import _write_tags, _write_m4a_tags, _write_mp3_tags
+from library.tagger import _format_artist, _format_title
 
 logger = logging.getLogger(__name__)
 
@@ -59,10 +59,14 @@ def _significant_words(text: str) -> set[str]:
 
 def _clean_search_term(text: str) -> str:
     """Massage a folder name back into something Deezer's search likes.
-    Filename-safe substitutions (``:`` → ``_``) and stylized punctuation
-    (``$``, brackets) confuse the search; collapse them to spaces.
+    Filename-safe substitutions (``:`` → ``_``), stylized punctuation
+    (``$``, brackets), and leading hyphens (Deezer treats ``-foo`` as a
+    NEGATIVE term and excludes "foo" — kills name like "-W.C. Sinclair")
+    all become spaces. Internal hyphens inside words like "Lo-Fi" stay.
     """
     text = re.sub(r"[_\$\(\)\[\]\{\}*?\"<>|;]+", " ", text or "")
+    # Replace word-leading hyphens (``" -foo"`` or ``"^-foo"``) with a space.
+    text = re.sub(r"(^|\s)-+", r"\1 ", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text
 # Concurrent albums in flight. Each album costs 1 Deezer /album/ + N Deezer
@@ -564,7 +568,7 @@ def _append_genres_sync(filepath: str, new_genres: list[str]) -> bool:
             if not added:
                 return False
             audio["genre"] = current + added
-            audio.save()
+            audio.save(padding=lambda info: max(info.padding, 4096))
             return True
         if ext == ".m4a":
             audio = MP4(filepath)
@@ -591,16 +595,389 @@ def _append_genres_sync(filepath: str, new_genres: list[str]) -> bool:
             if not added:
                 return False
             tags.add(TCON(encoding=3, text=current + added))
-            tags.save(filepath, v2_version=4)
+            tags.save(filepath, v2_version=4, padding=lambda info: max(info.padding, 4096))
             return True
     except Exception:
         logger.warning("Genre-only append failed: %s", filepath, exc_info=True)
     return False
 
 
+def _build_canonical_flac(track: dict, album: dict) -> dict:
+    """Compute the canonical FLAC field set for re-tag. Returns single-value
+    fields as strings, plus ``__genres__`` (list) and ``__skip_if_blank__``
+    (set of keys whose blank value should be ignored, not written empty)."""
+    artist_str = _format_artist(track, album)
+    title_str = _format_title(track)
+    disc = track.get("discNumber", 1)
+    num = track.get("trackNumber", 0)
+    release_date = album.get("releaseDate", "") or ""
+    release_year = release_date.split("-")[0] if release_date else ""
+
+    out: dict = {
+        "artist": artist_str,
+        "albumartist": album.get("artist", "") or artist_str,
+        "album": album.get("title", "") or "",
+        "title": title_str,
+        "tracknumber": str(num),
+        "discnumber": str(disc),
+        "totaltracks": str(album.get("numberOfTracks", 0)),
+        "totaldiscs": str(album.get("numberOfVolumes", 1)),
+        "date": release_year,
+        "year": release_year,
+        "originaldate": release_date,
+        "releasedate": release_date,
+        "isrc": track.get("isrc", "") or "",
+        "barcode": album.get("upc", "") or "",
+        "publisher": album.get("label", "") or "",
+        "copyright": track.get("copyright") or album.get("copyright", "") or "",
+    }
+    if album.get("type"):
+        out["releasetype"] = album["type"].lower()
+    if track.get("bpm"):
+        out["bpm"] = str(track["bpm"])
+    if track.get("explicit"):
+        out["itunesadvisory"] = "1"
+
+    tg = track.get("track_gain")
+    ag = album.get("album_gain")
+    if tg is not None:
+        out["replaygain_track_gain"] = f"{tg:+.2f} dB"
+    if ag is not None:
+        out["replaygain_album_gain"] = f"{ag:+.2f} dB"
+    if tg is not None or ag is not None:
+        out["replaygain_reference_loudness"] = "89.0 dB"
+
+    out["__genres__"] = list(album.get("genres") or [])
+    return out
+
+
+def _retag_flac_surgical(filepath: str, track: dict, album: dict) -> bool:
+    """Surgical FLAC retag: read, diff against canonical, write only
+    changed fields. Embedded pictures, lyrics, and any tag we don't manage
+    are left untouched. Returns True when something actually changed.
+    """
+    audio = FLAC(filepath)
+    canonical = _build_canonical_flac(track, album)
+
+    changed = False
+
+    # Single-value fields. Skip blank canonical values so we don't overwrite
+    # an existing real value with an empty string from missing Deezer data.
+    for key, want in canonical.items():
+        if key.startswith("__"):
+            continue
+        if not want:
+            continue
+        current = list(audio.get(key) or [])
+        if current != [want]:
+            audio[key] = want
+            changed = True
+
+    # Genres are union — append Last.fm / Deezer genres without dropping
+    # whatever the file already had.
+    fresh_genres = canonical.get("__genres__") or []
+    if fresh_genres:
+        existing = list(audio.get("genre") or [])
+        existing_lower = {g.lower() for g in existing}
+        merged = list(existing)
+        for g in fresh_genres:
+            if g.lower() not in existing_lower:
+                merged.append(g)
+                existing_lower.add(g.lower())
+        if merged != existing:
+            audio["genre"] = merged
+            changed = True
+
+    # Comment: write canonical bot identifier (preserves peer-curated note
+    # if any, appended after the separator). Only update when the marker
+    # is missing or stale.
+    album_id = album.get("id", "")
+    if album_id:
+        our_marker = _comment_value(album_id)
+        existing_comment = next(iter(audio.get("comment") or []), "")
+        peer_comment = ""
+        # Strip the previous bot identifier if present so we don't keep
+        # appending older versions of the marker on each retag run.
+        if "music-bot" in existing_comment.lower():
+            # Format is "<our_marker> · <peer's note>" (peer optional).
+            sep = " · "
+            if sep in existing_comment:
+                # Take everything after the FIRST separator that follows
+                # our identifier. Existing peer comment may itself contain ·,
+                # so anchor on the marker prefix.
+                peer_comment = existing_comment.split(sep, 1)[1].strip()
+        else:
+            peer_comment = existing_comment.strip()
+        if peer_comment and "music-bot" not in peer_comment.lower():
+            new_comment = f"{our_marker} · {peer_comment}"
+        else:
+            new_comment = our_marker
+        if existing_comment != new_comment:
+            audio["comment"] = new_comment
+            changed = True
+
+    if changed:
+        # Padding hint keeps a small reserve so the next surgical update
+        # doesn't trigger a full file rewrite. mutagen's default would
+        # shrink padding to fit, then re-grow it on next save.
+        audio.save(padding=lambda info: max(info.padding, 4096))
+    return changed
+
+
+def _retag_m4a_surgical(filepath: str, track: dict, album: dict) -> bool:
+    """Surgical M4A retag — same contract as the FLAC writer."""
+    audio = MP4(filepath)
+    artist_str = _format_artist(track, album)
+    title_str = _format_title(track)
+    disc = track.get("discNumber", 1)
+    num = track.get("trackNumber", 0)
+    total_tracks = album.get("numberOfTracks", 0)
+    total_discs = album.get("numberOfVolumes", 1)
+    release_date = album.get("releaseDate", "") or ""
+
+    str_targets: list[tuple[str, str]] = [
+        ("\xa9nam", title_str),
+        ("\xa9ART", artist_str),
+        ("aART", album.get("artist") or artist_str),
+        ("\xa9alb", album.get("title", "") or ""),
+        ("\xa9day", release_date),
+        ("cprt", track.get("copyright") or album.get("copyright", "") or ""),
+    ]
+    changed = False
+    for key, want in str_targets:
+        if not want:
+            continue
+        current = audio.get(key, [])
+        current_str = str(current[0]) if current else ""
+        if current_str != want:
+            audio[key] = [want]
+            changed = True
+
+    want_trkn = (num, total_tracks)
+    if audio.get("trkn") != [want_trkn]:
+        audio["trkn"] = [want_trkn]
+        changed = True
+    want_disk = (disc, total_discs)
+    if audio.get("disk") != [want_disk]:
+        audio["disk"] = [want_disk]
+        changed = True
+
+    def _ff_get(name: str) -> str:
+        v = audio.get(f"----:com.apple.iTunes:{name}", [])
+        if not v:
+            return ""
+        v0 = v[0]
+        if isinstance(v0, MP4FreeForm):
+            return bytes(v0).decode("utf-8", errors="ignore")
+        return str(v0)
+
+    def _ff_set(name: str, value: str):
+        nonlocal changed
+        key = f"----:com.apple.iTunes:{name}"
+        if _ff_get(name) != value:
+            audio[key] = [MP4FreeForm(value.encode("utf-8"))]
+            changed = True
+
+    if track.get("isrc"):
+        _ff_set("ISRC", track["isrc"])
+    if album.get("upc"):
+        _ff_set("BARCODE", album["upc"])
+    if album.get("type"):
+        _ff_set("RELEASETYPE", album["type"].lower())
+    if track.get("bpm"):
+        _ff_set("BPM", str(track["bpm"]))
+    if album.get("label"):
+        _ff_set("LABEL", album["label"])
+
+    tg = track.get("track_gain")
+    ag = album.get("album_gain")
+    if tg is not None:
+        _ff_set("REPLAYGAIN_TRACK_GAIN", f"{tg:+.2f} dB")
+    if ag is not None:
+        _ff_set("REPLAYGAIN_ALBUM_GAIN", f"{ag:+.2f} dB")
+    if tg is not None or ag is not None:
+        _ff_set("REPLAYGAIN_REFERENCE_LOUDNESS", "89.0 dB")
+
+    fresh_genres = list(album.get("genres") or [])
+    if fresh_genres:
+        current = audio.get("\xa9gen", [])
+        current_str = str(current[0]) if current else ""
+        existing = [g.strip() for g in current_str.split(";") if g.strip()]
+        existing_lower = {g.lower() for g in existing}
+        merged = list(existing)
+        for g in fresh_genres:
+            if g.lower() not in existing_lower:
+                merged.append(g)
+                existing_lower.add(g.lower())
+        new_str = "; ".join(merged)
+        if current_str != new_str:
+            audio["\xa9gen"] = [new_str]
+            changed = True
+
+    album_id = album.get("id", "")
+    if album_id:
+        our_marker = _comment_value(album_id)
+        cmt = audio.get("\xa9cmt", [])
+        existing_comment = str(cmt[0]) if cmt else ""
+        peer_comment = ""
+        if "music-bot" in existing_comment.lower():
+            sep = " · "
+            if sep in existing_comment:
+                peer_comment = existing_comment.split(sep, 1)[1].strip()
+        else:
+            peer_comment = existing_comment.strip()
+        new_comment = (
+            f"{our_marker} · {peer_comment}"
+            if peer_comment and "music-bot" not in peer_comment.lower()
+            else our_marker
+        )
+        if existing_comment != new_comment:
+            audio["\xa9cmt"] = [new_comment]
+            changed = True
+
+    if changed:
+        audio.save()
+    return changed
+
+
+def _retag_mp3_surgical(filepath: str, track: dict, album: dict) -> bool:
+    """Surgical MP3 retag — same contract as the FLAC writer."""
+    from mutagen.id3 import (
+        TIT2, TPE1, TPE2, TALB, TRCK, TPOS, TDRC, TDOR, TDRL,
+        TCOP, TSRC, TPUB, TBPM, TCON, COMM, TXXX,
+    )
+    try:
+        mp3 = MP3(filepath)
+    except Exception:
+        return False
+    if mp3.tags is None:
+        mp3.add_tags()
+    audio = mp3.tags
+
+    changed = False
+    artist_str = _format_artist(track, album)
+    title_str = _format_title(track)
+    disc = track.get("discNumber", 1)
+    num = track.get("trackNumber", 0)
+    total_tracks = album.get("numberOfTracks", 0)
+    total_discs = album.get("numberOfVolumes", 1)
+    release_date = album.get("releaseDate", "") or ""
+
+    def _set_text(frame_cls, value: str):
+        nonlocal changed
+        if not value:
+            return
+        fid = frame_cls.__name__
+        cur = audio.get(fid)
+        cur_text = str(cur.text[0]) if (cur and cur.text) else ""
+        if cur_text != value:
+            audio.add(frame_cls(encoding=3, text=value))
+            changed = True
+
+    _set_text(TIT2, title_str)
+    _set_text(TPE1, artist_str)
+    _set_text(TPE2, album.get("artist") or artist_str)
+    _set_text(TALB, album.get("title", "") or "")
+    _set_text(
+        TRCK, f"{num}/{total_tracks}" if total_tracks else str(num),
+    )
+    _set_text(
+        TPOS, f"{disc}/{total_discs}" if total_discs else str(disc),
+    )
+    if release_date:
+        _set_text(TDRC, release_date)
+        _set_text(TDOR, release_date)
+        _set_text(TDRL, release_date)
+    cprt = track.get("copyright") or album.get("copyright", "") or ""
+    if cprt:
+        _set_text(TCOP, cprt)
+    if track.get("isrc"):
+        _set_text(TSRC, track["isrc"])
+    if album.get("label"):
+        _set_text(TPUB, album["label"])
+    if track.get("bpm"):
+        _set_text(TBPM, str(track["bpm"]))
+
+    def _set_txxx(desc: str, value: str):
+        nonlocal changed
+        if not value:
+            return
+        cur_text = ""
+        for f in audio.getall("TXXX"):
+            if f.desc == desc:
+                cur_text = f.text[0] if f.text else ""
+                break
+        if cur_text != value:
+            # delall by HashKey to overwrite cleanly
+            for f in list(audio.getall("TXXX")):
+                if f.desc == desc:
+                    audio.delall(f.HashKey)
+            audio.add(TXXX(encoding=3, desc=desc, text=value))
+            changed = True
+
+    if album.get("upc"):
+        _set_txxx("BARCODE", album["upc"])
+    if album.get("type"):
+        _set_txxx("RELEASETYPE", album["type"].lower())
+
+    tg = track.get("track_gain")
+    ag = album.get("album_gain")
+    if tg is not None:
+        _set_txxx("REPLAYGAIN_TRACK_GAIN", f"{tg:+.2f} dB")
+    if ag is not None:
+        _set_txxx("REPLAYGAIN_ALBUM_GAIN", f"{ag:+.2f} dB")
+    if tg is not None or ag is not None:
+        _set_txxx("REPLAYGAIN_REFERENCE_LOUDNESS", "89.0 dB")
+
+    fresh_genres = list(album.get("genres") or [])
+    if fresh_genres:
+        tcon = audio.get("TCON")
+        existing = [str(g) for g in (tcon.text if tcon else [])]
+        existing_lower = {g.lower() for g in existing}
+        merged = list(existing)
+        for g in fresh_genres:
+            if g.lower() not in existing_lower:
+                merged.append(g)
+                existing_lower.add(g.lower())
+        if merged != existing:
+            audio.add(TCON(encoding=3, text=merged))
+            changed = True
+
+    album_id = album.get("id", "")
+    if album_id:
+        our_marker = _comment_value(album_id)
+        comm_frames = audio.getall("COMM")
+        existing_comment = comm_frames[0].text[0] if (comm_frames and comm_frames[0].text) else ""
+        peer_comment = ""
+        if "music-bot" in existing_comment.lower():
+            sep = " · "
+            if sep in existing_comment:
+                peer_comment = existing_comment.split(sep, 1)[1].strip()
+        else:
+            peer_comment = existing_comment.strip()
+        new_comment = (
+            f"{our_marker} · {peer_comment}"
+            if peer_comment and "music-bot" not in peer_comment.lower()
+            else our_marker
+        )
+        if existing_comment != new_comment:
+            for f in list(audio.getall("COMM")):
+                audio.delall(f.HashKey)
+            audio.add(COMM(encoding=3, lang="eng", desc="", text=new_comment))
+            changed = True
+
+    if changed:
+        mp3.save(v2_version=4, padding=lambda info: max(info.padding, 4096))
+    return changed
+
+
 def _apply_album_sync(plan: AlbumPlan) -> tuple[int, int]:
     """Synchronous worker: rename folders, write tags. Returns
     ``(files_written, files_skipped)``. Idempotent — running twice is safe.
+
+    Surgical writes only — pictures, lyrics, composer/lyricist/performer,
+    and any unmanaged tag are preserved verbatim. mutagen save with padding
+    hint avoids full-file rewrites on small metadata changes.
     """
     # Last.fm-only path: only append genres, don't touch anything else.
     if plan.is_lastfm_only:
@@ -628,9 +1005,7 @@ def _apply_album_sync(plan: AlbumPlan) -> tuple[int, int]:
         if new_folder != folder:
             folder = new_folder
 
-    # Re-list files in case folder moved during rename.
     files = _list_audio_files(folder)
-
     fresh_tracks = plan.fresh_meta.get("tracks") or []
     written = 0
     skipped = 0
@@ -643,12 +1018,15 @@ def _apply_album_sync(plan: AlbumPlan) -> tuple[int, int]:
         ext = summary["ext"].lstrip(".")
         try:
             if ext == "m4a":
-                _write_m4a_tags(fp, track, plan.fresh_meta, None, None, None, force=True)
+                ok = _retag_m4a_surgical(fp, track, plan.fresh_meta)
             elif ext == "mp3":
-                _write_mp3_tags(fp, track, plan.fresh_meta, None, None, None, force=True)
+                ok = _retag_mp3_surgical(fp, track, plan.fresh_meta)
             else:
-                _write_tags(fp, track, plan.fresh_meta, None, None, None, force=True)
-            written += 1
+                ok = _retag_flac_surgical(fp, track, plan.fresh_meta)
+            if ok:
+                written += 1
+            else:
+                skipped += 1
         except Exception:
             logger.warning("Re-tag write failed: %s", fp, exc_info=True)
             skipped += 1
