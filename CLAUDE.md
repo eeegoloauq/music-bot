@@ -64,14 +64,13 @@ src/navidrome.py      — triggers Subsonic-style scan after writes
 
 - **Quality cap**: `MAX_BIT_DEPTH` and `MAX_SAMPLE_RATE_HZ` env vars filter Soulseek peers above the cap. Defaults `24` / `96000` cover all reasonable hi-res; `16` / `44100` for redbook-only deployments.
 - **slskd quirks** (handled in `soulseek/client.py`): completed searches must be deleted before new ones to avoid silent empty `responses` arrays; explicit `stop()` is required to transition InProgress→Complete and expose responses.
-- **Proxy isolation**: `metadata/client.py` uses `trust_env=False` because the bot's `HTTP_PROXY` routes through a SOCKS proxy that Odesli/Deezer throttle. Other sessions (`navidrome.py`) keep `trust_env=True` for their use cases.
+- **Proxy support**: every aiohttp session respects `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` env vars (the aiohttp default). If a deployment's proxy gets throttled by a specific upstream (Odesli, Deezer CDN, etc.), add the host to `NO_PROXY` so those requests go direct.
 - **Tag normalisation**: in force-mode the FLAC/M4A taggers wipe all existing tags before writing. They preserve a small allow-list (`composer`, `lyricist`, `performer`, peer's `comment` appended after our identifier).
 - **Cover art**: stored in album dict as `cover_uuid` (historical field name) but actually holds the full Deezer CDN URL; `library.files._cover_url` passes URLs through and resizes via the Deezer URL pattern. The legacy Tidal-UUID branch is dead but kept for safety.
 
 ## How to deploy
 
 - `./deploy-test.sh` — hot-reload `src/*.py` via `docker cp` + restart container. Detects local-server vs SSH mode automatically. **Does NOT** rebuild image, so changes to `requirements.txt` or `Dockerfile` need `docker compose up -d --build`.
-- New `docker compose up -d --build` requires `--build-arg HTTP_PROXY=` to bypass the host's broken SOCKS-as-HTTP proxy during apt-get.
 - After `docker compose up -d music-bot` (recreate), the running container is a fresh image — any prior `docker cp` hot-reloads are lost; resync `src/` files manually or rebuild.
 
 ## Next steps deferred

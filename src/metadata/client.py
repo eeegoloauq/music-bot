@@ -25,13 +25,12 @@ def _get_lrclib_sem() -> asyncio.Semaphore:
 async def _get_session() -> aiohttp.ClientSession:
     global _session
     if _session is None or _session.closed:
-        # trust_env=False intentionally: the bot's HTTP_PROXY/HTTPS_PROXY env
-        # vars route through a shared SOCKS proxy that Odesli/Deezer throttle
-        # by source IP, kicking us into 429 even at low request rates. We hit
-        # these public APIs directly (they're public, no proxy needed) so
-        # latency is better and we don't share a rate-limit pool with other
-        # users of the same proxy.
-        _session = aiohttp.ClientSession(trust_env=False)
+        # trust_env=True so HTTP_PROXY / HTTPS_PROXY / NO_PROXY are respected
+        # (aiohttp's default is False — env vars get ignored without this).
+        # Operators whose proxy gets throttled by a specific upstream
+        # (Odesli, Deezer, lrclib) add that host to NO_PROXY to send those
+        # requests direct while keeping the proxy for everything else.
+        _session = aiohttp.ClientSession(trust_env=True)
     return _session
 
 
