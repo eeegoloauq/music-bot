@@ -1,10 +1,13 @@
 """Deezer open API client. No auth required.
 
-Rate limit: 50 requests / 5 seconds per IP. Plenty for our usage.
+Rate limit: 50 requests / 5 seconds per IP. The rolling-window limiter below
+keeps any caller (notably the re-tagger, which bursts albums × tracks back to
+back) under the cap even when individual call sites use ``asyncio.gather``.
 """
 
 import asyncio
 import logging
+import time
 import urllib.parse
 
 import aiohttp
@@ -18,7 +21,41 @@ class DeezerError(Exception):
     pass
 
 
+class _RateLimiter:
+    """Async rolling-window limiter: at most ``max_per_window`` requests
+    inside any ``window_secs`` interval. Pending callers FIFO-block on the
+    lock until the oldest tracked timestamp falls out of the window.
+    """
+
+    def __init__(self, max_per_window: int, window_secs: float):
+        self._max = max_per_window
+        self._window = window_secs
+        self._timestamps: list[float] = []
+        self._lock = asyncio.Lock()
+
+    async def acquire(self) -> None:
+        async with self._lock:
+            now = time.monotonic()
+            cutoff = now - self._window
+            self._timestamps = [t for t in self._timestamps if t > cutoff]
+            if len(self._timestamps) >= self._max:
+                wait = self._timestamps[0] + self._window - now
+                if wait > 0:
+                    await asyncio.sleep(wait)
+                now = time.monotonic()
+                cutoff = now - self._window
+                self._timestamps = [t for t in self._timestamps if t > cutoff]
+            self._timestamps.append(now)
+
+
+# 40 / 5s leaves 20% headroom under Deezer's documented 50 / 5s cap, so
+# bursts inside fetch_album (1 + N parallel track requests) coexist with
+# ongoing re-tagger work without tripping the "Quota limit exceeded" guard.
+_rate_limiter = _RateLimiter(max_per_window=40, window_secs=5.0)
+
+
 async def _get(path: str, params: dict | None = None, timeout: float = 8.0) -> dict:
+    await _rate_limiter.acquire()
     session = await _get_session()
     url = f"{DEEZER_API}{path}"
     # Force English genre/category names — without this header Deezer returns
