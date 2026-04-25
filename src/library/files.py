@@ -37,9 +37,12 @@ def _comment_value(album_id: str) -> str:
     )
 
 
-def _tidal_cover_url(cover_uuid: str, size: int = 1280) -> str:
+def _cover_url(cover_uuid: str, size: int = 1280) -> str:
     """Cover URL helper. Accepts either a full image URL (Deezer pattern —
     passthrough with size substitution) or a legacy Tidal UUID with dashes.
+    The album dict still carries the field name ``cover_uuid`` for back-compat
+    with code written against the Monochrome era; live metadata stores a full
+    Deezer CDN URL there. The UUID branch is kept for safety only.
     """
     if not cover_uuid:
         return ""

@@ -10,7 +10,7 @@ Before non-trivial changes:
 3. The module-level CLAUDE.md for whichever subsystem you're touching:
    - `src/metadata/CLAUDE.md` — link resolution + Deezer metadata
    - `src/soulseek/CLAUDE.md` — slskd peer search, scoring, downloads
-   - `src/tidal/CLAUDE.md` — file/tag helpers + deprecated Monochrome client
+   - `src/library/CLAUDE.md` — file/tag helpers (path sanitisation, FLAC/M4A taggers)
 4. `.claude/rules/*.md` — deployment, tagging, downloads invariants
 5. `docs/ROADMAP.md` — explicit "not now, maybe later" list
 
@@ -36,15 +36,12 @@ src/soulseek/         — audio downloader via slskd-api
   matcher.py            album-folder-first, per-track fallback
   downloader.py         orchestrator with retry across candidate peers
   ↓
-src/tidal/            — file + tag helpers (kept; module name is historical)
-  files.py              path sanitization, _ensure_album_dir (case-insensitive resolve)
+src/library/          — file + tag helpers (format-agnostic)
+  files.py              path sanitisation, _ensure_album_dir (case-insensitive resolve), _cover_url
   tagger.py             FLAC + M4A tag writers; force-mode wipes peer tags + writes Deezer canonical
-  client.py             DEAD Monochrome failover code (kept for git history; nothing live calls it)
   ↓
 src/navidrome.py      — triggers Subsonic-style scan after writes
 ```
-
-**Key import contract:** `bot.py` and `inline.py` do `import metadata as tidal` so existing call sites (`tidal.fetch_album`, `tidal.search`, etc.) route to the Deezer-backed module. `from tidal.files import ...` and `from tidal.tagger import ...` continue resolving to the real `tidal/` package — those modules host pure utility code, not platform-coupled logic. The `import tidal` shape is a transitional alias; `src/tidal/` will eventually be renamed to `src/library/` and the Monochrome remnants deleted (see ROADMAP).
 
 ## Sibling containers
 
@@ -67,9 +64,9 @@ src/navidrome.py      — triggers Subsonic-style scan after writes
 
 - **Quality cap**: `MAX_BIT_DEPTH` and `MAX_SAMPLE_RATE_HZ` env vars filter Soulseek peers above the cap. Defaults `24` / `96000` cover all reasonable hi-res; `16` / `44100` for redbook-only deployments.
 - **slskd quirks** (handled in `soulseek/client.py`): completed searches must be deleted before new ones to avoid silent empty `responses` arrays; explicit `stop()` is required to transition InProgress→Complete and expose responses.
-- **Proxy isolation**: `metadata/client.py` uses `trust_env=False` because the bot's `HTTP_PROXY` routes through a SOCKS proxy that Odesli/Deezer throttle. Other sessions (`tidal/client.py`, `navidrome.py`) keep `trust_env=True` for their use cases.
+- **Proxy isolation**: `metadata/client.py` uses `trust_env=False` because the bot's `HTTP_PROXY` routes through a SOCKS proxy that Odesli/Deezer throttle. Other sessions (`navidrome.py`) keep `trust_env=True` for their use cases.
 - **Tag normalisation**: in force-mode the FLAC/M4A taggers wipe all existing tags before writing. They preserve a small allow-list (`composer`, `lyricist`, `performer`, peer's `comment` appended after our identifier).
-- **Cover art**: stored in album dict as `cover_uuid` (legacy field name) but actually holds the full Deezer CDN URL; `_tidal_cover_url` passes URLs through and resizes via the Deezer URL pattern.
+- **Cover art**: stored in album dict as `cover_uuid` (historical field name) but actually holds the full Deezer CDN URL; `library.files._cover_url` passes URLs through and resizes via the Deezer URL pattern. The legacy Tidal-UUID branch is dead but kept for safety.
 
 ## How to deploy
 
@@ -79,4 +76,4 @@ src/navidrome.py      — triggers Subsonic-style scan after writes
 
 ## Next steps deferred
 
-See `docs/ROADMAP.md`. Notable items not yet done: rename `src/tidal/` → `src/library/`, delete `tidal/client.py` + `tidal/metadata.py` Monochrome remnants, MusicBrainz MBID enrichment, peer-side reputation memory, mp3-fallback prompt.
+See `docs/ROADMAP.md`. Notable items not yet done: MusicBrainz MBID enrichment, peer-side reputation memory, mp3-fallback prompt, inline-picker for borderline-confidence album-folder matches.

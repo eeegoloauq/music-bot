@@ -19,7 +19,7 @@ from mutagen.flac import FLAC
 from mutagen.mp4 import MP4
 
 from config import ALLOWED_USERS, MUSIC_DIR
-import metadata as tidal   # new Deezer-backed metadata module
+import metadata
 import navidrome
 
 logger = logging.getLogger(__name__)
@@ -309,7 +309,7 @@ async def _fetch_tidal_covers(tidal_ids: list[tuple[str, str]]) -> dict[str, str
     if not tidal_ids:
         return {}
     covers = await asyncio.gather(*[
-        tidal.fetch_cover_url(aid) for _, aid in tidal_ids
+        metadata.fetch_cover_url(aid) for _, aid in tidal_ids
     ], return_exceptions=True)
     result = {}
     for (key, _), url in zip(tidal_ids, covers):
@@ -378,7 +378,7 @@ async def _inline_search(update: Update, query: str):
     page_size = page_albums + page_tracks
 
     try:
-        search_data = await tidal.search(
+        search_data = await metadata.search(
             query,
             album_limit=page_albums + offset,
             track_limit=page_tracks + offset,
@@ -428,7 +428,7 @@ async def _inline_lyrics(update: Update, playing: list[dict]):
     # Fallback to lrclib
     if not lyrics_text:
         try:
-            data = await tidal.fetch_lyrics(
+            data = await metadata.fetch_lyrics(
                 entry["title"], entry["artist"], entry.get("album", ""), entry.get("duration", 0),
             )
             if data:
@@ -521,7 +521,7 @@ async def _inline_share(update: Update, playing: list[dict]):
         album_id = await asyncio.to_thread(_find_tidal_album_id_in_dir, album_dir)
         if album_id:
             try:
-                cover_url = await tidal.fetch_cover_url(album_id) or None
+                cover_url = await metadata.fetch_cover_url(album_id) or None
             except Exception:
                 pass
 
