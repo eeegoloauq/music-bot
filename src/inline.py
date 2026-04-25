@@ -51,7 +51,7 @@ def _cache_set(cache: OrderedDict, key: str, value) -> None:
 _DELETE_PREFIX = "delete:"
 
 _AUDIO_EXTS = frozenset({".flac", ".mp3", ".m4a", ".ogg", ".opus", ".aac", ".wv", ".ape"})
-_TIDAL_ALBUM_RE = re.compile(
+_ALBUM_URL_RE = re.compile(
     r"(?:tidal\.com|(?:www\.)?deezer\.com)/album/(\d+)",
     re.IGNORECASE,
 )
@@ -63,7 +63,7 @@ _NP_CACHE_TTL = 2  # seconds
 
 
 
-def _find_tidal_album_id_in_dir(album_dir: str) -> str:
+def _find_album_id_in_dir(album_dir: str) -> str:
     """Find the album ID stored in any audio file's comment tag.
     Matches both Deezer (current) and Tidal (legacy) URL patterns.
     """
@@ -81,7 +81,7 @@ def _find_tidal_album_id_in_dir(album_dir: str) -> str:
                     comment = next(iter(MP4(f.path).get("\xa9cmt") or []), "")
                 else:
                     continue
-                m = _TIDAL_ALBUM_RE.search(comment)
+                m = _ALBUM_URL_RE.search(comment)
                 if m:
                     return m.group(1)
             except Exception:
@@ -128,7 +128,7 @@ async def _get_now_playing_cached() -> list[dict] | None:
 def _search_local_albums(query: str, limit: int = 5) -> list[dict]:
     """Search local music library for albums matching query.
 
-    Returns list of {artist, album, path, tracks, tidal_album_id}.
+    Returns list of {artist, album, path, tracks, album_pid}.
     """
     query_lower = query.lower()
     results = []
@@ -142,14 +142,14 @@ def _search_local_albums(query: str, limit: int = 5) -> list[dict]:
                 combined = f"{artist_entry.name} {album_entry.name}".lower()
                 if query_lower in combined:
                     track_count = 0
-                    tidal_album_id = ""
+                    album_pid = ""
                     for f in os.scandir(album_entry.path):
                         if not f.is_file():
                             continue
                         ext = os.path.splitext(f.name)[1].lower()
                         if ext in _AUDIO_EXTS:
                             track_count += 1
-                            if not tidal_album_id:
+                            if not album_pid:
                                 try:
                                     if ext == ".flac":
                                         comment = next(iter(FLAC(f.path).get("comment") or []), "")
@@ -157,9 +157,9 @@ def _search_local_albums(query: str, limit: int = 5) -> list[dict]:
                                         comment = next(iter(MP4(f.path).get("\xa9cmt") or []), "")
                                     else:
                                         comment = ""
-                                    m = _TIDAL_ALBUM_RE.search(comment)
+                                    m = _ALBUM_URL_RE.search(comment)
                                     if m:
-                                        tidal_album_id = m.group(1)
+                                        album_pid = m.group(1)
                                 except Exception:
                                     pass
                     results.append({
@@ -167,7 +167,7 @@ def _search_local_albums(query: str, limit: int = 5) -> list[dict]:
                         "album": album_entry.name,
                         "path": album_entry.path,
                         "tracks": track_count,
-                        "tidal_album_id": tidal_album_id,
+                        "album_pid": album_pid,
                     })
                     if len(results) >= limit:
                         return results
@@ -306,15 +306,15 @@ async def _inline_hint(update: Update):
     )
 
 
-async def _fetch_tidal_covers(tidal_ids: list[tuple[str, str]]) -> dict[str, str]:
+async def _fetch_album_covers(cover_album_ids: list[tuple[str, str]]) -> dict[str, str]:
     """Batch-fetch album cover URLs from Deezer. Input: ``[(key, album_id), ...]``."""
-    if not tidal_ids:
+    if not cover_album_ids:
         return {}
     covers = await asyncio.gather(*[
-        metadata.fetch_cover_url(aid) for _, aid in tidal_ids
+        metadata.fetch_cover_url(aid) for _, aid in cover_album_ids
     ], return_exceptions=True)
     result = {}
-    for (key, _), url in zip(tidal_ids, covers):
+    for (key, _), url in zip(cover_album_ids, covers):
         if isinstance(url, str) and url:
             result[key] = url
     return result
@@ -353,9 +353,9 @@ async def _inline_delete(update: Update, del_query: str):
         await update.inline_query.answer([], cache_time=5, is_personal=True)
         return
 
-    cover_urls = await _fetch_tidal_covers([
-        (item["path"], item["tidal_album_id"])
-        for item in local if item["tidal_album_id"]
+    cover_urls = await _fetch_album_covers([
+        (item["path"], item["album_pid"])
+        for item in local if item["album_pid"]
     ])
 
     results = []
@@ -471,16 +471,16 @@ async def _inline_lib_search(update: Update, query: str):
     songs = [s for s in (search_result.get("song") or []) if isinstance(s, dict)]
 
     # Extract album IDs from song comments for cover-art batch fetch
-    tidal_ids: dict[str, str] = {}  # navidrome albumId -> tidal album id
+    cover_album_ids: dict[str, str] = {}  # navidrome albumId -> album ID parsed from comment tag
     for song in songs:
         album_id = song.get("albumId", "")
-        if album_id and album_id not in tidal_ids:
+        if album_id and album_id not in cover_album_ids:
             comment = song.get("comment", "")
-            m = _TIDAL_ALBUM_RE.search(comment) if comment else None
+            m = _ALBUM_URL_RE.search(comment) if comment else None
             if m:
-                tidal_ids[album_id] = m.group(1)
+                cover_album_ids[album_id] = m.group(1)
 
-    cover_urls = await _fetch_tidal_covers(list(tidal_ids.items()))
+    cover_urls = await _fetch_album_covers(list(cover_album_ids.items()))
 
     results = []
     for album in albums:
@@ -520,7 +520,7 @@ async def _inline_share(update: Update, playing: list[dict]):
     if entry.get("path"):
         # path from Navidrome may not match disk filename, but parent dir is reliable
         album_dir = os.path.join(MUSIC_DIR, os.path.dirname(entry["path"]))
-        album_id = await asyncio.to_thread(_find_tidal_album_id_in_dir, album_dir)
+        album_id = await asyncio.to_thread(_find_album_id_in_dir, album_dir)
         if album_id:
             try:
                 cover_url = await metadata.fetch_cover_url(album_id) or None

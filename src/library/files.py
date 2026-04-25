@@ -38,21 +38,17 @@ def _comment_value(album_id: str) -> str:
 
 
 def _cover_url(cover_uuid: str, size: int = 1280) -> str:
-    """Cover URL helper. Accepts either a full image URL (Deezer pattern —
-    passthrough with size substitution) or a legacy Tidal UUID with dashes.
-    The album dict still carries the field name ``cover_uuid`` for back-compat
-    with code written against the Monochrome era; live metadata stores a full
-    Deezer CDN URL there. The UUID branch is kept for safety only.
+    """Resize a stored cover URL to ``{size}x{size}``. The album dict's
+    ``cover_uuid`` field actually holds a full Deezer CDN URL (the name is
+    historical — kept so renaming the field doesn't ripple through callers).
     """
     if not cover_uuid:
         return ""
-    if cover_uuid.startswith(("http://", "https://")):
-        return re.sub(
-            r"/\d+x\d+(?:[-\d]+)?\.jpg",
-            f"/{size}x{size}-000000-80-0-0.jpg",
-            cover_uuid,
-        )
-    return f"https://resources.tidal.com/images/{cover_uuid.replace('-', '/')}/{size}x{size}.jpg"
+    return re.sub(
+        r"/\d+x\d+(?:[-\d]+)?\.jpg",
+        f"/{size}x{size}-000000-80-0-0.jpg",
+        cover_uuid,
+    )
 
 
 def _resolve_dir_canonical(parent: str, name: str) -> str:

@@ -42,20 +42,12 @@ async def close():
 
 
 def cover_url(stored: str, size: int = 1000) -> str:
-    """Resize a Deezer cover URL to the requested square pixel size.
-
-    Deezer cover URLs follow the pattern
-    ``https://cdn-images.dzcdn.net/images/cover/{md5}/{N}x{N}-000000-80-0-0.jpg``.
-    For passthrough — anything that starts with http is assumed already a usable
-    URL and we just substitute the size segment when it looks like the Deezer
-    pattern. Empty input → empty output.
+    """Resize a Deezer cover URL (``…/{N}x{N}-000000-80-0-0.jpg``) to the
+    requested square pixel size. Empty input → empty output.
     """
     import re
     if not stored:
         return ""
-    if not stored.startswith(("http://", "https://")):
-        # Backwards compat: legacy Tidal-CDN UUID stored without scheme
-        return f"https://resources.tidal.com/images/{stored.replace('-', '/')}/{size}x{size}.jpg"
     return re.sub(
         r"/\d+x\d+(?:[-\d]+)?\.jpg",
         f"/{size}x{size}-000000-80-0-0.jpg",
