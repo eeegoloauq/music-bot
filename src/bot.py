@@ -220,45 +220,101 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-def _format_retag_summary(plans: list, summary, sample_n: int = 8) -> str:
-    """Compact text rendering of a dry-run for chat. Lists a sample of
-    albums that would change, plus aggregate counts.
+def _format_eta(seconds: float) -> str:
+    if not seconds or seconds <= 0:
+        return "—"
+    s = int(seconds)
+    if s < 60:
+        return f"{s}s"
+    m, s = divmod(s, 60)
+    if m < 60:
+        return f"{m}m {s}s"
+    h, m = divmod(m, 60)
+    return f"{h}h {m}m"
+
+
+def _outcome_tag(plan) -> str:
+    """One-token outcome label for a finished AlbumPlan."""
+    if plan.error:
+        return "skipped"
+    if plan.is_lastfm_only:
+        return "Last.fm only"
+    if not plan.needs_apply:
+        return "clean"
+    return "Deezer"
+
+
+def _retag_progress_text(
+    phase: str, idx: int, total: int, plan, started_at: float,
+    tally_changed: int, tally_lastfm: int, tally_skipped: int,
+) -> str:
+    """Three-line download-style progress for /retag. Used in both dry-run
+    and apply phases (caller picks ``phase``)."""
+    pct = (idx * 100 // total) if total else 0
+    elapsed = max(time.monotonic() - started_at, 0.001)
+    avg = elapsed / max(idx, 1)
+    eta = avg * max(total - idx, 0)
+    head = f"{plan.artist_dir}/{plan.album_dir}" if plan else ""
+    if len(head) > 60:
+        head = head[:58] + "…"
+    last_line = f"{head} · {_outcome_tag(plan)}" if plan else ""
+    return (
+        f"<b>{phase}</b> [{idx}/{total} · {pct}%]\n"
+        f"{last_line}\n"
+        f"changed {tally_changed} · last.fm {tally_lastfm} · "
+        f"skipped {tally_skipped} · ETA {_format_eta(eta)}"
+    )
+
+
+def _format_retag_summary(plans: list, summary, elapsed: float, sample_n: int = 8) -> str:
+    """Compact dry-run summary, ``Done!``-style. No emoji, label · value
+    pairs separated by ·, sample lines indented two spaces.
     """
-    sample = [p for p in plans if p.needs_apply][:sample_n]
+    will_change = [p for p in plans if p.needs_apply]
+    sample = will_change[:sample_n]
     sample_lines = []
     for p in sample:
-        head = f"{p.artist_dir}/{p.album_dir}"
+        head = f"{p.artist_dir} / {p.album_dir}"
+        if len(head) > 70:
+            head = head[:68] + "…"
         tag = ", ".join(c.split(":")[0] for c in p.changes[:4])
         if len(p.changes) > 4:
             tag += "…"
-        sample_lines.append(f"  • {head} — {tag}")
+        sample_lines.append(f"  {head} — {tag}")
 
     failed = [p for p in plans if p.error]
-    failed_lines = [f"  ✗ {p.artist_dir}/{p.album_dir}" for p in failed[:5]]
-    failed_more = max(0, len(failed) - 5)
+    failed_lines = []
+    for p in failed[:5]:
+        head = f"{p.artist_dir} / {p.album_dir}"
+        if len(head) > 70:
+            head = head[:68] + "…"
+        failed_lines.append(f"  {head}")
 
     out = [
-        f"<b>Re-tag dry-run · {summary.total} albums</b>",
-        f"",
-        f"  ✓ {summary.by_comment_id} via comment-tag Deezer ID",
-        f"  ⌕ {summary.by_search} via folder-name search",
-        f"  ✗ {summary.unidentified} could not identify",
-        f"",
-        f"  ✎ {summary.will_change} would change",
-        f"  · {summary.no_changes} already canonical",
+        f"<b>Dry-run done</b> · {summary.total} albums in {_format_eta(elapsed)}",
+        f"identified {summary.by_comment_id + summary.by_search} "
+        f"({summary.by_comment_id} from tag, {summary.by_search} via search) · "
+        f"unidentified {summary.unidentified}",
+        f"would change {summary.will_change} · already canonical {summary.no_changes}",
     ]
     if sample_lines:
-        out.extend(["", "<b>Sample of changes:</b>"])
+        out.append("")
+        out.append(f"<b>Top changes</b> ({len(sample_lines)} of {summary.will_change}):")
         out.extend(sample_lines)
         if summary.will_change > sample_n:
             out.append(f"  … +{summary.will_change - sample_n} more")
     if failed_lines:
-        out.extend(["", "<b>Unidentifiable (will skip):</b>"])
+        out.append("")
+        out.append(f"<b>Skipped</b> ({len(failed_lines)} of {len(failed)}):")
         out.extend(failed_lines)
-        if failed_more:
-            out.append(f"  … +{failed_more} more")
+        if len(failed) > 5:
+            out.append(f"  … +{len(failed) - 5} more")
     if summary.will_change:
-        out.extend(["", "Reply <code>/retag confirm</code> to apply, or <code>/retag stop</code> to drop."])
+        out.append("")
+        out.append(
+            "Reply <code>/retag confirm</code> to apply, "
+            "<code>/retag stop</code> to drop."
+        )
     return "\n".join(out)
 
 
@@ -296,21 +352,32 @@ async def cmd_retag(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _do_retag_apply(update, plans)
         return
 
-    # Default: run dry-run + cache plans for confirm.
     if _retag_in_progress:
         await update.message.reply_text("Re-tag already running.")
         return
 
     status_msg = await update.message.reply_text("Scanning library…")
     last_edit = [time.monotonic()]
+    started = time.monotonic()
+    tally = {"changed": 0, "lastfm": 0, "skipped": 0}
 
-    async def progress(idx, total, _plan):
+    async def progress(idx, total, plan):
+        if plan.is_lastfm_only:
+            tally["lastfm"] += 1
+        elif plan.error:
+            tally["skipped"] += 1
+        elif plan.needs_apply:
+            tally["changed"] += 1
         # Throttle edits — Telegram rate-limits ~1/sec on the same message.
         if time.monotonic() - last_edit[0] < 4 and idx != total:
             return
         last_edit[0] = time.monotonic()
+        text = _retag_progress_text(
+            "Dry-run", idx, total, plan, started,
+            tally["changed"], tally["lastfm"], tally["skipped"],
+        )
         try:
-            await status_msg.edit_text(f"Dry-run pass [{idx}/{total}]…")
+            await status_msg.edit_text(text, parse_mode="HTML")
         except TelegramError:
             pass
 
@@ -325,12 +392,13 @@ async def cmd_retag(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         _retag_in_progress = False
 
+    elapsed = time.monotonic() - started
     _retag_session = {
         "plans": plans,
         "summary": summary,
         "expire_at": time.monotonic() + _RETAG_SESSION_TTL,
     }
-    text = _format_retag_summary(plans, summary)
+    text = _format_retag_summary(plans, summary, elapsed)
     try:
         await status_msg.edit_text(text, parse_mode="HTML")
     except TelegramError:
