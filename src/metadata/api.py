@@ -105,41 +105,57 @@ def _adapt_album_summary(a: dict) -> dict:
 # --- public functions ------------------------------------------------------
 
 async def fetch_album(album_id: str) -> dict:
-    """Fetch full album metadata by Deezer album ID. Genres include Last.fm
-    community tags merged on top of Deezer's coarser labels (best-effort).
+    """Fetch full album metadata by Deezer album ID. Returns Deezer-only
+    data — no Last.fm, no other enrichment. Use ``enrich_genres`` afterwards
+    if you also want community tags. Splitting these means callers can pick
+    one source without paying for the other (e.g. the re-tagger uses Last.fm
+    independently when Deezer doesn't have the album).
     """
     data = await deezer.get_album(album_id)
     summary_tracks = data.get("tracks", {}).get("data", [])
     if summary_tracks:
         # Enrich tracks with ISRC / disk_number / bpm via per-track endpoint.
-        # Deezer's 50 req/5sec rate limit fits albums up to ~25 tracks in one
-        # burst; bigger ones still fit because asyncio.gather is bounded by
-        # aiohttp's connection pool default.
+        # Deezer's 50 req/5sec rate limit (enforced in metadata.deezer) fits
+        # albums up to ~25 tracks in one burst.
         async def _maybe_track(tid: str):
             try:
                 return await deezer.get_track(tid)
             except Exception:
                 return None
-        full_tracks_task = asyncio.gather(*[_maybe_track(t["id"]) for t in summary_tracks])
+        full_tracks = await asyncio.gather(*[_maybe_track(t["id"]) for t in summary_tracks])
     else:
-        full_tracks_task = asyncio.sleep(0, result=[])
+        full_tracks = []
+    return _adapt_album(data, full_tracks)
 
-    album_artist = (data.get("artist") or {}).get("name", "") or ""
-    album_title = data.get("title", "") or ""
-    lastfm_task = lastfm.fetch_album_tags(album_artist, album_title)
 
-    full_tracks, lastfm_tags = await asyncio.gather(full_tracks_task, lastfm_task)
-    album = _adapt_album(data, full_tracks)
+async def enrich_genres(album: dict, artist: str | None = None,
+                        album_title: str | None = None) -> dict:
+    """Merge Last.fm community tags into ``album["genres"]`` in place.
+    Returns the same dict for chaining. Falls back to ``album['artist']`` /
+    ``album['title']`` when no override is supplied. Silent no-op when the
+    ``LASTFM_API_KEY`` env var is unset.
 
-    if lastfm_tags:
-        existing_lower = {g.lower() for g in album["genres"]}
-        merged = list(album["genres"])
-        for tag in lastfm_tags:
-            if tag.lower() not in existing_lower:
-                merged.append(tag)
-                existing_lower.add(tag.lower())
-        album["genres"] = merged
+    Independent of ``fetch_album`` on purpose — Last.fm is a separate
+    enrichment service, not a property of the Deezer fetch.
+    """
+    if artist is None:
+        artist = album.get("artist", "") or ""
+    if album_title is None:
+        album_title = album.get("title", "") or ""
+    if not artist or not album_title:
+        return album
 
+    extras = await lastfm.fetch_album_tags(artist, album_title)
+    if not extras:
+        return album
+
+    existing_lower = {g.lower() for g in album.get("genres") or []}
+    merged = list(album.get("genres") or [])
+    for tag in extras:
+        if tag.lower() not in existing_lower:
+            merged.append(tag)
+            existing_lower.add(tag.lower())
+    album["genres"] = merged
     return album
 
 

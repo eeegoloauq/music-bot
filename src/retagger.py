@@ -35,6 +35,7 @@ from mutagen.id3 import ID3, ID3NoHeaderError
 
 import metadata
 from metadata import deezer
+from metadata.lastfm import fetch_album_tags
 from library.files import (
     _comment_value, _resolve_dir_canonical, _sanitize, _normalize_title,
 )
@@ -80,6 +81,7 @@ class AlbumPlan:
     files: list[str] = field(default_factory=list)
     album_id: str | None = None                 # Deezer ID once identified
     fresh_meta: dict | None = None              # metadata.fetch_album result
+    lastfm_only_genres: list[str] = field(default_factory=list)  # set when Deezer fails but Last.fm has tags
     canonical_album_dir: str | None = None      # set when folder needs rename
     canonical_artist_dir: str | None = None     # set when artist dir needs rename
     changes: list[str] = field(default_factory=list)
@@ -88,6 +90,10 @@ class AlbumPlan:
     @property
     def needs_apply(self) -> bool:
         return self.error is None and bool(self.changes)
+
+    @property
+    def is_lastfm_only(self) -> bool:
+        return self.fresh_meta is None and bool(self.lastfm_only_genres)
 
 
 @dataclass
@@ -181,67 +187,110 @@ def _extract_album_id(filepath: str) -> tuple[str, str] | None:
     return host, m.group("id")
 
 
+def _gate_candidate(
+    cand: dict,
+    folder_artist_words: set[str],
+    folder_album_words: set[str],
+    on_disk: int,
+    require_album_overlap: bool = True,
+) -> str | None:
+    """Apply the standard artist + album + track-count gates to one Deezer
+    search hit. Returns its album_id when accepted, otherwise None.
+
+    Album-title rule: one word set must be a (near-)subset of the other.
+    A bare overlap of one common word isn't enough — that lets ``Cool Cat``
+    match ``Now They Think Its Cool`` just because both contain ``cool``.
+    Subset-direction matching covers both ``X (Deluxe)`` ↔ ``X`` and
+    ``X`` ↔ ``X (Bonus Tracks)`` cases.
+    """
+    aid = str(cand.get("id") or "")
+    if not aid:
+        return None
+
+    # Artist gate. Skip if the folder artist has no ≥3-char words (avoids
+    # over-filtering names like 'P', '21').
+    cand_artist_words = _significant_words(
+        (cand.get("artist") or {}).get("name", "")
+    )
+    if folder_artist_words and not (folder_artist_words & cand_artist_words):
+        return None
+
+    if require_album_overlap and folder_album_words:
+        cand_album_words = _significant_words(cand.get("title", ""))
+        if not cand_album_words:
+            return None
+        small, big = sorted(
+            (folder_album_words, cand_album_words), key=len,
+        )
+        # Allow at most one missing word from the smaller side — handles
+        # punctuation drift ("Vol. 1" vs "Volume 1") without letting in
+        # tenuously-related albums.
+        missing = len(small - big)
+        if missing > max(0, len(small) // 4):
+            return None
+
+    deezer_tracks = int(cand.get("nb_tracks") or 0)
+    if deezer_tracks and abs(deezer_tracks - on_disk) > 1:
+        return None
+
+    return aid
+
+
 async def _search_album(artist: str, album: str, files: list[str]) -> str | None:
-    """Fallback: search Deezer by folder names. Hit ``deezer.search_albums``
-    directly (skips the track-search half of ``metadata.search`` we don't
-    need). Accept the first candidate that overlaps on artist+album+count.
+    """Identify the album on Deezer via a multi-pass search:
+
+    1. Combined ``"<artist> <album>"`` query — usual case, top 5 hits gated
+       by artist + album + track-count overlap.
+    2. Album-only query — handles stylised / accented artist names that
+       trip up Deezer's combined matcher.
+    3. Artist-only query, top 25 — for when the folder album name diverges
+       from Deezer's canonical title (deluxe editions, rephrased titles).
+       The album word-overlap gate stays in force; the track-count match
+       provides the second signal.
+
+    Returns the first id that clears all gates, else ``None``.
     """
     cleaned_artist = _clean_search_term(artist)
     cleaned_album = _clean_search_term(album)
-    query = f"{cleaned_artist} {cleaned_album}".strip()
-    if not query:
-        return None
-    try:
-        candidates = await deezer.search_albums(query, limit=5)
-    except Exception as e:
-        logger.debug("Search fallback failed for %r: %s", query, e)
-        return None
-    # Retry with album-only query if the combined search came back empty —
-    # some folder casing / stylised artist names confuse the combined query.
-    if not candidates and cleaned_album:
-        try:
-            candidates = await deezer.search_albums(cleaned_album, limit=5)
-        except Exception:
-            candidates = []
-    if not candidates:
-        return None
-
     folder_artist_words = _significant_words(artist)
     folder_album_words = _significant_words(album)
     on_disk = len(files)
 
-    for cand in candidates:
-        aid = str(cand.get("id") or "")
-        if not aid:
-            logger.debug("retagger search: no id in cand %r", cand)
-            continue
+    queries: list[tuple[str, int, bool]] = []
+    if cleaned_artist and cleaned_album:
+        queries.append((f"{cleaned_artist} {cleaned_album}", 5, True))
+    if cleaned_album:
+        queries.append((cleaned_album, 5, True))
+    if cleaned_artist:
+        queries.append((cleaned_artist, 25, True))
 
-        # Artist must overlap the folder name. Skip the gate entirely when
-        # the folder artist has no ≥3-char words (e.g. ``P``, ``21``) to
-        # avoid over-filtering on minimal names.
-        cand_artist_words = _significant_words(
-            (cand.get("artist") or {}).get("name", "")
-        )
-        if folder_artist_words and not (folder_artist_words & cand_artist_words):
-            logger.debug("retagger search: artist gate fail %r vs %r",
-                         folder_artist_words, cand_artist_words)
+    seen_ids: set[str] = set()
+    for query, limit, require_album_overlap in queries:
+        try:
+            candidates = await deezer.search_albums(query, limit=limit)
+        except Exception as e:
+            logger.debug("Search pass %r failed: %s", query, e)
             continue
-
-        # At least one album-title word should overlap too.
-        cand_album_words = _significant_words(cand.get("title", ""))
-        if folder_album_words and not (folder_album_words & cand_album_words):
-            logger.debug("retagger search: album gate fail %r vs %r",
-                         folder_album_words, cand_album_words)
-            continue
-
-        deezer_tracks = int(cand.get("nb_tracks") or 0)
-        if deezer_tracks and abs(deezer_tracks - on_disk) > 1:
-            logger.debug("retagger search: track count fail %d vs disk %d",
-                         deezer_tracks, on_disk)
-            continue
-
-        return aid
+        for cand in candidates:
+            aid = _gate_candidate(
+                cand, folder_artist_words, folder_album_words, on_disk,
+                require_album_overlap=require_album_overlap,
+            )
+            if aid and aid not in seen_ids:
+                return aid
+            if aid:
+                seen_ids.add(aid)
     return None
+
+
+async def _try_lastfm_only(artist: str, album: str) -> list[str]:
+    """When Deezer can't identify the album, try to enrich genres via
+    Last.fm alone. Returns the filtered tag list (possibly empty)."""
+    try:
+        return await fetch_album_tags(artist, album)
+    except Exception as e:
+        logger.debug("Last.fm-only fallback failed for %s — %s: %s", artist, album, e)
+        return []
 
 
 # --- per-file inspection ---------------------------------------------------
@@ -420,10 +469,11 @@ async def plan_album(folder: str, artist: str, album: str) -> AlbumPlan:
         plan.error = "no audio files in folder"
         return plan
 
+    # Two independent enrichment sources: Deezer (canonical metadata) and
+    # Last.fm (community genre tags). Always try both. Deezer needs an ID
+    # match (comment tag or folder-name search); Last.fm needs only artist +
+    # album strings, so it works even when Deezer doesn't have the album.
     async with _ALBUM_SEM:
-        # Comment-tag ID: only deezer.com URLs are directly usable. Old
-        # downloads stored tidal.com URLs whose IDs don't exist on Deezer —
-        # those fall through to the folder-name search.
         for fp in plan.files:
             tag = _extract_album_id(fp)
             if tag and tag[0] == "deezer":
@@ -433,31 +483,133 @@ async def plan_album(folder: str, artist: str, album: str) -> AlbumPlan:
         if not plan.album_id:
             plan.album_id = await _search_album(artist, album, plan.files)
 
-        if not plan.album_id:
-            plan.error = "could not identify album"
-            return plan
+        if plan.album_id:
+            try:
+                plan.fresh_meta = await metadata.fetch_album(plan.album_id)
+            except Exception as e:
+                logger.debug(
+                    "fetch_album failed for %s/%s id=%s: %s",
+                    artist, album, plan.album_id, e,
+                )
+                plan.album_id = None
+                plan.fresh_meta = None
 
-        try:
-            plan.fresh_meta = await metadata.fetch_album(plan.album_id)
-        except Exception as e:
-            plan.error = f"fetch_album failed: {e}"
-            return plan
+        # Last.fm: independent service. Always try it, regardless of the
+        # Deezer outcome. If Deezer succeeded we merge tags into fresh_meta
+        # (canonical title/artist drives the Last.fm lookup). If Deezer
+        # failed we still capture Last.fm-only genres so the caller can
+        # write a partial update.
+        if plan.fresh_meta is not None:
+            await metadata.enrich_genres(plan.fresh_meta)
+        else:
+            plan.lastfm_only_genres = await _try_lastfm_only(artist, album)
 
-    changes, ren_album, ren_artist = _compute_changes(
-        folder, artist, album, plan.fresh_meta, plan.files,
-    )
-    plan.changes = changes
-    plan.canonical_album_dir = ren_album
-    plan.canonical_artist_dir = ren_artist
+    if plan.fresh_meta is not None:
+        changes, ren_album, ren_artist = _compute_changes(
+            folder, artist, album, plan.fresh_meta, plan.files,
+        )
+        plan.changes = changes
+        plan.canonical_album_dir = ren_album
+        plan.canonical_artist_dir = ren_artist
+        return plan
+
+    if plan.lastfm_only_genres:
+        plan.changes = _compute_lastfm_only_changes(
+            plan.lastfm_only_genres, plan.files,
+        )
+        return plan
+
+    plan.error = "could not identify album"
     return plan
 
 
+def _compute_lastfm_only_changes(
+    lastfm_genres: list[str], files: list[str],
+) -> list[str]:
+    """Diff: how many files would gain at least one Last.fm genre."""
+    if not lastfm_genres:
+        return []
+    needed_lower = {g.lower() for g in lastfm_genres}
+    n_need_genre = 0
+    for fp in files:
+        s = _read_file_summary(fp)
+        existing_lower = {g.lower() for g in s["genres"]}
+        if not existing_lower.issuperset(needed_lower):
+            n_need_genre += 1
+    if not n_need_genre:
+        return []
+    sample = ", ".join(lastfm_genres[:4]) + ("…" if len(lastfm_genres) > 4 else "")
+    return [
+        f"Last.fm only ({len(lastfm_genres)} genres: {sample}) on "
+        f"{n_need_genre}/{len(files)} files"
+    ]
+
+
 # --- apply -----------------------------------------------------------------
+
+def _append_genres_sync(filepath: str, new_genres: list[str]) -> bool:
+    """Add ``new_genres`` to a file's GENRE / TCON / ©gen tag in place,
+    leaving everything else alone. Returns True when something changed.
+    Used by the Last.fm-only branch — the file isn't on Deezer, so we
+    can't safely rewrite the canonical fields, but adding fine-grained
+    genre tags on top of whatever's already there is safe.
+    """
+    ext = os.path.splitext(filepath)[1].lower()
+    try:
+        if ext == ".flac":
+            audio = FLAC(filepath)
+            current = list(audio.get("genre") or [])
+            current_lower = {g.lower() for g in current}
+            added = [g for g in new_genres if g.lower() not in current_lower]
+            if not added:
+                return False
+            audio["genre"] = current + added
+            audio.save()
+            return True
+        if ext == ".m4a":
+            audio = MP4(filepath)
+            current = list(audio.get("\xa9gen") or [])
+            current_str = current[0] if current else ""
+            existing_set = {g.strip().lower() for g in current_str.split(";") if g.strip()}
+            added = [g for g in new_genres if g.lower() not in existing_set]
+            if not added:
+                return False
+            merged = "; ".join(([current_str] if current_str else []) + added)
+            audio["\xa9gen"] = [merged]
+            audio.save()
+            return True
+        if ext == ".mp3":
+            from mutagen.id3 import TCON
+            try:
+                tags = ID3(filepath)
+            except ID3NoHeaderError:
+                tags = ID3()
+            tcon = tags.get("TCON")
+            current = list(tcon.text) if tcon else []
+            current_lower = {str(g).lower() for g in current}
+            added = [g for g in new_genres if g.lower() not in current_lower]
+            if not added:
+                return False
+            tags.add(TCON(encoding=3, text=current + added))
+            tags.save(filepath, v2_version=4)
+            return True
+    except Exception:
+        logger.warning("Genre-only append failed: %s", filepath, exc_info=True)
+    return False
+
 
 def _apply_album_sync(plan: AlbumPlan) -> tuple[int, int]:
     """Synchronous worker: rename folders, write tags. Returns
     ``(files_written, files_skipped)``. Idempotent — running twice is safe.
     """
+    # Last.fm-only path: only append genres, don't touch anything else.
+    if plan.is_lastfm_only:
+        written = sum(
+            1 for fp in plan.files
+            if _append_genres_sync(fp, plan.lastfm_only_genres)
+        )
+        return written, len(plan.files) - written
+
     if not plan.fresh_meta:
         return 0, len(plan.files)
 

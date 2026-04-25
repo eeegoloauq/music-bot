@@ -521,6 +521,7 @@ async def _do_download_album(update: Update, album_id: str, force: bool = False)
     async with _download_semaphore:
         try:
             album = await metadata.fetch_album(album_id)
+            await metadata.enrich_genres(album)
         except Exception as e:
             logger.error("Failed to fetch album %s: %s", album_id, e)
             await status_msg.edit_text(f"Failed to fetch album info: {_short(e)}")
@@ -666,6 +667,8 @@ async def _do_download_track(update: Update, track_id: str, force: bool = False)
     async with _download_semaphore:
         try:
             track, album_ctx = await metadata.fetch_single_track(track_id)
+            if album_ctx:
+                await metadata.enrich_genres(album_ctx)
         except Exception as e:
             logger.error("Failed to fetch track %s: %s", track_id, e)
             await status_msg.edit_text(f"Failed to fetch track info: {_short(e)}")
