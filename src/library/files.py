@@ -123,7 +123,7 @@ def _find_existing_track(album_dir: str, track: dict) -> str | None:
     title = _sanitize(track["title"])
 
     # Fast path: check both disc-prefixed (multi-disc) and plain (single-disc)
-    for ext in (".flac", ".m4a"):
+    for ext in (".flac", ".m4a", ".mp3"):
         for prefix in (f"{disc}-{num:02d}", f"{num:02d}"):
             canonical = os.path.join(album_dir, f"{prefix} {title}{ext}")
             if os.path.exists(canonical):

@@ -1,16 +1,24 @@
 import asyncio
+import contextlib
 import functools
 import logging
 import os
 import re
 import shutil
 import time
+import uuid
 
 _RESTART_DELAY = 30  # seconds between automatic restarts after a crash
 
-from telegram import BotCommand, Update
+from telegram import (
+    BotCommand,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Update,
+)
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     InlineQueryHandler,
     MessageHandler,
@@ -62,6 +70,31 @@ _CACHE_MAX = 500
 _download_semaphore = asyncio.Semaphore(1)
 # album/track IDs currently downloading or queued — drops duplicate pastes
 _in_flight: set[str] = set()
+
+# Pending mp3-fallback prompts. Keyed by a short callback id; entry holds the
+# already-found lossy candidates so we don't re-search on Accept. TTL keeps a
+# stale prompt from auto-downloading hours later if the user finally taps.
+_LOSSY_PROMPT_TTL = 300  # seconds
+_pending_lossy: dict[str, dict] = {}
+
+
+def _purge_stale_lossy() -> None:
+    now = time.monotonic()
+    for cid in [k for k, v in _pending_lossy.items() if v["expire_at"] <= now]:
+        _pending_lossy.pop(cid, None)
+
+
+def _format_lossy_summary(candidates: list) -> str:
+    """One-liner like 'mp3 320 from 5 peers' for the prompt UI."""
+    mp3 = [c for c in candidates if c.extension == "mp3"]
+    m4a = [c for c in candidates if c.extension == "m4a"]
+    parts = []
+    if mp3:
+        best_kbps = max((c.bit_rate or 0) for c in mp3) // 1000
+        parts.append(f"mp3 {best_kbps}kbps from {len(mp3)} peer{'s' if len(mp3) != 1 else ''}")
+    if m4a:
+        parts.append(f"m4a from {len(m4a)} peer{'s' if len(m4a) != 1 else ''}")
+    return " · ".join(parts) if parts else f"{len(candidates)} lossy peers"
 
 
 def _short(e: BaseException, limit: int = 120) -> str:
@@ -481,8 +514,19 @@ async def _do_download_track(update: Update, track_id: str, force: bool = False)
 
         try:
             path, was_downloaded, fmt = await soulseek.download_single_track(
-            track, album_ctx, MUSIC_DIR,
-        )
+                track, album_ctx, MUSIC_DIR,
+            )
+        except RuntimeError as e:
+            if "No FLAC found" in str(e):
+                if await _offer_mp3_fallback(update, status_msg, track_id, track, album_ctx):
+                    return
+                await status_msg.edit_text(
+                    f"No FLAC or mp3 fallback found for {track['artist']} — {track['title']}"
+                )
+                return
+            logger.error("Track download failed (%s — %s): %s", track["artist"], track["title"], e)
+            await status_msg.edit_text(f"Download failed: {_short(e)}")
+            return
         except Exception as e:
             logger.error("Track download failed (%s — %s): %s", track["artist"], track["title"], e)
             await status_msg.edit_text(f"Download failed: {_short(e)}")
@@ -504,6 +548,137 @@ async def _do_download_track(update: Update, track_id: str, force: bool = False)
             done_text += f"\n\n{share_url}"
 
         await _send_result(update, status_msg, done_text, os.path.dirname(path))
+
+
+async def _offer_mp3_fallback(
+    update: Update, status_msg, track_id: str, track: dict, album_ctx: dict,
+) -> bool:
+    """Probe Soulseek for mp3/m4a candidates after a FLAC search came up empty.
+    If any are available, send an inline-keyboard prompt and stash the
+    candidates for the callback handler. Returns True when a prompt was sent
+    (caller leaves status_msg alone), False when there's nothing to fall back
+    to (caller writes the final failure message).
+    """
+    _purge_stale_lossy()
+    try:
+        candidates = await soulseek.find_lossy_candidates(track, album_ctx)
+    except Exception as e:
+        logger.warning("Lossy fallback search failed: %s", e)
+        return False
+    if not candidates:
+        return False
+
+    cid = uuid.uuid4().hex[:12]
+    _pending_lossy[cid] = {
+        "track_id": track_id,
+        "track": track,
+        "album_ctx": album_ctx,
+        "candidates": candidates,
+        "chat_id": status_msg.chat_id,
+        "message_id": status_msg.message_id,
+        "expire_at": time.monotonic() + _LOSSY_PROMPT_TTL,
+    }
+
+    summary = _format_lossy_summary(candidates)
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"✓ Accept {summary}", callback_data=f"lossy:accept:{cid}")],
+        [InlineKeyboardButton("✗ Skip", callback_data=f"lossy:skip:{cid}")],
+    ])
+    try:
+        await status_msg.edit_text(
+            f"FLAC not found for {track['artist']} — {track['title']}\n\n"
+            f"Lossy fallback available: {summary}",
+            reply_markup=keyboard,
+        )
+    except TelegramError as e:
+        logger.warning("Failed to send lossy-fallback prompt: %s", e)
+        _pending_lossy.pop(cid, None)
+        return False
+    return True
+
+
+async def _handle_lossy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not query or not query.data:
+        return
+    user_id = query.from_user.id if query.from_user else None
+    if user_id not in ALLOWED_USERS:
+        await query.answer("Not allowed.", show_alert=False)
+        return
+    parts = query.data.split(":", 2)
+    if len(parts) != 3 or parts[0] != "lossy":
+        return
+    action, cid = parts[1], parts[2]
+
+    _purge_stale_lossy()
+    entry = _pending_lossy.pop(cid, None)
+    if entry is None:
+        await query.answer("Prompt expired.", show_alert=False)
+        with contextlib.suppress(TelegramError):
+            await query.edit_message_text("Prompt expired (5 min).")
+        return
+
+    await query.answer()
+
+    track = entry["track"]
+    album_ctx = entry["album_ctx"]
+    candidates = entry["candidates"]
+
+    if action == "skip":
+        with contextlib.suppress(TelegramError):
+            await query.edit_message_text(
+                f"Skipped — FLAC not available for {track['artist']} — {track['title']}"
+            )
+        return
+
+    if action != "accept":
+        return
+
+    summary = _format_lossy_summary(candidates)
+    with contextlib.suppress(TelegramError):
+        await query.edit_message_text(
+            f"Downloading: {track['artist']} — {track['title']} ({summary})"
+        )
+
+    in_flight_key = f"track:{entry['track_id']}:lossy"
+    if in_flight_key in _in_flight:
+        with contextlib.suppress(TelegramError):
+            await query.edit_message_text("Already queued.")
+        return
+    _in_flight.add(in_flight_key)
+    try:
+        async with _download_semaphore:
+            try:
+                path, _was, fmt = await soulseek.download_single_track(
+                    track, album_ctx, MUSIC_DIR,
+                    accept_lossy=True,
+                    precomputed_candidates=candidates,
+                )
+            except Exception as e:
+                logger.error(
+                    "Lossy download failed (%s — %s): %s",
+                    track["artist"], track["title"], e,
+                )
+                with contextlib.suppress(TelegramError):
+                    await query.edit_message_text(f"Lossy download failed: {_short(e)}")
+                return
+
+            scan_note = await _trigger_scan()
+            fmt_str = f" · {fmt}" if fmt else ""
+            done_text = (
+                f"Done! {track['artist']} — {track['title']}{fmt_str}\n{scan_note}"
+            )
+            share_url = await _try_share_album(
+                album_ctx.get("artist", track["artist"]),
+                album_ctx.get("title", ""),
+                skip_delay=False,
+            )
+            if share_url:
+                done_text += f"\n\n{share_url}"
+            with contextlib.suppress(TelegramError):
+                await query.edit_message_text(done_text)
+    finally:
+        _in_flight.discard(in_flight_key)
 
 
 async def _try_share_album(artist: str, title: str, skip_delay: bool = False) -> str | None:
@@ -585,6 +760,7 @@ def _build_app() -> Application:
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(InlineQueryHandler(handle_inline_query))
+    app.add_handler(CallbackQueryHandler(_handle_lossy_callback, pattern=r"^lossy:"))
     app.add_error_handler(_error_handler)
     return app
 

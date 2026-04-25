@@ -35,6 +35,21 @@ TRACK_PICK_THRESHOLD = 45.0   # 45..70 — show picker; <45 — give up
 ALBUM_AUTO_THRESHOLD = 70.0
 ALBUM_PICK_THRESHOLD = 50.0
 
+# Mp3-fallback gates. Triggered only when accept_lossy=True (after a FLAC
+# search came up empty). Lower bound on mp3 quality keeps us from saving
+# 128kbps junk to disk; m4a is allowed without a bitrate floor because it
+# might be ALAC (lossless) — we can't tell without parsing the stream.
+_LOSSY_FALLBACK_EXTS = {"mp3", "m4a"}
+_LOSSY_MIN_MP3_BITRATE = 256_000
+
+
+def _is_acceptable_lossy(r) -> bool:
+    if r.extension not in _LOSSY_FALLBACK_EXTS:
+        return False
+    if r.extension == "mp3" and (r.bit_rate or 0) < _LOSSY_MIN_MP3_BITRATE:
+        return False
+    return True
+
 
 def _strip_diacritics(s: str) -> str:
     """Remove combining marks; keeps the base letters intact."""
@@ -172,11 +187,16 @@ async def find_track(
     track_meta: dict,
     album_artist: str | None = None,
     duration_tolerance: int = 5,
+    accept_lossy: bool = False,
 ) -> tuple[ScoredTrack | None, list[ScoredTrack]]:
     """Search and score for a single track. Returns ``(auto_pick, alternatives)``.
 
     ``auto_pick`` is filled in when score >= TRACK_AUTO_THRESHOLD; otherwise the
     caller can use the ``alternatives`` list (still already filtered & sorted).
+
+    ``accept_lossy`` (mp3-fallback path): instead of FLAC-only, search for
+    mp3≥256kbps + m4a, score them with a flat 5pt quality reward. Used after
+    a FLAC search came up empty and the user has explicitly opted in.
     """
     artist = track_meta.get("artist", "") or album_artist or ""
     title = track_meta.get("title", "")
@@ -190,7 +210,10 @@ async def find_track(
     pooled: list[SearchResult] = []
     for q in queries:
         responses = await slskd.search(q, timeout_secs=18, response_limit=180)
-        for r in slskd.parse_files(responses, lossless_only=True):
+        parsed = slskd.parse_files(responses, lossless_only=not accept_lossy)
+        for r in parsed:
+            if accept_lossy and not _is_acceptable_lossy(r):
+                continue
             key = (r.username, r.filename.lower())
             if key in seen_files:
                 continue
