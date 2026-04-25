@@ -12,7 +12,7 @@ import logging
 
 import aiohttp
 
-from metadata import deezer
+from metadata import deezer, lastfm
 from metadata.client import LRCLIB_URL, _get_lrclib_sem, _get_session, cover_url as _resize_cover
 
 logger = logging.getLogger(__name__)
@@ -106,22 +106,42 @@ def _adapt_album_summary(a: dict) -> dict:
 # --- public functions ------------------------------------------------------
 
 async def fetch_album(album_id: str) -> dict:
-    """Fetch full album metadata by Deezer album ID."""
+    """Fetch full album metadata by Deezer album ID. Genres include Last.fm
+    community tags merged on top of Deezer's coarser labels (best-effort).
+    """
     data = await deezer.get_album(album_id)
     summary_tracks = data.get("tracks", {}).get("data", [])
     if summary_tracks:
-        # Enrich with ISRC / disk_number / bpm via per-track endpoint.
-        # 50 req/5sec rate limit — for albums >25 tracks we'd want to batch,
-        # but most albums fit in one burst. asyncio.gather keeps this fast.
+        # Enrich tracks with ISRC / disk_number / bpm via per-track endpoint.
+        # Deezer's 50 req/5sec rate limit fits albums up to ~25 tracks in one
+        # burst; bigger ones still fit because asyncio.gather is bounded by
+        # aiohttp's connection pool default.
         async def _maybe_track(tid: str):
             try:
                 return await deezer.get_track(tid)
             except Exception:
                 return None
-        full_tracks = await asyncio.gather(*[_maybe_track(t["id"]) for t in summary_tracks])
+        full_tracks_task = asyncio.gather(*[_maybe_track(t["id"]) for t in summary_tracks])
     else:
-        full_tracks = []
-    return _adapt_album(data, full_tracks)
+        full_tracks_task = asyncio.sleep(0, result=[])
+
+    album_artist = (data.get("artist") or {}).get("name", "") or ""
+    album_title = data.get("title", "") or ""
+    lastfm_task = lastfm.fetch_album_tags(album_artist, album_title)
+
+    full_tracks, lastfm_tags = await asyncio.gather(full_tracks_task, lastfm_task)
+    album = _adapt_album(data, full_tracks)
+
+    if lastfm_tags:
+        existing_lower = {g.lower() for g in album["genres"]}
+        merged = list(album["genres"])
+        for tag in lastfm_tags:
+            if tag.lower() not in existing_lower:
+                merged.append(tag)
+                existing_lower.add(tag.lower())
+        album["genres"] = merged
+
+    return album
 
 
 async def fetch_single_track(track_id: str) -> tuple[dict, dict]:
