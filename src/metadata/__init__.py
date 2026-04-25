@@ -4,6 +4,7 @@ from metadata.api import (
     search,
     fetch_cover_url,
     fetch_lyrics,
+    enrich_genres,
 )
 from metadata.resolver import resolve_link
 from metadata.client import close
@@ -16,4 +17,5 @@ __all__ = [
     "search",
     "fetch_cover_url",
     "fetch_lyrics",
+    "enrich_genres",
 ]

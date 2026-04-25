@@ -22,7 +22,7 @@ from typing import Awaitable, Callable
 import aiohttp
 
 from metadata.client import _get_session
-from metadata import fetch_album, fetch_lyrics
+from metadata import fetch_album, fetch_lyrics, enrich_genres
 from library.files import (
     _find_existing_track, _sanitize, _track_prefix, _ensure_album_dir,
     _cover_url,
@@ -363,6 +363,7 @@ async def download_album(
     """
     if album is None:
         album = await fetch_album(album_id)
+        await enrich_genres(album)
 
     artist = _sanitize(album["artist"])
     title = _sanitize(album["title"])
