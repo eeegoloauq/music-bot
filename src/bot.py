@@ -32,6 +32,7 @@ from config import TG_TOKEN, ALLOWED_USERS, MUSIC_DIR, NAVI_LOGIN, NAVI_PASS, NA
 import metadata
 import soulseek
 import navidrome
+import retagger
 from inline import handle_inline_query, _DELETE_PREFIX
 from library.files import _sanitize, _find_existing_track
 
@@ -76,6 +77,12 @@ _in_flight: set[str] = set()
 # stale prompt from auto-downloading hours later if the user finally taps.
 _LOSSY_PROMPT_TTL = 300  # seconds
 _pending_lossy: dict[str, dict] = {}
+
+# Re-tagger session state. One global slot — single-user bot. Cleared after
+# /retag confirm or /retag stop, or when the dry-run TTL expires.
+_RETAG_SESSION_TTL = 1200  # 20 minutes
+_retag_session: dict | None = None
+_retag_in_progress = False
 
 
 def _purge_stale_lossy() -> None:
@@ -162,7 +169,9 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"<code>@{bot_me.username} del name</code> — delete album\n\n"
         "<b>Commands</b>\n"
         "/scan — trigger library rescan\n"
-        "/stats — library statistics",
+        "/stats — library statistics\n"
+        "/retag — refresh tags on every album from Deezer + Last.fm "
+        "(dry-run, then <code>/retag confirm</code>)",
         parse_mode="HTML",
     )
 
@@ -209,6 +218,172 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Tracks: {stats['tracks']}\n"
         f"Size: {size_gb:.1f} GB",
     )
+
+
+def _format_retag_summary(plans: list, summary, sample_n: int = 8) -> str:
+    """Compact text rendering of a dry-run for chat. Lists a sample of
+    albums that would change, plus aggregate counts.
+    """
+    sample = [p for p in plans if p.needs_apply][:sample_n]
+    sample_lines = []
+    for p in sample:
+        head = f"{p.artist_dir}/{p.album_dir}"
+        tag = ", ".join(c.split(":")[0] for c in p.changes[:4])
+        if len(p.changes) > 4:
+            tag += "…"
+        sample_lines.append(f"  • {head} — {tag}")
+
+    failed = [p for p in plans if p.error]
+    failed_lines = [f"  ✗ {p.artist_dir}/{p.album_dir}" for p in failed[:5]]
+    failed_more = max(0, len(failed) - 5)
+
+    out = [
+        f"<b>Re-tag dry-run · {summary.total} albums</b>",
+        f"",
+        f"  ✓ {summary.by_comment_id} via comment-tag Deezer ID",
+        f"  ⌕ {summary.by_search} via folder-name search",
+        f"  ✗ {summary.unidentified} could not identify",
+        f"",
+        f"  ✎ {summary.will_change} would change",
+        f"  · {summary.no_changes} already canonical",
+    ]
+    if sample_lines:
+        out.extend(["", "<b>Sample of changes:</b>"])
+        out.extend(sample_lines)
+        if summary.will_change > sample_n:
+            out.append(f"  … +{summary.will_change - sample_n} more")
+    if failed_lines:
+        out.extend(["", "<b>Unidentifiable (will skip):</b>"])
+        out.extend(failed_lines)
+        if failed_more:
+            out.append(f"  … +{failed_more} more")
+    if summary.will_change:
+        out.extend(["", "Reply <code>/retag confirm</code> to apply, or <code>/retag stop</code> to drop."])
+    return "\n".join(out)
+
+
+@authorized
+async def cmd_retag(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global _retag_session, _retag_in_progress
+
+    args = (context.args or [])
+    sub = args[0].lower() if args else ""
+
+    if sub == "stop":
+        if _retag_session is None:
+            await update.message.reply_text("No re-tag session pending.")
+        else:
+            _retag_session = None
+            await update.message.reply_text("Re-tag session dropped.")
+        return
+
+    if sub == "confirm":
+        if _retag_session is None:
+            await update.message.reply_text(
+                "No re-tag session to confirm. Run /retag first."
+            )
+            return
+        if time.monotonic() > _retag_session["expire_at"]:
+            _retag_session = None
+            await update.message.reply_text(
+                "Re-tag session expired (20 min). Run /retag again."
+            )
+            return
+        if _retag_in_progress:
+            await update.message.reply_text("Re-tag already running.")
+            return
+        plans = _retag_session["plans"]
+        await _do_retag_apply(update, plans)
+        return
+
+    # Default: run dry-run + cache plans for confirm.
+    if _retag_in_progress:
+        await update.message.reply_text("Re-tag already running.")
+        return
+
+    status_msg = await update.message.reply_text("Scanning library…")
+    last_edit = [time.monotonic()]
+
+    async def progress(idx, total, _plan):
+        # Throttle edits — Telegram rate-limits ~1/sec on the same message.
+        if time.monotonic() - last_edit[0] < 4 and idx != total:
+            return
+        last_edit[0] = time.monotonic()
+        try:
+            await status_msg.edit_text(f"Dry-run pass [{idx}/{total}]…")
+        except TelegramError:
+            pass
+
+    _retag_in_progress = True
+    try:
+        try:
+            plans, summary = await retagger.run_dry_run(MUSIC_DIR, progress=progress)
+        except Exception as e:
+            logger.exception("Re-tag dry-run failed")
+            await status_msg.edit_text(f"Re-tag failed: {_short(e)}")
+            return
+    finally:
+        _retag_in_progress = False
+
+    _retag_session = {
+        "plans": plans,
+        "summary": summary,
+        "expire_at": time.monotonic() + _RETAG_SESSION_TTL,
+    }
+    text = _format_retag_summary(plans, summary)
+    try:
+        await status_msg.edit_text(text, parse_mode="HTML")
+    except TelegramError:
+        await update.message.reply_text(text, parse_mode="HTML")
+
+
+async def _do_retag_apply(update: Update, plans: list):
+    global _retag_session, _retag_in_progress
+    _retag_in_progress = True
+    status_msg = await update.message.reply_text("Applying re-tag…")
+    last_edit = [time.monotonic()]
+    last_album = [""]
+
+    async def progress(idx, total, plan):
+        last_album[0] = f"{plan.artist_dir}/{plan.album_dir}"
+        if time.monotonic() - last_edit[0] < 5 and idx != total:
+            return
+        last_edit[0] = time.monotonic()
+        try:
+            await status_msg.edit_text(
+                f"Applying [{idx}/{total}]\n  {last_album[0][:60]}"
+            )
+        except TelegramError:
+            pass
+
+    try:
+        try:
+            stats = await retagger.run_apply(plans, progress=progress)
+        except Exception as e:
+            logger.exception("Re-tag apply failed")
+            await status_msg.edit_text(f"Apply failed: {_short(e)}")
+            return
+    finally:
+        _retag_in_progress = False
+        _retag_session = None
+
+    out = [
+        f"<b>Re-tag done</b>",
+        f"  ✎ {stats['albums_planned']} albums touched",
+        f"  ✍ {stats['files_written']} files written",
+    ]
+    if stats["files_skipped"]:
+        out.append(f"  · {stats['files_skipped']} files skipped (no track match)")
+    if stats["failed"]:
+        out.append(f"  ✗ {len(stats['failed'])} album-level failures")
+        for path, err in stats["failed"][:3]:
+            out.append(f"      {path}: {_short(Exception(err))}")
+    out.append("")
+    out.append(await _trigger_scan())
+    try:
+        await status_msg.edit_text("\n".join(out), parse_mode="HTML")
+    except TelegramError:
+        await update.message.reply_text("\n".join(out), parse_mode="HTML")
 
 
 @authorized
@@ -730,6 +905,7 @@ async def _post_init(app: Application) -> None:
         BotCommand("help", "Show all features"),
         BotCommand("scan", "Trigger library rescan"),
         BotCommand("stats", "Library statistics"),
+        BotCommand("retag", "Re-tag library from current Deezer + Last.fm metadata"),
     ])
 
 
@@ -757,6 +933,7 @@ def _build_app() -> Application:
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("scan", cmd_scan))
     app.add_handler(CommandHandler("stats", cmd_stats))
+    app.add_handler(CommandHandler("retag", cmd_retag))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(InlineQueryHandler(handle_inline_query))
     app.add_handler(CallbackQueryHandler(_handle_lossy_callback, pattern=r"^lossy:"))
