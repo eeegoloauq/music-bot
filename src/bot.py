@@ -35,13 +35,11 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("telegram").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
-# Words after the link that trigger HI_RES_LOSSLESS for this download
-_HIRES_RE = re.compile(r"\b(hi|hq|hires|hi-res)\b", re.IGNORECASE)
 # Words that force re-download (delete existing + download fresh)
 _FORCE_RE = re.compile(r"\b(re|force|redownload)\b", re.IGNORECASE)
-# Music platform URLs we accept as download triggers. All are routed through
-# metadata.resolve_link, which understands them natively (Deezer, plain ID
-# extraction) or delegates to Odesli (Tidal/Spotify/Apple/YT/Shazam/etc).
+# Music platform URLs accepted as download triggers. metadata.resolve_link
+# handles them via platform-direct paths (Tidal/Spotify/Apple HTML scrape,
+# iTunes Lookup) with Odesli as the long-tail fallback.
 _MUSIC_LINK_RE = re.compile(
     r"https?://(?:"
     r"(?:listen\.|www\.)?tidal\.com"
@@ -57,10 +55,10 @@ _MUSIC_LINK_RE = re.compile(
     re.IGNORECASE,
 )
 
-# album share URL cache for download handler (bounded)
 _album_share_cache: dict[str, str] = {}
 _CACHE_MAX = 500
-# serialize album/track downloads so Tidal CDN doesn't throttle
+# Serialise album/track downloads — slskd queues per-peer, and stacking
+# multiple albums in flight just makes everything wait longer.
 _download_semaphore = asyncio.Semaphore(1)
 # album/track IDs currently downloading or queued — drops duplicate pastes
 _in_flight: set[str] = set()
@@ -110,7 +108,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"<b>Commands:</b>\n"
         f"/help — show all features\n"
         f"/scan — trigger library rescan\n\n"
-        f"Send a Tidal link or any music link (Spotify, Apple Music, etc.) to download.\n"
+        f"Send a music link (Tidal, Spotify, Apple Music, Deezer, etc.) to download.\n"
         f"Type <code>@{bot_me.username}</code> in any chat for inline mode.",
         parse_mode="HTML",
     )
@@ -121,10 +119,10 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bot_me = await context.bot.get_me()
     await update.message.reply_text(
         "<b>Download</b>\n"
-        "Send a Tidal, Spotify, Apple Music, Deezer, Shazam or other music link.\n"
-        "Add <b>hi</b> after link for hi-res, <b>re</b> to force re-download.\n\n"
+        "Send a music link from Tidal, Spotify, Apple Music, Deezer, Shazam, etc.\n"
+        "Add <b>re</b> after the link to force re-download.\n\n"
         "<b>Inline mode</b>\n"
-        f"<code>@{bot_me.username} song name</code> — search Tidal\n"
+        f"<code>@{bot_me.username} song name</code> — search Deezer\n"
         f"<code>@{bot_me.username} np</code> — now playing as audio\n"
         f"<code>@{bot_me.username} s</code> — share link for current track\n"
         f"<code>@{bot_me.username} l</code> — lyrics for current track\n"
@@ -191,13 +189,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await _handle_delete(update, rel_path)
         return
 
-    quality = "HI_RES_LOSSLESS" if _HIRES_RE.search(text) else None
     force = bool(_FORCE_RE.search(text))
 
     music_matches = _MUSIC_LINK_RE.findall(text)
     if music_matches:
         for url in music_matches:
-            await _resolve_and_download(update, url, text, force=force)
+            await _resolve_and_download(update, url, force=force)
 
 
 async def _handle_delete(update: Update, rel_path: str):
@@ -257,8 +254,7 @@ async def _trigger_scan() -> str:
         return "Library scan failed."
 
 
-async def _resolve_and_download(update: Update, url: str, suffix: str, force: bool = False):
-    """Resolve a non-Tidal music link via Odesli, then download."""
+async def _resolve_and_download(update: Update, url: str, force: bool = False):
     status_msg = await update.message.reply_text("Resolving link...")
     try:
         result = await metadata.resolve_link(url)
@@ -271,14 +267,13 @@ async def _resolve_and_download(update: Update, url: str, suffix: str, force: bo
         await status_msg.edit_text("Could not resolve link.")
         return
 
-    link_type, tidal_id = result
-    quality = "HI_RES_LOSSLESS" if _HIRES_RE.search(suffix) else None
+    link_type, album_or_track_id = result
     await status_msg.delete()
 
     if link_type == "album":
-        await _download_album(update, tidal_id, quality=quality, force=force)
+        await _download_album(update, album_or_track_id, force=force)
     else:
-        await _download_track(update, tidal_id, quality=quality, force=force)
+        await _download_track(update, album_or_track_id, force=force)
 
 
 async def _send_result(update: Update, status_msg, text: str, album_dir: str) -> None:
@@ -298,26 +293,25 @@ async def _send_result(update: Update, status_msg, text: str, album_dir: str) ->
         pass
 
 
-async def _download_album(update: Update, album_id: str, quality: str | None = None, force: bool = False):
+async def _download_album(update: Update, album_id: str, force: bool = False):
     key = f"album:{album_id}"
     if key in _in_flight:
         await update.message.reply_text("Already queued.")
         return
     _in_flight.add(key)
     try:
-        await _do_download_album(update, album_id, quality=quality, force=force)
+        await _do_download_album(update, album_id, force=force)
     finally:
         _in_flight.discard(key)
 
 
-async def _do_download_album(update: Update, album_id: str, quality: str | None = None, force: bool = False):
+async def _do_download_album(update: Update, album_id: str, force: bool = False):
     if _download_semaphore.locked():
         status_msg = await update.message.reply_text("Queued, waiting for current download...")
     else:
         status_msg = await update.message.reply_text("Fetching album info...")
 
     async with _download_semaphore:
-        # Step 1: fetch metadata
         try:
             album = await metadata.fetch_album(album_id)
         except Exception as e:
@@ -393,14 +387,12 @@ async def _do_download_album(update: Update, album_id: str, quality: str | None 
             except TelegramError:
                 pass
 
-        # Step 2: download
         try:
             result = await soulseek.download_album(
-            album_id, MUSIC_DIR, progress=progress, album=album, quality=quality
-        )
+                album_id, MUSIC_DIR, progress=progress, album=album,
+            )
         except Exception as e:
             logger.error("Album download failed (%s — %s): %s", album["artist"], album["title"], e)
-            # Restore backup on failure
             if backup_dir and os.path.isdir(backup_dir):
                 target = backup_dir.removesuffix(".bak")
                 if os.path.exists(target):
@@ -410,12 +402,10 @@ async def _do_download_album(update: Update, album_id: str, quality: str | None 
             await status_msg.edit_text(f"Download failed: {_short(e)}")
             return
 
-        # Clean up backup after successful download
         if backup_dir and os.path.isdir(backup_dir):
             shutil.rmtree(backup_dir)
             logger.info("Force re-download succeeded, removed backup: %s", backup_dir)
 
-        # Build result text
         if result["downloaded"] == 0 and not result["failed"]:
             done_text = f"Already in library: {album['artist']} — {album['title']}"
         else:
@@ -437,11 +427,10 @@ async def _do_download_album(update: Update, album_id: str, quality: str | None 
                 parts.append(f"{len(result['failed'])} failed: {details}")
             done_text = f"Done! {album['artist']} — {album['title']}\n" + ", ".join(parts) + "."
 
-        # Step 3: scan (non-critical)
         if result["downloaded"] > 0:
             done_text += "\n" + await _trigger_scan()
 
-        # Step 4: share link (non-critical) — always try, even for "already in library"
+        # Share link works even for "already in library" — useful when re-pasting old albums.
         share_url = await _try_share_album(album["artist"], album["title"], skip_delay=result["downloaded"] == 0)
         if share_url:
             done_text += f"\n\n{share_url}"
@@ -449,26 +438,25 @@ async def _do_download_album(update: Update, album_id: str, quality: str | None 
         await _send_result(update, status_msg, done_text, result["album_dir"])
 
 
-async def _download_track(update: Update, track_id: str, quality: str | None = None, force: bool = False):
+async def _download_track(update: Update, track_id: str, force: bool = False):
     key = f"track:{track_id}"
     if key in _in_flight:
         await update.message.reply_text("Already queued.")
         return
     _in_flight.add(key)
     try:
-        await _do_download_track(update, track_id, quality=quality, force=force)
+        await _do_download_track(update, track_id, force=force)
     finally:
         _in_flight.discard(key)
 
 
-async def _do_download_track(update: Update, track_id: str, quality: str | None = None, force: bool = False):
+async def _do_download_track(update: Update, track_id: str, force: bool = False):
     if _download_semaphore.locked():
         status_msg = await update.message.reply_text("Queued, waiting for current download...")
     else:
         status_msg = await update.message.reply_text("Fetching track info...")
 
     async with _download_semaphore:
-        # Step 1: fetch metadata
         try:
             track, album_ctx = await metadata.fetch_single_track(track_id)
         except Exception as e:
@@ -476,7 +464,6 @@ async def _do_download_track(update: Update, track_id: str, quality: str | None 
             await status_msg.edit_text(f"Failed to fetch track info: {_short(e)}")
             return
 
-        # Force re-download: remove existing track file
         if force:
             album_dir = os.path.join(
                 MUSIC_DIR, _sanitize(album_ctx.get("artist", track["artist"])),
@@ -492,10 +479,9 @@ async def _do_download_track(update: Update, track_id: str, quality: str | None 
         except TelegramError:
             pass
 
-        # Step 2: download
         try:
             path, was_downloaded, fmt = await soulseek.download_single_track(
-            track, album_ctx, MUSIC_DIR, quality=quality
+            track, album_ctx, MUSIC_DIR,
         )
         except Exception as e:
             logger.error("Track download failed (%s — %s): %s", track["artist"], track["title"], e)

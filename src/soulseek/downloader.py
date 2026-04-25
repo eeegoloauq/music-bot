@@ -21,7 +21,6 @@ from typing import Awaitable, Callable
 
 import aiohttp
 
-from config import WRITE_TAGS
 from metadata.client import _get_session
 from metadata import fetch_album, fetch_lyrics
 from library.files import (
@@ -75,7 +74,10 @@ async def _download_cover(cover_uuid: str, album_dir: str) -> bytes | None:
 
 
 def _move_into_library(src: str, dest: str) -> None:
-    """Atomic-ish move from slskd download dir to library album dir."""
+    """Atomic-ish move from slskd download dir to library album dir.
+    Writes to ``dest + .importing`` first so Navidrome's scanner doesn't pick
+    up a partially-written file.
+    """
     tmp = dest + ".importing"
     try:
         if os.path.dirname(src) != os.path.dirname(dest):
@@ -87,7 +89,6 @@ def _move_into_library(src: str, dest: str) -> None:
             os.chmod(dest, 0o666)
         except OSError:
             pass
-        # Remove the original if we copied
         if os.path.exists(src) and os.path.abspath(src) != os.path.abspath(dest):
             try:
                 os.remove(src)
@@ -147,11 +148,9 @@ async def _await_one_file(
 def _write_tags_force(filepath: str, track: dict, album: dict,
                       cover_data: bytes | None, lyrics: dict | None,
                       ext: str):
-    """Wrapper around the existing taggers but with force=True semantics:
-    Tidal-derived tags overwrite whatever the Soulseek file came in with.
+    """Force-overwrite tags from Deezer metadata, replacing whatever the
+    Soulseek peer baked in (their tags are unreliable / inconsistent).
     """
-    if not WRITE_TAGS:
-        return
     if ext == "m4a":
         _write_m4a_tags(filepath, track, album, None, cover_data, lyrics, force=True)
     else:
@@ -265,12 +264,10 @@ async def download_single_track(
     track: dict,
     album_ctx: dict,
     dest_dir: str,
-    quality: str | None = None,           # accepted for API parity; ignored in slsk world
 ) -> tuple[str, bool, str]:
     """Download one track. Returns ``(filepath, was_downloaded, format_label)``.
-
-    If the file already exists in the library, it patches missing tags
-    (same behaviour as the old Tidal flow) and returns ``was_downloaded=False``.
+    If the file already exists in the library, patch missing tags and return
+    ``was_downloaded=False``.
     """
     artist = _sanitize(album_ctx.get("artist", track["artist"]))
     album_title = _sanitize(album_ctx.get("title", "Singles"))
@@ -326,9 +323,8 @@ async def download_album(
     dest_dir: str,
     progress: ProgressCallback = None,
     album: dict | None = None,
-    quality: str | None = None,            # API parity — slsk doesn't have quality switch
 ) -> dict:
-    """Download an album. Same return shape as the previous Tidal flow:
+    """Download an album. Returns
     ``{album_dir, downloaded, skipped, failed, total, format, with_lyrics}``.
     """
     if album is None:
@@ -350,7 +346,6 @@ async def download_album(
     format_label = ""
     logger.info("Album: %s — %s (%d tracks)", album["artist"], album["title"], total)
 
-    # Phase 1: scan existing
     existing_map: dict[str, str] = {}
     to_download: list[tuple[int, dict]] = []
     for i, track in enumerate(album["tracks"], 1):
@@ -360,7 +355,6 @@ async def download_album(
         else:
             to_download.append((i, track))
 
-    # Phase 2: patch existing in parallel
     if existing_map:
         patch_tracks = [(i, t) for i, t in enumerate(album["tracks"], 1)
                         if t["id"] in existing_map]
@@ -384,11 +378,8 @@ async def download_album(
         return _result_dict(album_dir, downloaded, skipped, failed, total,
                             format_label, with_lyrics)
 
-    # Phase 3a: try to find the whole album in one peer's folder.
-    # When a peer has every track of the album (missing_count == 0) the folder
-    # match wins outright — one queue slot, no cross-version mixes, fewest
-    # flaky connections. Per-track only kicks in for tracks the folder didn't
-    # cover (or as fallback below if the chosen peer fails on a particular file).
+    # Folder-match wins outright when one peer has every track of the album:
+    # single queue slot, no cross-version mixes, fewer flaky connections.
     chosen_per_track: dict[str, SearchResult] = {}
     track_alts: dict[str, list[SearchResult]] = {}
     folder_match, _ = await find_album(album)
@@ -401,9 +392,8 @@ async def download_album(
                     folder_match.folder.username, folder_match.score,
                     len(chosen_per_track), len(track_ids_needed))
 
-    # Phase 3b: per-track search for whatever the folder match didn't cover.
-    # Also collect alternatives so we can retry from another peer if the
-    # primary candidate stalls or fails.
+    # Per-track search for whatever the folder match didn't cover. Alts go
+    # into the retry pool used when the primary peer stalls.
     needs_per_track = [(i, t) for (i, t) in to_download
                        if t["id"] not in chosen_per_track]
     if needs_per_track:
@@ -415,12 +405,11 @@ async def download_album(
             chosen = auto.result if auto else (alts[0].result if alts else None)
             if chosen is not None:
                 chosen_per_track[t["id"]] = chosen
-            # Retry pool: alts beyond the chosen one
             track_alts[t["id"]] = [
                 a.result for a in alts if (auto is None or a is not auto)
             ]
 
-    # Phase 4: prefetch lyrics in parallel for everything we're about to download
+    # Prefetch lyrics in parallel; the per-track download awaits its own task.
     lyrics_tasks: dict[str, asyncio.Task] = {
         t["id"]: asyncio.create_task(fetch_lyrics(
             t["title"], t["artist"], album["title"], t.get("duration", 0),
@@ -428,19 +417,17 @@ async def download_album(
         for _, t in to_download
     }
 
-    # Phase 5: download sequentially track-by-track. slskd handles its own
-    # queue per peer; we stay polite and keep the event loop free.
+    # Download tracks sequentially — slskd handles its own per-peer queue.
     download_total = len(to_download)
     for download_idx, (i, track) in enumerate(to_download, 1):
-        # Build the candidate ladder: primary first, then per-track alts.
         primary = chosen_per_track.get(track["id"])
         candidates: list[SearchResult] = []
         if primary is not None:
             candidates.append(primary)
         candidates.extend(track_alts.get(track["id"], []))
 
-        # Per-track progress hook: forwards chunk-level transfer info to the
-        # album-level callback so the bot can show speed and ETA.
+        # Forward per-chunk transfer info to the album-level callback so the
+        # bot can render speed/ETA in the status message.
         async def _on_track_progress(pct: float, speed_bps: int, eta_sec: int,
                                       _i=i, _title=track["title"]):
             if progress:
@@ -450,7 +437,8 @@ async def download_album(
                         {"pct": pct, "speed_bps": speed_bps, "eta_sec": eta_sec},
                     )
 
-        # Initial heartbeat so the user sees this track started
+        # Initial heartbeat — slskd may stall a few seconds before the first
+        # transfer-progress event fires, so the user sees movement immediately.
         if progress:
             with contextlib.suppress(Exception):
                 await progress(i, total, download_idx, download_total, track["title"], None)
@@ -481,7 +469,6 @@ async def download_album(
             )
             album_bytes += size
             downloaded += 1
-            # Lyrics: was the tagger able to attach them?
             try:
                 if lyrics_tasks[track["id"]].done():
                     if lyrics_tasks[track["id"]].result():

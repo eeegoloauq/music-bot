@@ -64,7 +64,9 @@ _NP_CACHE_TTL = 2  # seconds
 
 
 def _find_tidal_album_id_in_dir(album_dir: str) -> str:
-    """Find Tidal album ID from any audio file's comment tag in a directory."""
+    """Find the album ID stored in any audio file's comment tag.
+    Matches both Deezer (current) and Tidal (legacy) URL patterns.
+    """
     if not os.path.isdir(album_dir):
         return ""
     try:
@@ -305,7 +307,7 @@ async def _inline_hint(update: Update):
 
 
 async def _fetch_tidal_covers(tidal_ids: list[tuple[str, str]]) -> dict[str, str]:
-    """Batch-fetch Tidal cover URLs. Takes [(key, tidal_album_id), ...], returns {key: url}."""
+    """Batch-fetch album cover URLs from Deezer. Input: ``[(key, album_id), ...]``."""
     if not tidal_ids:
         return {}
     covers = await asyncio.gather(*[
@@ -368,7 +370,7 @@ async def _inline_delete(update: Update, del_query: str):
 
 
 async def _inline_search(update: Update, query: str):
-    """Search Tidal for albums and tracks with pagination."""
+    """Search Deezer for albums and tracks with pagination."""
     try:
         offset = int(update.inline_query.offset or "0")
     except ValueError:
@@ -384,7 +386,7 @@ async def _inline_search(update: Update, query: str):
             track_limit=page_tracks + offset,
         )
     except Exception as e:
-        logger.warning("Tidal search failed in inline: %s", e)
+        logger.warning("Deezer search failed in inline: %s", e)
         search_data = {"albums": [], "tracks": []}
 
     all_albums = search_data["albums"]
@@ -457,7 +459,7 @@ async def _inline_lyrics(update: Update, playing: list[dict]):
 
 
 async def _inline_lib_search(update: Update, query: str):
-    """Search Navidrome library and return results with share links and Tidal covers."""
+    """Search Navidrome library and return results with share links and cover art."""
     try:
         search_result = await navidrome.search(query)
     except Exception as e:
@@ -468,7 +470,7 @@ async def _inline_lib_search(update: Update, query: str):
     albums = [a for a in (search_result.get("album") or []) if isinstance(a, dict)]
     songs = [s for s in (search_result.get("song") or []) if isinstance(s, dict)]
 
-    # Extract Tidal album IDs from song comments for cover art
+    # Extract album IDs from song comments for cover-art batch fetch
     tidal_ids: dict[str, str] = {}  # navidrome albumId -> tidal album id
     for song in songs:
         album_id = song.get("albumId", "")
@@ -505,7 +507,7 @@ async def _inline_lib_search(update: Update, query: str):
 
 
 async def _inline_share(update: Update, playing: list[dict]):
-    """Send share links for now-playing tracks with Tidal cover art."""
+    """Send share links for now-playing tracks with cover art."""
     entry = playing[0]
     desc = f"{entry['artist']} — {entry['title']}"
     share_url = await _get_share_url(entry["songId"], desc)
@@ -513,7 +515,7 @@ async def _inline_share(update: Update, playing: list[dict]):
         await update.inline_query.answer([], cache_time=5, is_personal=True)
         return
 
-    # Get Tidal cover URL: find any audio file in the album dir, read comment tag
+    # Cover URL: read any audio file in the album dir, parse album ID from comment tag
     cover_url = None
     if entry.get("path"):
         # path from Navidrome may not match disk filename, but parent dir is reliable
@@ -596,7 +598,7 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
     if query_lower == "l":
         return await _np_or_share_or_lyrics(update, context, "lyrics")
 
-    # 3+ chars = Tidal search (standard inline bot behavior)
+    # 3+ chars = full Deezer search
     if len(query) >= 3:
         return await _inline_search(update, query)
 
