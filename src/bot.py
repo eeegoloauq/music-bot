@@ -233,6 +233,26 @@ def _format_eta(seconds: float) -> str:
     return f"{h}h {m}m"
 
 
+_CHANGE_LABEL_MAP = {
+    "comment": "comment",
+    "genres": "genres",
+    "folder": "folder rename",
+    "artist folder": "artist folder rename",
+    "track count": "track count",
+    "releasedate (FLAC)": "release date",
+    "replaygain": "ReplayGain",
+    "album/albumartist casing": "casing",
+    "Last.fm only": "genres only",
+}
+
+
+def _pretty_change_label(raw: str) -> str:
+    """Strip the data-only suffix off a raw change string and map known
+    keys to human-readable labels."""
+    head = raw.split(":", 1)[0].split("(", 1)[0].strip().rstrip(":")
+    return _CHANGE_LABEL_MAP.get(head, head)
+
+
 def _outcome_tag(plan) -> str:
     """One-token outcome label for a finished AlbumPlan."""
     if plan.error:
@@ -240,44 +260,78 @@ def _outcome_tag(plan) -> str:
     if plan.is_lastfm_only:
         return "Last.fm only"
     if not plan.needs_apply:
-        return "clean"
-    return "Deezer"
+        return "already canonical"
+    return "Deezer match"
 
 
 def _retag_progress_text(
     phase: str, idx: int, total: int, plan, started_at: float,
     tally_changed: int, tally_lastfm: int, tally_skipped: int,
 ) -> str:
-    """Three-line download-style progress for /retag. Used in both dry-run
-    and apply phases (caller picks ``phase``)."""
+    """Three-line dry-run progress: header + last item + running tally.
+
+    Wording uses future tense (``to update``) since dry-run doesn't write
+    anything until the user replies ``/retag confirm``.
+    """
     pct = (idx * 100 // total) if total else 0
     elapsed = max(time.monotonic() - started_at, 0.001)
     avg = elapsed / max(idx, 1)
     eta = avg * max(total - idx, 0)
-    head = f"{plan.artist_dir}/{plan.album_dir}" if plan else ""
+    head = f"{plan.artist_dir} / {plan.album_dir}" if plan else ""
     if len(head) > 60:
         head = head[:58] + "…"
-    last_line = f"{head} · {_outcome_tag(plan)}" if plan else ""
     return (
-        f"<b>{phase}</b> [{idx}/{total} · {pct}%]\n"
-        f"{last_line}\n"
-        f"changed {tally_changed} · last.fm {tally_lastfm} · "
-        f"skipped {tally_skipped} · ETA {_format_eta(eta)}"
+        f"<b>{phase}</b> · {idx} / {total} · {pct}% · ETA {_format_eta(eta)}\n"
+        f"last: {head} · {_outcome_tag(plan)}\n"
+        f"to update <b>{tally_changed}</b> · "
+        f"genre-only <b>{tally_lastfm}</b> · "
+        f"skipped <b>{tally_skipped}</b>"
+    )
+
+
+def _retag_apply_progress_text(
+    idx: int, total: int, plan, started_at: float,
+    written_total: int, skipped_total: int,
+) -> str:
+    pct = (idx * 100 // total) if total else 0
+    elapsed = max(time.monotonic() - started_at, 0.001)
+    avg = elapsed / max(idx, 1)
+    eta = avg * max(total - idx, 0)
+    head = f"{plan.artist_dir} / {plan.album_dir}" if plan else ""
+    if len(head) > 60:
+        head = head[:58] + "…"
+    last_files = getattr(plan, "files_written", 0) if plan else 0
+    return (
+        f"<b>Re-tag apply</b> · {idx} / {total} · {pct}% · ETA {_format_eta(eta)}\n"
+        f"last: {head} · {last_files} files\n"
+        f"total: <b>{written_total}</b> files updated · "
+        f"<b>{skipped_total}</b> skipped"
     )
 
 
 def _format_retag_summary(plans: list, summary, elapsed: float, sample_n: int = 8) -> str:
-    """Compact dry-run summary, ``Done!``-style. No emoji, label · value
-    pairs separated by ·, sample lines indented two spaces.
+    """Dry-run summary in best-practice form: clear future-tense wording,
+    sub-counts inline, top changes + not-found split into sections.
     """
     will_change = [p for p in plans if p.needs_apply]
+    full_n = sum(1 for p in will_change if not p.is_lastfm_only)
+    lastfm_n = sum(1 for p in will_change if p.is_lastfm_only)
+
     sample = will_change[:sample_n]
     sample_lines = []
     for p in sample:
         head = f"{p.artist_dir} / {p.album_dir}"
         if len(head) > 70:
             head = head[:68] + "…"
-        tag = ", ".join(c.split(":")[0] for c in p.changes[:4])
+        labels = [_pretty_change_label(c) for c in p.changes[:4]]
+        # Drop empty / dup labels conservatively
+        seen = set()
+        clean_labels = []
+        for lbl in labels:
+            if lbl and lbl not in seen:
+                seen.add(lbl)
+                clean_labels.append(lbl)
+        tag = ", ".join(clean_labels)
         if len(p.changes) > 4:
             tag += "…"
         sample_lines.append(f"  {head} — {tag}")
@@ -291,29 +345,41 @@ def _format_retag_summary(plans: list, summary, elapsed: float, sample_n: int = 
         failed_lines.append(f"  {head}")
 
     out = [
-        f"<b>Dry-run done</b> · {summary.total} albums in {_format_eta(elapsed)}",
-        f"identified {summary.by_comment_id + summary.by_search} "
-        f"({summary.by_comment_id} from tag, {summary.by_search} via search) · "
-        f"unidentified {summary.unidentified}",
-        f"would change {summary.will_change} · already canonical {summary.no_changes}",
+        f"<b>Scan complete</b> · {summary.total} albums · {_format_eta(elapsed)}",
+        "",
     ]
+    if summary.will_change:
+        # Compact two-piece breakdown when both Deezer + Last.fm-only branches
+        # are populated; else just the bare count.
+        if full_n and lastfm_n:
+            out.append(
+                f"<b>{summary.will_change}</b> will update — "
+                f"{full_n} full + {lastfm_n} genre-only"
+            )
+        else:
+            out.append(f"<b>{summary.will_change}</b> will update")
+    if summary.no_changes:
+        out.append(f"<b>{summary.no_changes}</b> already canonical")
+    if summary.unidentified:
+        out.append(f"<b>{summary.unidentified}</b> not found on Deezer")
+
     if sample_lines:
         out.append("")
-        out.append(f"<b>Top changes</b> ({len(sample_lines)} of {summary.will_change}):")
+        out.append(f"<b>Top updates</b> ({len(sample_lines)} of {summary.will_change}):")
         out.extend(sample_lines)
         if summary.will_change > sample_n:
-            out.append(f"  … +{summary.will_change - sample_n} more")
+            out.append(f"  +{summary.will_change - sample_n} more")
     if failed_lines:
         out.append("")
-        out.append(f"<b>Skipped</b> ({len(failed_lines)} of {len(failed)}):")
+        out.append(f"<b>Not found</b> ({len(failed_lines)} of {len(failed)}):")
         out.extend(failed_lines)
         if len(failed) > 5:
-            out.append(f"  … +{len(failed) - 5} more")
+            out.append(f"  +{len(failed) - 5} more")
     if summary.will_change:
         out.append("")
         out.append(
-            "Reply <code>/retag confirm</code> to apply, "
-            "<code>/retag stop</code> to drop."
+            "Send <code>/retag confirm</code> to apply or "
+            "<code>/retag stop</code> to discard."
         )
     return "\n".join(out)
 
@@ -410,17 +476,24 @@ async def _do_retag_apply(update: Update, plans: list):
     _retag_in_progress = True
     status_msg = await update.message.reply_text("Applying re-tag…")
     last_edit = [time.monotonic()]
-    last_album = [""]
+    started = time.monotonic()
+    written_total = [0]
+    skipped_total = [0]
+    last_plan_holder = [None]
 
     async def progress(idx, total, plan):
-        last_album[0] = f"{plan.artist_dir}/{plan.album_dir}"
+        last_plan_holder[0] = plan
+        written_total[0] += getattr(plan, "files_written", 0)
+        skipped_total[0] += getattr(plan, "files_skipped", 0)
         if time.monotonic() - last_edit[0] < 5 and idx != total:
             return
         last_edit[0] = time.monotonic()
+        text = _retag_apply_progress_text(
+            idx, total, plan, started,
+            written_total[0], skipped_total[0],
+        )
         try:
-            await status_msg.edit_text(
-                f"Applying [{idx}/{total}]\n  {last_album[0][:60]}"
-            )
+            await status_msg.edit_text(text, parse_mode="HTML")
         except TelegramError:
             pass
 
@@ -435,17 +508,25 @@ async def _do_retag_apply(update: Update, plans: list):
         _retag_in_progress = False
         _retag_session = None
 
+    elapsed = time.monotonic() - started
     out = [
-        f"<b>Re-tag done</b>",
-        f"  ✎ {stats['albums_planned']} albums touched",
-        f"  ✍ {stats['files_written']} files written",
+        f"<b>Re-tag complete</b> · {stats['albums_planned']} albums · "
+        f"{_format_eta(elapsed)}",
+        "",
     ]
+    parts = [f"<b>{stats['files_written']}</b> files updated"]
     if stats["files_skipped"]:
-        out.append(f"  · {stats['files_skipped']} files skipped (no track match)")
+        parts.append(f"<b>{stats['files_skipped']}</b> skipped (no track match)")
+    out.append(" · ".join(parts))
+
     if stats["failed"]:
-        out.append(f"  ✗ {len(stats['failed'])} album-level failures")
+        out.append("")
+        out.append(f"<b>{len(stats['failed'])}</b> album-level failures:")
         for path, err in stats["failed"][:3]:
-            out.append(f"      {path}: {_short(Exception(err))}")
+            out.append(f"  {path} — {_short(Exception(err))}")
+        if len(stats["failed"]) > 3:
+            out.append(f"  +{len(stats['failed']) - 3} more")
+
     out.append("")
     out.append(await _trigger_scan())
     try:

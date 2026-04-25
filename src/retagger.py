@@ -90,6 +90,10 @@ class AlbumPlan:
     canonical_artist_dir: str | None = None     # set when artist dir needs rename
     changes: list[str] = field(default_factory=list)
     error: str | None = None
+    # Populated after apply_plan runs in run_apply — caller progress hook
+    # reads these to build a running tally without separate state.
+    files_written: int = 0
+    files_skipped: int = 0
 
     @property
     def needs_apply(self) -> bool:
@@ -1098,6 +1102,8 @@ async def run_apply(
         counter += 1
         try:
             written, skipped = await apply_plan(plan)
+            plan.files_written = written
+            plan.files_skipped = skipped
             written_total += written
             skipped_total += skipped
         except Exception as e:
