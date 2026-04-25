@@ -4,8 +4,8 @@ import os
 from mutagen.flac import FLAC, Picture
 from mutagen.mp4 import MP4, MP4Cover, MP4FreeForm
 
-from tidal.files import _comment_value
-from tidal.metadata import fetch_lyrics
+from library.files import _comment_value
+from metadata import fetch_lyrics
 
 logger = logging.getLogger(__name__)
 

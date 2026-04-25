@@ -21,11 +21,11 @@ from telegram.error import NetworkError, TelegramError
 from telegram.request import HTTPXRequest
 
 from config import TG_TOKEN, ALLOWED_USERS, MUSIC_DIR, NAVI_LOGIN, NAVI_PASS, NAVI_PUBLIC_URL
-import metadata as tidal   # new Deezer-backed metadata module (was: import tidal)
+import metadata
 import soulseek
 import navidrome
 from inline import handle_inline_query, _DELETE_PREFIX
-from tidal.files import _sanitize, _find_existing_track
+from library.files import _sanitize, _find_existing_track
 
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
@@ -261,7 +261,7 @@ async def _resolve_and_download(update: Update, url: str, suffix: str, force: bo
     """Resolve a non-Tidal music link via Odesli, then download."""
     status_msg = await update.message.reply_text("Resolving link...")
     try:
-        result = await tidal.resolve_link(url)
+        result = await metadata.resolve_link(url)
     except Exception as e:
         logger.error("Odesli resolve failed for %s: %s", url, e)
         await status_msg.edit_text(f"Failed to resolve link: {_short(e)}")
@@ -319,7 +319,7 @@ async def _do_download_album(update: Update, album_id: str, quality: str | None 
     async with _download_semaphore:
         # Step 1: fetch metadata
         try:
-            album = await tidal.fetch_album(album_id)
+            album = await metadata.fetch_album(album_id)
         except Exception as e:
             logger.error("Failed to fetch album %s: %s", album_id, e)
             await status_msg.edit_text(f"Failed to fetch album info: {_short(e)}")
@@ -470,7 +470,7 @@ async def _do_download_track(update: Update, track_id: str, quality: str | None 
     async with _download_semaphore:
         # Step 1: fetch metadata
         try:
-            track, album_ctx = await tidal.fetch_single_track(track_id)
+            track, album_ctx = await metadata.fetch_single_track(track_id)
         except Exception as e:
             logger.error("Failed to fetch track %s: %s", track_id, e)
             await status_msg.edit_text(f"Failed to fetch track info: {_short(e)}")
@@ -574,7 +574,7 @@ async def _post_init(app: Application) -> None:
 
 
 async def _shutdown(app: Application) -> None:
-    await tidal.close()
+    await metadata.close()
     await soulseek.close()
     await navidrome.close()
 

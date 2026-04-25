@@ -1,17 +1,14 @@
-"""Download orchestrator: takes Tidal-resolved metadata + uses Soulseek as the audio source.
-
-Public API mirrors the old ``tidal.download_album`` / ``tidal.download_single_track``
-so ``bot.py`` doesn't need to change.
+"""Download orchestrator: takes Deezer-resolved metadata + uses Soulseek as the audio source.
 
 Flow per album:
-  1. fetch_album from Tidal (caller passes the metadata in)
-  2. scan local library for already-downloaded tracks (same logic as before)
-  3. fetch cover art from Tidal CDN (works fine, no auth)
+  1. caller fetches album metadata via ``metadata.fetch_album`` and passes it in
+  2. scan local library for already-downloaded tracks
+  3. fetch cover art from Deezer CDN (no auth)
   4. fetch lyrics from lrclib (parallel)
   5. try album-folder match on slskd; if no luck, per-track matching
   6. enqueue chosen files to slskd, wait for completion
   7. move from slskd's download dir into the library album dir (atomic via .importing)
-  8. write Tidal-source-of-truth tags (force-overwrite mode)
+  8. write Deezer-source-of-truth tags (force-overwrite mode)
 """
 
 import asyncio
@@ -27,11 +24,11 @@ import aiohttp
 from config import WRITE_TAGS
 from metadata.client import _get_session
 from metadata import fetch_album, fetch_lyrics
-from tidal.files import (
+from library.files import (
     _find_existing_track, _sanitize, _track_prefix, _ensure_album_dir,
-    _tidal_cover_url,
+    _cover_url,
 )
-from tidal.tagger import _patch_missing_tags, _write_tags, _write_m4a_tags
+from library.tagger import _patch_missing_tags, _write_tags, _write_m4a_tags
 
 from soulseek import client as slskd
 from soulseek.client import SearchResult
@@ -62,7 +59,7 @@ async def _download_cover(cover_uuid: str, album_dir: str) -> bytes | None:
     if os.path.exists(cover_path):
         with open(cover_path, "rb") as f:
             return f.read()
-    cover_url = _tidal_cover_url(cover_uuid)
+    cover_url = _cover_url(cover_uuid)
     session = await _get_session()
     try:
         async with session.get(cover_url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
