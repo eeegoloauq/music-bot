@@ -16,6 +16,7 @@ services:
       - "50300:50300"
 
   music-bot:
+    image: ghcr.io/eeegoloauq/music-bot:latest
     build:
       context: .
     container_name: music-bot
