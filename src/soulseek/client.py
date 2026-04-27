@@ -120,32 +120,29 @@ async def close():
 
 # --- search ------------------------------------------------------------------
 
-async def _cleanup_stale_searches():
-    """Delete only *completed* searches. Active searches (isComplete=False) are
-    left alone so concurrent callers don't kneecap each other's queries."""
-    client = _get_client()
-    try:
-        existing = await asyncio.to_thread(client.searches.get_all)
-    except Exception:
-        return
-    stale = [s for s in (existing or []) if s.get("isComplete")]
-    if not stale:
-        return
-    logger.debug("Cleaning %d completed searches", len(stale))
-    for s in stale:
-        with contextlib.suppress(Exception):
-            await asyncio.to_thread(client.searches.delete, id=s["id"])
 
-
-async def search(query: str, timeout_secs: int = 25, response_limit: int = 250) -> list[dict]:
+async def search(query: str, timeout_secs: int = 20, response_limit: int = 200) -> list[dict]:
     """Run a slskd search and return the raw peer responses.
 
-    Polls ``state`` until either the search reports complete or the file count
-    stabilises for ~6s (means peers stopped reporting). Falls back to
-    ``search_responses`` if ``state(includeResponses=True)`` returns empty.
+    Lifecycle (empirically verified against the slskd/slskd:latest image):
+
+    * Mid-search neither ``state(includeResponses=True)`` nor ``/responses``
+      returns the accumulated peer responses — slskd holds them in memory
+      until something forces a flush to the response collection.
+    * Calling ``searches.stop(id=...)`` is the one path that triggers that
+      flush: within ~200ms the search transitions to ``isComplete=True`` and
+      ``/responses`` returns the full set. The ``Cancelled`` flag the slskd
+      source sets in that path is cosmetic — responses are preserved.
+    * We exit the polling loop as soon as the file count plateaus for 6s
+      (peers stopped reporting) or slskd marks the search complete on its
+      own, then call stop() to force the flush, then read ``/responses``.
+    * **No global stale-search cleanup.** A previous version of this code
+      called ``_cleanup_stale_searches`` at the start of each new search,
+      which deleted other in-flight searches' completed siblings — racing
+      with the search that just finished and getting it 404'd before the
+      caller could read its responses. Each search now only deletes itself.
     """
     client = _get_client()
-    await _cleanup_stale_searches()
 
     try:
         state = await asyncio.to_thread(
@@ -161,65 +158,47 @@ async def search(query: str, timeout_secs: int = 25, response_limit: int = 250) 
     search_id = state["id"]
     logger.info("Search started: id=%s query=%r", search_id, query)
 
+    # Poll for stability or natural completion.
     start = time.monotonic()
-    last_count = 0
+    last_count = -1
     stable_since: float | None = None
-    min_wait = 4
+    file_count = 0
+    while time.monotonic() - start < timeout_secs:
+        await asyncio.sleep(0.5)
+        try:
+            state = await asyncio.to_thread(client.searches.state, id=search_id)
+        except Exception:
+            continue
+        file_count = state.get("fileCount", 0)
+        if state.get("isComplete"):
+            break
+        if file_count != last_count:
+            last_count = file_count
+            stable_since = time.monotonic()
+        elif stable_since and (time.monotonic() - stable_since) > 6 and file_count > 0:
+            break
 
-    try:
-        while time.monotonic() - start < timeout_secs:
-            await asyncio.sleep(1.5)
-            try:
-                state = await asyncio.to_thread(client.searches.state, id=search_id)
-            except Exception:
-                logger.exception("Search poll failed for %s", search_id)
-                continue
-
-            file_count = state.get("fileCount", 0)
-            resp_count = state.get("responseCount", 0)
-            is_complete = state.get("isComplete", False)
-            elapsed = time.monotonic() - start
-
-            if file_count != last_count:
-                last_count = file_count
-                stable_since = time.monotonic()
-            elif stable_since and (time.monotonic() - stable_since) > 6:
-                logger.info("Search stable: %d files / %d peers", file_count, resp_count)
-                break
-
-            if is_complete and elapsed >= min_wait:
-                logger.info("Search done: %d files / %d peers", file_count, resp_count)
-                break
-    except Exception:
-        logger.exception("Polling crashed for search %s", search_id)
-
-    # slskd 0.25.x only exposes peer responses *after* the search transitions
-    # from InProgress to Completed. Polling stability is just an early-exit
-    # heuristic — we still need to call stop() to force the state machine to
-    # finalize, then briefly poll for isComplete before grabbing responses.
+    # Force a flush so /responses populates. stop() is the only API that
+    # does this for our slskd version.
     with contextlib.suppress(Exception):
         await asyncio.to_thread(client.searches.stop, id=search_id)
-
-    for _ in range(8):  # up to ~4s waiting for slskd to mark complete
+    # Brief wait for slskd to mark complete and persist responses.
+    for _ in range(8):
+        await asyncio.sleep(0.25)
         try:
             state = await asyncio.to_thread(client.searches.state, id=search_id)
         except Exception:
             break
         if state.get("isComplete"):
             break
-        await asyncio.sleep(0.5)
 
-    # Try the inline path first; many slskd builds drop responses there silently.
-    final_state = await asyncio.to_thread(
-        client.searches.state, id=search_id, includeResponses=True
-    )
-    responses: list[dict] = final_state.get("responses", []) or []
-    if not responses and final_state.get("responseCount", 0) > 0:
-        with contextlib.suppress(Exception):
-            responses = await asyncio.to_thread(
-                client.searches.search_responses, id=search_id
-            ) or []
-        logger.info("Fallback search_responses returned %d peers", len(responses))
+    responses: list[dict] = []
+    with contextlib.suppress(Exception):
+        responses = await asyncio.to_thread(
+            client.searches.search_responses, id=search_id
+        ) or []
+
+    logger.info("Search done: %d files / %d peers", file_count, len(responses))
 
     with contextlib.suppress(Exception):
         await asyncio.to_thread(client.searches.delete, id=search_id)
@@ -296,7 +275,7 @@ async def enqueue(username: str, files: list[SearchResult]) -> bool:
     payload = [{"filename": f.filename, "size": f.size} for f in files]
     try:
         await asyncio.to_thread(client.transfers.enqueue, username=username, files=payload)
-        logger.info("Enqueued %d file(s) from %s", len(files), username)
+        logger.debug("Enqueued %d file(s) from %s", len(files), username)
         return True
     except Exception as e:
         logger.warning("Failed to enqueue from %s: %s", username, e)
