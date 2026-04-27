@@ -1,11 +1,14 @@
 import os
 import re
+import unicodedata
 
 from mutagen import File as MutagenFile
 from mutagen.flac import FLAC
 from mutagen.mp4 import MP4, MP4FreeForm
 
 _AUDIO_EXTS = frozenset({".flac", ".mp3", ".m4a", ".ogg", ".opus", ".aac", ".wv", ".ape"})
+_AUDIO_DEDUP_EXTS = (".flac", ".m4a", ".mp3")  # formats we read tags from for dedup
+_DEEZER_ID_RE = re.compile(r"deezer\.com/album/(\d+)")
 
 
 def _sanitize(name: str) -> str:
@@ -108,6 +111,100 @@ def _ensure_album_dir(dest_dir: str, artist: str, album_title: str) -> str:
     return album_dir
 
 
+def _normalize_for_compare(s: str) -> str:
+    """NFC-normalize + casefold + strip — for case/Unicode-insensitive
+    comparison of album titles read from peer files vs Deezer metadata."""
+    return unicodedata.normalize("NFC", s or "").casefold().strip()
+
+
+def _read_tags_for_dedup(filepath: str) -> tuple[str, str]:
+    """Open one audio file; return ``(comment, album)`` tag values.
+    Returns ``("", "")`` on any error or missing tags. Format-agnostic
+    via mutagen's auto-detect (``easy=True`` exposes Vorbis/iTunes/ID3
+    fields under unified keys)."""
+    try:
+        f = MutagenFile(filepath, easy=True)
+        if f is None or f.tags is None:
+            return ("", "")
+        comment = next(iter(f.tags.get("comment") or []), "") or ""
+        if not comment:
+            comment = next(iter(f.tags.get("description") or []), "") or ""
+        album = next(iter(f.tags.get("album") or []), "") or ""
+        return (str(comment), str(album))
+    except Exception:
+        return ("", "")
+
+
+def _folder_signals(folder: str) -> tuple[str | None, str | None]:
+    """Read ``(deezer_id, album_tag)`` from any tagged audio file in ``folder``.
+
+    We iterate every file rather than stopping at the first because a
+    partially-tagged folder (mid-download race) might have the canonical
+    bot ``comment`` on track 1 and a stale peer tag on track 3 — we want
+    to find the deezer ID even if ``listdir`` hands us track 3 first."""
+    if not os.path.isdir(folder):
+        return None, None
+    deezer_id: str | None = None
+    album_tag: str | None = None
+    for fname in sorted(os.listdir(folder)):
+        if not fname.lower().endswith(_AUDIO_DEDUP_EXTS):
+            continue
+        comment, album = _read_tags_for_dedup(os.path.join(folder, fname))
+        if deezer_id is None and comment:
+            m = _DEEZER_ID_RE.search(comment)
+            if m:
+                deezer_id = m.group(1)
+        if album_tag is None and album:
+            album_tag = album
+        if deezer_id is not None and album_tag is not None:
+            break
+    return deezer_id, album_tag
+
+
+def _locate_existing_album(music_dir: str, album_meta: dict) -> str | None:
+    """Find the existing folder for this album under ``music_dir``, if any.
+
+    Identity comes from tags, not folder names — the bot's canonical
+    ``comment`` (carrying the Deezer album ID) is authoritative; the
+    ``album`` tag is the fallback for legacy folders this bot never
+    touched (ripped by beets / Picard / iTunes / manual). Two passes:
+
+      1. Folder whose ``comment`` Deezer ID matches — wins outright,
+         even if there's also a legacy folder with a same-title tag.
+      2. Folder whose ``album`` tag matches our expected title (NFC +
+         casefold). Catches foreign-tooled folders.
+
+    Scope is ``<music_dir>/<artist>/*`` only — going wider would conflate
+    same-titled compilations across artists ("Greatest Hits" everywhere)."""
+    artist = album_meta.get("artist") or ""
+    title = album_meta.get("title") or ""
+    deezer_id = str(album_meta.get("id") or "")
+    if not artist or not title:
+        return None
+    artist_dir = _resolve_dir_canonical(music_dir, _sanitize(artist))
+    if not os.path.isdir(artist_dir):
+        return None
+    norm_expected = _normalize_for_compare(title)
+
+    children = sorted(
+        os.path.join(artist_dir, c) for c in os.listdir(artist_dir)
+        if os.path.isdir(os.path.join(artist_dir, c))
+    )
+    signals = [(p, *_folder_signals(p)) for p in children]
+
+    # Pass 1: bot-canonical match (authoritative).
+    if deezer_id:
+        for path, did, _alb in signals:
+            if did == deezer_id:
+                return path
+
+    # Pass 2: legacy folder match by album tag.
+    for path, _did, alb in signals:
+        if alb and _normalize_for_compare(alb) == norm_expected:
+            return path
+    return None
+
+
 def _find_existing_track(album_dir: str, track: dict) -> str | None:
     """Find an existing audio file for this track in album_dir.
 
@@ -131,6 +228,11 @@ def _find_existing_track(album_dir: str, track: dict) -> str | None:
     isrc = (track.get("isrc") or "").upper()
     track_title_norm = _normalize_title(track["title"])
 
+    # Two-pass walk: ISRC and tracknum+title match in pass 1 (strong signals).
+    # Title-only match collected in pass 1, returned in pass 2 — same song
+    # under a different track number or sanitised title (legacy folders
+    # numbered differently than current Deezer release).
+    title_only_hit: str | None = None
     for fname in os.listdir(album_dir):
         ext = os.path.splitext(fname)[1].lower()
         if ext not in _AUDIO_EXTS:
@@ -164,6 +266,8 @@ def _find_existing_track(album_dir: str, track: dict) -> str | None:
                 return fpath
             if tnum == str(num) and ftitle == track_title_norm:
                 return fpath
+            if ftitle and ftitle == track_title_norm and title_only_hit is None:
+                title_only_hit = fpath
         except Exception:
             continue
-    return None
+    return title_only_hit
