@@ -49,7 +49,7 @@ src/navidrome.py      — triggers Subsonic-style scan after writes
   - Web UI on `127.0.0.1:5030` (host-loopback only, no auth — internal network)
   - Soulseek peer port `0.0.0.0:50300`
   - Shares `/media/music` read-only; downloads to `/media/music/.slskd-downloads/`
-- `navidrome`, `samba` — separate stacks under `/opt/stacks/`
+- `navidrome`, `samba` — typical deployment runs them as siblings on the same host so the bot can trigger Navidrome scans over `host.docker.internal`
 
 ## Engineering rules
 
