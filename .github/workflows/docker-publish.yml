@@ -17,6 +17,28 @@ jobs:
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0  # full history so the changelog step can diff tags
+
+      - name: Build changelog from commits since previous tag
+        id: changelog
+        run: |
+          set -euo pipefail
+          PREV=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || true)
+          if [ -n "$PREV" ]; then
+            LOG=$(git log "$PREV..HEAD" --pretty='- %s' --no-merges)
+            HEADER="## Changes since $PREV"
+          else
+            LOG=$(git log --pretty='- %s' --no-merges)
+            HEADER="## Changes"
+          fi
+          {
+            echo "body<<RELEASE_BODY_EOF"
+            echo "$HEADER"
+            echo ""
+            echo "$LOG"
+            echo "RELEASE_BODY_EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
@@ -60,4 +82,5 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
+          body: ${{ steps.changelog.outputs.body }}
           generate_release_notes: true
