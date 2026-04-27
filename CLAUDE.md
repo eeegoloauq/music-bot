@@ -37,8 +37,8 @@ src/soulseek/         — audio downloader via slskd-api
   downloader.py         orchestrator with retry across candidate peers
   ↓
 src/library/          — file + tag helpers (format-agnostic)
-  files.py              path sanitisation, _ensure_album_dir (case-insensitive resolve), _cover_url
-  tagger.py             FLAC + M4A tag writers; force-mode wipes peer tags + writes Deezer canonical
+  files.py              path sanitisation, _locate_existing_album (tag-based dedup), _cover_url
+  tagger.py             FLAC + M4A + MP3 tag writers; force-mode wipes peer tags + writes Deezer canonical
   ↓
 src/navidrome.py      — triggers Subsonic-style scan after writes
 ```
@@ -63,9 +63,10 @@ src/navidrome.py      — triggers Subsonic-style scan after writes
 ## Things you'll trip on
 
 - **Quality cap**: `MAX_BIT_DEPTH` and `MAX_SAMPLE_RATE_HZ` env vars filter Soulseek peers above the cap. Defaults `24` / `96000` cover all reasonable hi-res; `16` / `44100` for redbook-only deployments.
-- **slskd quirks** (handled in `soulseek/client.py`): completed searches must be deleted before new ones to avoid silent empty `responses` arrays; explicit `stop()` is required to transition InProgress→Complete and expose responses.
+- **slskd search lifecycle** (handled in `soulseek/client.py`): peer responses are held in memory until the search transitions to `Completed`; reading `/responses` mid-search returns empty. Each call polls for stability, then issues `searches.stop()` to force the transition (not a cancel — the response collection is preserved), then reads `/responses`. Don't run global stale-search cleanup before new queries — under concurrency it 404's siblings that just finished.
+- **Album dedup is tag-based, not name-based** (`library/files.py::_locate_existing_album`): identity comes from the `comment` tag (carrying the Deezer album URL the bot wrote) and `album` tag, not from the folder name. Folders sanitised by other tools (`:` → space vs underscore vs Unicode lookalike) are still recognised.
 - **Proxy support**: every aiohttp session uses `trust_env=True` so it respects `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` env vars (aiohttp's default is `False` — env vars get ignored without it). If a deployment's proxy gets throttled by a specific upstream (Odesli, Deezer CDN, lrclib), add that host to `NO_PROXY` so those requests go direct.
-- **Tag normalisation**: in force-mode the FLAC / M4A / mp3 taggers wipe all existing tags before writing. They preserve a small allow-list (`composer`, `lyricist`, `performer`, peer's `comment` appended after our identifier).
+- **Tag normalisation**: in force-mode the FLAC / M4A / mp3 taggers wipe all existing tags before writing. They preserve a small allow-list (`composer`, `lyricist`, `performer`). The peer's `comment` is *not* preserved — multi-peer assemblies would otherwise show different rip-source notes per track in Navidrome. Our canonical comment (Deezer URL + identifier) overwrites uniformly.
 - **Cover art**: stored in album dict as `cover_uuid` (historical field name) — actually holds the full Deezer CDN URL. `library.files._cover_url` and `metadata.client.cover_url` resize it for thumbnails / full-size art.
 
 ## How to deploy
