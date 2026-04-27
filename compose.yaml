@@ -14,6 +14,16 @@ services:
     ports:
       - "127.0.0.1:5030:5030"
       - "50300:50300"
+    # Ready when slskd has finished logging into the Soulseek network.
+    # Until then `/api/v0/searches` returns 503 — the bot's `depends_on`
+    # below uses this to gate startup so first-message searches don't
+    # see empty pools.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:5030/api/v0/server | grep -q '\"isLoggedIn\":true' || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 15s
 
   music-bot:
     image: ghcr.io/eeegoloauq/music-bot:latest
@@ -38,5 +48,6 @@ services:
     extra_hosts:
       - host.docker.internal:host-gateway
     depends_on:
-      - slskd
+      slskd:
+        condition: service_healthy
 networks: {}
