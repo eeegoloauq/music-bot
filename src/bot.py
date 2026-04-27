@@ -34,7 +34,7 @@ import soulseek
 import navidrome
 import retagger
 from inline import handle_inline_query, _DELETE_PREFIX
-from library.files import _sanitize, _find_existing_track
+from library.files import _sanitize, _find_existing_track, _locate_existing_album
 
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
@@ -676,16 +676,19 @@ async def _do_download_album(update: Update, album_id: str, force: bool = False)
             await status_msg.edit_text(f"Failed to fetch album info: {_short(e)}")
             return
 
-        # Force re-download: rename existing album directory to .bak
+        # Force re-download: rename existing album directory to .bak. We
+        # locate it by tag (not by name) so a folder created by another
+        # tool's sanitiser doesn't escape the rename and end up alongside
+        # the new download.
         backup_dir = None
         if force:
-            album_dir = os.path.join(MUSIC_DIR, _sanitize(album["artist"]), _sanitize(album["title"]))
-            if os.path.isdir(album_dir):
-                backup_dir = album_dir + ".bak"
+            existing_dir = _locate_existing_album(MUSIC_DIR, album)
+            if existing_dir and os.path.isdir(existing_dir):
+                backup_dir = existing_dir + ".bak"
                 if os.path.exists(backup_dir):
                     shutil.rmtree(backup_dir)
-                os.rename(album_dir, backup_dir)
-                logger.info("Force re-download: renamed %s -> .bak", album_dir)
+                os.rename(existing_dir, backup_dir)
+                logger.info("Force re-download: renamed %s -> .bak", existing_dir)
 
         try:
             await status_msg.edit_text(
@@ -709,11 +712,12 @@ async def _do_download_album(update: Update, album_id: str, force: bool = False)
             _last_edit[0] = now
             done = download_current - 1
             elapsed = now - _progress_start
-            # Track-level live info from slskd: download speed + ETA for this file.
+            # Track speed/pct as live indicator. ETA is always album-level so
+            # the user sees one consistent "time remaining" — no flicker
+            # between per-track and whole-album estimates.
             track_extras = ""
             if transfer:
                 speed_bps = transfer.get("speed_bps", 0) or 0
-                eta_sec = transfer.get("eta_sec", 0) or 0
                 pct = transfer.get("pct", 0) or 0
                 if speed_bps > 0:
                     if speed_bps >= 1_048_576:
@@ -721,18 +725,12 @@ async def _do_download_album(update: Update, album_id: str, force: bool = False)
                     else:
                         speed_s = f"{speed_bps / 1024:.0f} KB/s"
                     track_extras = f" · {pct:.0f}% · {speed_s}"
-                    if eta_sec:
-                        if eta_sec >= 60:
-                            track_extras += f" · ~{eta_sec // 60}m {eta_sec % 60}s"
-                        else:
-                            track_extras += f" · ~{eta_sec}s"
-            # Album-level ETA based on completed tracks
             album_eta = ""
-            if done > 0 and not transfer:
+            if done > 0:
                 eta_sec = int((elapsed / done) * (download_total - done))
                 if eta_sec >= 60:
                     album_eta = f" · ~{eta_sec // 60}m {eta_sec % 60}s left"
-                else:
+                elif eta_sec > 0:
                     album_eta = f" · ~{eta_sec}s left"
             try:
                 text = (
@@ -824,11 +822,8 @@ async def _do_download_track(update: Update, track_id: str, force: bool = False)
             return
 
         if force:
-            album_dir = os.path.join(
-                MUSIC_DIR, _sanitize(album_ctx.get("artist", track["artist"])),
-                _sanitize(album_ctx.get("title", "Singles")),
-            )
-            existing = _find_existing_track(album_dir, track) if os.path.isdir(album_dir) else None
+            album_dir = _locate_existing_album(MUSIC_DIR, album_ctx)
+            existing = _find_existing_track(album_dir, track) if album_dir else None
             if existing:
                 os.remove(existing)
                 logger.info("Force re-download: removed %s", existing)
