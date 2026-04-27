@@ -25,7 +25,7 @@ from metadata.client import _get_session
 from metadata import fetch_album, fetch_lyrics, enrich_genres
 from library.files import (
     _find_existing_track, _sanitize, _track_prefix, _ensure_album_dir,
-    _cover_url,
+    _locate_existing_album, _cover_url,
 )
 from library.tagger import (
     _patch_missing_tags, _write_tags, _write_m4a_tags, _write_mp3_tags,
@@ -51,7 +51,61 @@ DOWNLOAD_TIMEOUT_SECS = int(os.environ.get("SLSKD_DOWNLOAD_TIMEOUT", "900"))
 ENQUEUE_GRACE_SECS = 60
 
 
+class PeerTransferError(Exception):
+    """Signals a per-peer issue we should retry the next candidate for —
+    enqueue rejected, transfer stalled, file never landed in slskd's dir.
+    Local I/O / tagging errors are *not* this; they propagate as their own
+    exception types so a real bug doesn't get silently masked as 'try next
+    peer'."""
+
+
 # --- helpers ---------------------------------------------------------------
+
+def _modal_quality(matched_files) -> tuple[int | None, int | None]:
+    """Pick the dominant (bit_depth, sample_rate) across a folder's matched
+    files, ignoring None positions and unreported quality. Used as the
+    quality-lock target so per-track gap-fill stays uniform with the folder."""
+    counts: dict[tuple[int | None, int | None], int] = {}
+    for f in matched_files or []:
+        if f is None:
+            continue
+        key = (f.bit_depth, f.sample_rate)
+        if key == (None, None):
+            continue
+        counts[key] = counts.get(key, 0) + 1
+    if not counts:
+        return (None, None)
+    return max(counts.items(), key=lambda kv: kv[1])[0]
+
+
+def _pick_quality_locked(picks, quality_lock):
+    """From a candidate list, return the first one matching the (bd, sr) lock.
+    Falls back to the first candidate if none match — better a mismatched
+    track than a missing one. Quality-lock with None components matches
+    anything for that axis."""
+    if not picks:
+        return None
+    if not quality_lock or quality_lock == (None, None):
+        return picks[0]
+    target_bd, target_sr = quality_lock
+    for p in picks:
+        if (target_bd is None or p.bit_depth == target_bd) and \
+           (target_sr is None or p.sample_rate == target_sr):
+            return p
+    return picks[0]
+
+
+def _quality_label(qlock) -> str:
+    if not qlock:
+        return "any quality"
+    bd, sr = qlock
+    parts = []
+    if bd:
+        parts.append(f"{bd}-bit")
+    if sr:
+        parts.append(f"{sr // 1000}kHz")
+    return "/".join(parts) if parts else "any quality"
+
 
 async def _download_cover(cover_uuid: str, album_dir: str) -> bytes | None:
     if not cover_uuid:
@@ -177,25 +231,25 @@ async def _download_chosen(
     ``on_progress`` (optional) is called as ``await cb(pct, speed_bps, eta_sec)``
     while the transfer progresses. Used by the album-level progress bar.
 
-    Returns ``(filepath, bytes_transferred, fmt_label)``.
-    Raises RuntimeError on transfer or move failure.
+    Returns ``(filepath, bytes_transferred, fmt_label)``. Raises
+    ``PeerTransferError`` for per-peer issues (caller retries another peer);
+    other exceptions (OSError on move, mutagen on tag) propagate as-is.
     """
     ok = await slskd.enqueue(chosen.username, [chosen])
     if not ok:
-        raise RuntimeError(f"slskd refused enqueue from {chosen.username}")
+        raise PeerTransferError(f"slskd refused enqueue from {chosen.username}")
 
     state = await _await_one_file(
         chosen.username, chosen.filename, on_progress=on_progress,
     )
     if "succeeded" not in state.lower():
-        # Best-effort cancel so a stalled transfer doesn't keep the queue slot.
         with contextlib.suppress(Exception):
             await slskd.cancel_download(chosen.username, chosen.filename)
-        raise RuntimeError(f"transfer ended in state '{state}'")
+        raise PeerTransferError(f"transfer ended in state '{state}'")
 
     src_path = slskd.find_local_file(SLSKD_DOWNLOAD_DIR, chosen.username, chosen.filename)
     if not src_path or not os.path.isfile(src_path):
-        raise RuntimeError(f"could not locate downloaded file for {chosen.basename}")
+        raise PeerTransferError(f"could not locate downloaded file for {chosen.basename}")
 
     disc = track.get("discNumber", 1)
     num = track.get("trackNumber", 0)
@@ -229,10 +283,10 @@ async def _try_candidates(
     on_progress=None,
     max_attempts: int = 3,
 ) -> tuple[str, int, str, SearchResult] | None:
-    """Try peers in order; return on first success. Skips candidates that
-    fail with a transfer error (timeout, peer offline, etc) — not
-    code-level errors, which propagate.
-    """
+    """Try peers in order; return on first success. Only ``PeerTransferError``
+    is treated as 'try the next peer' — any other exception (local I/O,
+    tagging, etc.) is a real bug and propagates so it doesn't get silently
+    swallowed as a peer issue."""
     seen: set[tuple[str, str]] = set()
     last_err: str | None = None
     attempts = 0
@@ -252,13 +306,13 @@ async def _try_candidates(
                 on_progress=on_progress,
             )
             return filepath, size, fmt, cand
-        except RuntimeError as e:
+        except PeerTransferError as e:
             last_err = str(e)
             logger.warning("candidate %s failed for %s: %s",
                            cand.username, track.get("title"), e)
             continue
     if last_err:
-        raise RuntimeError(last_err)
+        raise PeerTransferError(last_err)
     return None
 
 
@@ -293,9 +347,13 @@ async def download_single_track(
     instead of FLAC. ``precomputed_candidates`` skips the slskd search step
     when the caller already ran ``find_lossy_candidates`` (mp3-fallback path).
     """
-    artist = _sanitize(album_ctx.get("artist", track["artist"]))
-    album_title = _sanitize(album_ctx.get("title", "Singles"))
-    album_dir = _ensure_album_dir(dest_dir, artist, album_title)
+    existing_album_dir = _locate_existing_album(dest_dir, album_ctx)
+    if existing_album_dir is not None:
+        album_dir = existing_album_dir
+    else:
+        artist = _sanitize(album_ctx.get("artist", track["artist"]))
+        album_title = _sanitize(album_ctx.get("title", "Singles"))
+        album_dir = _ensure_album_dir(dest_dir, artist, album_title)
 
     existing = await asyncio.to_thread(_find_existing_track, album_dir, track)
     if existing:
@@ -365,9 +423,16 @@ async def download_album(
         album = await fetch_album(album_id)
         await enrich_genres(album)
 
-    artist = _sanitize(album["artist"])
-    title = _sanitize(album["title"])
-    album_dir = _ensure_album_dir(dest_dir, artist, title)
+    # Tag-based dedup: identity lives in the audio files' `comment` (our
+    # Deezer-ID anchor) and `album` tags, not in the folder name. Folders
+    # sanitised by some other tool (`:` → space vs `:` → `_`, etc.) match
+    # too — name-of-folder is presentation, not identity.
+    existing_album_dir = _locate_existing_album(dest_dir, album)
+    if existing_album_dir is not None:
+        album_dir = existing_album_dir
+    else:
+        album_dir = _ensure_album_dir(dest_dir, _sanitize(album["artist"]),
+                                       _sanitize(album["title"]))
 
     cover_data = await _download_cover(album.get("cover_uuid", ""), album_dir)
 
@@ -417,18 +482,37 @@ async def download_album(
     # single queue slot, no cross-version mixes, fewer flaky connections.
     chosen_per_track: dict[str, SearchResult] = {}
     track_alts: dict[str, list[SearchResult]] = {}
+    track_provenance: dict[str, str] = {}  # track_id → peer username, for the summary log
     folder_match, _ = await find_album(album)
-    if folder_match and folder_match.missing_count == 0:
-        track_ids_needed = {t["id"] for _, t in to_download}
-        for tr, sr in zip(album["tracks"], folder_match.matched_files):
-            if tr["id"] in track_ids_needed and sr is not None:
-                chosen_per_track[tr["id"]] = sr
-        logger.info("Album-folder match: peer=%s score=%.1f covers %d/%d tracks",
-                    folder_match.folder.username, folder_match.score,
-                    len(chosen_per_track), len(track_ids_needed))
 
-    # Per-track search for whatever the folder match didn't cover. Alts go
-    # into the retry pool used when the primary peer stalls.
+    # Folder-match strategy
+    #   complete coverage (missing_count == 0): always use it. Frankenstein
+    #     assemblies are strictly worse than a single peer.
+    #   partial coverage (≥75%): use what the folder covers, fill gaps
+    #     per-track. The per-track searches are filtered to match the
+    #     folder's modal bit-depth/sample-rate so the resulting album has
+    #     uniform quality (no 16/24-bit mix that splits in Navidrome).
+    #   below 75%: skip folder, full per-track. The fallback's job is to
+    #     pick a coherent assembly from across peers.
+    PARTIAL_COVERAGE_MIN = 0.75
+    quality_lock: tuple[int | None, int | None] | None = None
+    if folder_match:
+        track_ids_needed = {t["id"] for _, t in to_download}
+        n_tracks = len(album["tracks"])
+        coverage = (n_tracks - folder_match.missing_count) / n_tracks if n_tracks else 0
+        if coverage >= PARTIAL_COVERAGE_MIN:
+            for tr, sr in zip(album["tracks"], folder_match.matched_files):
+                if tr["id"] in track_ids_needed and sr is not None:
+                    chosen_per_track[tr["id"]] = sr
+                    track_provenance[tr["id"]] = folder_match.folder.username
+            quality_lock = _modal_quality(folder_match.matched_files)
+            label = "Album-folder match" if folder_match.missing_count == 0 \
+                else f"Partial-folder match (gap-fill {folder_match.missing_count}/{n_tracks})"
+            logger.info("%s: peer=%s score=%.1f covers %d/%d tracks @ %s",
+                        label, folder_match.folder.username, folder_match.score,
+                        len(chosen_per_track), len(track_ids_needed),
+                        _quality_label(quality_lock))
+
     needs_per_track = [(i, t) for (i, t) in to_download
                        if t["id"] not in chosen_per_track]
     if needs_per_track:
@@ -437,12 +521,17 @@ async def download_album(
             album_artist=album["artist"],
         )
         for (i, t), (auto, alts) in zip(needs_per_track, per_track_results):
-            chosen = auto.result if auto else (alts[0].result if alts else None)
+            picks = [auto.result] if auto else []
+            picks += [a.result for a in alts if (auto is None or a is not auto)]
+            chosen = _pick_quality_locked(picks, quality_lock) if picks else None
             if chosen is not None:
                 chosen_per_track[t["id"]] = chosen
-            track_alts[t["id"]] = [
-                a.result for a in alts if (auto is None or a is not auto)
-            ]
+                track_provenance[t["id"]] = chosen.username
+                # Lock onto the first per-track quality we settle on, so later
+                # gaps are constrained too (when nothing was set yet).
+                if quality_lock is None:
+                    quality_lock = (chosen.bit_depth, chosen.sample_rate)
+            track_alts[t["id"]] = [r for r in picks if r is not chosen]
 
     # Prefetch lyrics in parallel; the per-track download awaits its own task.
     lyrics_tasks: dict[str, asyncio.Task] = {
@@ -523,9 +612,21 @@ async def download_album(
         album["artist"], album["title"], mb, downloaded, skipped, len(failed),
         elapsed, avg_speed,
     )
+    if track_provenance:
+        logger.info("Sources: %s", _provenance_summary(track_provenance))
 
     return _result_dict(album_dir, downloaded, skipped, failed, total,
                         format_label, with_lyrics)
+
+
+def _provenance_summary(track_provenance: dict[str, str]) -> str:
+    """One-line summary of which peers supplied which tracks. ``5 from FatCJ
+    + 1 from xtdeck`` for a 6-track assembly."""
+    counts: dict[str, int] = {}
+    for peer in track_provenance.values():
+        counts[peer] = counts.get(peer, 0) + 1
+    parts = [f"{n} from {peer}" for peer, n in sorted(counts.items(), key=lambda kv: -kv[1])]
+    return " + ".join(parts)
 
 
 def _result_dict(album_dir, downloaded, skipped, failed, total, fmt, with_lyrics) -> dict:

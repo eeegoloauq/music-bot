@@ -63,7 +63,7 @@ def _write_tags(filepath: str, track: dict, album: dict,
         # provides (composer/lyricist/performer credits, free-form comments).
         peer_keep: dict[str, str] = {}
         if force:
-            for k in ("comment", "composer", "lyricist", "performer"):
+            for k in ("composer", "lyricist", "performer"):
                 v = audio.get(k)
                 if v:
                     peer_keep[k] = v[0]
@@ -108,15 +108,7 @@ def _write_tags(filepath: str, track: dict, album: dict,
 
         album_id = album.get("id", "")
         if album_id:
-            our_comment = _comment_value(album_id)
-            peer_comment = peer_keep.get("comment", "").strip()
-            # Append peer's hand-written comment after our identifier so the
-            # bot still finds its files but the uploader's note ("vinyl rip",
-            # "from CD" etc) survives.
-            if peer_comment and "music-bot" not in peer_comment.lower():
-                tags["comment"] = f"{our_comment} · {peer_comment}"
-            else:
-                tags["comment"] = our_comment
+            tags["comment"] = _comment_value(album_id)
 
         if album.get("type"):
             tags["releasetype"] = album["type"].lower()
@@ -209,7 +201,6 @@ def _write_m4a_tags(filepath: str, track: dict, album: dict,
                 if isinstance(v0, MP4FreeForm):
                     return bytes(v0).decode("utf-8", errors="ignore")
                 return str(v0)
-            peer_keep["comment"] = _decode(audio.get("\xa9cmt"))
             peer_keep["composer"] = _decode(audio.get("\xa9wrt"))
             peer_keep["lyricist"] = _decode(audio.get("----:com.apple.iTunes:LYRICIST"))
             peer_keep["performer"] = _decode(audio.get("----:com.apple.iTunes:PERFORMER"))
@@ -236,12 +227,7 @@ def _write_m4a_tags(filepath: str, track: dict, album: dict,
         }
         album_id = album.get("id", "")
         if album_id:
-            our_comment = _comment_value(album_id)
-            peer_comment = peer_keep.get("comment", "").strip()
-            if peer_comment and "music-bot" not in peer_comment.lower():
-                str_tags["\xa9cmt"] = f"{our_comment} · {peer_comment}"
-            else:
-                str_tags["\xa9cmt"] = our_comment
+            str_tags["\xa9cmt"] = _comment_value(album_id)
 
         for key, val in str_tags.items():
             if not val:
@@ -330,10 +316,6 @@ def _write_mp3_tags(filepath: str, track: dict, album: dict,
 
         peer_keep: dict[str, str] = {}
         if force:
-            comm_frames = audio.getall("COMM")
-            peer_keep["comment"] = (
-                comm_frames[0].text[0] if (comm_frames and comm_frames[0].text) else ""
-            )
             peer_keep["composer"] = _id3_get_text(audio, "TCOM")
             peer_keep["lyricist"] = _id3_get_text(audio, "TEXT")
             peer_keep["performer"] = _id3_get_txxx(audio, "PERFORMER")
@@ -395,13 +377,7 @@ def _write_mp3_tags(filepath: str, track: dict, album: dict,
 
         album_id = album.get("id", "")
         if album_id:
-            our_comment = _comment_value(album_id)
-            peer_comment = peer_keep.get("comment", "").strip()
-            if peer_comment and "music-bot" not in peer_comment.lower():
-                comment_text = f"{our_comment} · {peer_comment}"
-            else:
-                comment_text = our_comment
-            audio.add(COMM(encoding=3, lang="eng", desc="", text=comment_text))
+            audio.add(COMM(encoding=3, lang="eng", desc="", text=_comment_value(album_id)))
 
         if cover_data:
             audio.add(APIC(
