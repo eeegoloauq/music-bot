@@ -92,7 +92,14 @@ def _pick_quality_locked(picks, quality_lock):
         if (target_bd is None or p.bit_depth == target_bd) and \
            (target_sr is None or p.sample_rate == target_sr):
             return p
-    return picks[0]
+    chosen = picks[0]
+    logger.warning(
+        "Quality-lock %s not satisfied; falling back to %s/%s — album may end up mixed-quality",
+        _quality_label(quality_lock),
+        f"{chosen.bit_depth}-bit" if chosen.bit_depth else "?",
+        f"{chosen.sample_rate // 1000}kHz" if chosen.sample_rate else "?",
+    )
+    return chosen
 
 
 def _quality_label(qlock) -> str:
@@ -157,6 +164,25 @@ def _move_into_library(src: str, dest: str) -> None:
             except OSError:
                 pass
         raise
+
+
+def _prune_empty_parents(start_dir: str, stop_dir: str) -> None:
+    """Remove empty slskd staging folders left after importing a file.
+
+    slskd recreates the peer's remote directory tree under ``/downloads``.
+    After we move the finished file into the library, those folders are often
+    empty. Prune upward, but never remove the staging root itself.
+    """
+    current = os.path.abspath(start_dir)
+    stop = os.path.abspath(stop_dir)
+    if current == stop or not current.startswith(stop + os.sep):
+        return
+    while current != stop:
+        try:
+            os.rmdir(current)
+        except OSError:
+            break
+        current = os.path.dirname(current)
 
 
 def _format_label_from_result(r: SearchResult) -> str:
@@ -258,7 +284,9 @@ async def _download_chosen(
     ext = chosen.extension if chosen.extension in ("flac", "m4a", "mp3") else "flac"
     dest_path = os.path.join(album_dir, f"{prefix} {track_title}.{ext}")
 
+    src_dir = os.path.dirname(src_path)
     _move_into_library(src_path, dest_path)
+    _prune_empty_parents(src_dir, SLSKD_DOWNLOAD_DIR)
     size = os.path.getsize(dest_path)
 
     lyrics = None
@@ -480,58 +508,45 @@ async def download_album(
 
     # Folder-match wins outright when one peer has every track of the album:
     # single queue slot, no cross-version mixes, fewer flaky connections.
-    chosen_per_track: dict[str, SearchResult] = {}
-    track_alts: dict[str, list[SearchResult]] = {}
-    track_provenance: dict[str, str] = {}  # track_id → peer username, for the summary log
-    folder_match, _ = await find_album(album)
+    # When the chosen peer rejects K tracks in a row we abandon it for the
+    # next folder-rank alternative (a single peer with bad share/queue state
+    # otherwise eats the whole album).
+    track_provenance: dict[str, str] = {}
+    folder_match, folder_alternatives = await find_album(album)
 
     # Folder-match strategy
-    #   complete coverage (missing_count == 0): always use it. Frankenstein
+    #   complete coverage (missing_count == 0): prefer it whole. Frankenstein
     #     assemblies are strictly worse than a single peer.
     #   partial coverage (≥75%): use what the folder covers, fill gaps
     #     per-track. The per-track searches are filtered to match the
-    #     folder's modal bit-depth/sample-rate so the resulting album has
-    #     uniform quality (no 16/24-bit mix that splits in Navidrome).
+    #     folder's modal bit-depth/sample-rate so the album stays uniform.
     #   below 75%: skip folder, full per-track. The fallback's job is to
     #     pick a coherent assembly from across peers.
     PARTIAL_COVERAGE_MIN = 0.75
+    # K consecutive failures from one peer → that peer is systemically broken
+    # (their slskd queue / share index / DB). Abandon it, retry the rest from
+    # the next-best folder candidate. K=1 over-reacts to single transient
+    # rejections; K=3+ wastes minutes per dead peer. Stall-timeouts (peer
+    # accepts then never delivers) still cost SLSKD_DOWNLOAD_TIMEOUT * K
+    # before we give up — known limitation, separate fix.
+    PEER_ABANDON_K = 2
+
+    n_tracks = len(album["tracks"])
+    folder_chain: list[ScoredFolder] = []
     quality_lock: tuple[int | None, int | None] | None = None
     if folder_match:
-        track_ids_needed = {t["id"] for _, t in to_download}
-        n_tracks = len(album["tracks"])
         coverage = (n_tracks - folder_match.missing_count) / n_tracks if n_tracks else 0
         if coverage >= PARTIAL_COVERAGE_MIN:
-            for tr, sr in zip(album["tracks"], folder_match.matched_files):
-                if tr["id"] in track_ids_needed and sr is not None:
-                    chosen_per_track[tr["id"]] = sr
-                    track_provenance[tr["id"]] = folder_match.folder.username
+            folder_chain = [folder_match] + list(folder_alternatives or [])
             quality_lock = _modal_quality(folder_match.matched_files)
             label = "Album-folder match" if folder_match.missing_count == 0 \
                 else f"Partial-folder match (gap-fill {folder_match.missing_count}/{n_tracks})"
-            logger.info("%s: peer=%s score=%.1f covers %d/%d tracks @ %s",
+            alt_note = f" (+{len(folder_alternatives)} fallback peers)" \
+                if folder_alternatives else ""
+            logger.info("%s: peer=%s score=%.1f covers %d/%d tracks @ %s%s",
                         label, folder_match.folder.username, folder_match.score,
-                        len(chosen_per_track), len(track_ids_needed),
-                        _quality_label(quality_lock))
-
-    needs_per_track = [(i, t) for (i, t) in to_download
-                       if t["id"] not in chosen_per_track]
-    if needs_per_track:
-        per_track_results = await find_tracks_concurrent(
-            [t for _, t in needs_per_track],
-            album_artist=album["artist"],
-        )
-        for (i, t), (auto, alts) in zip(needs_per_track, per_track_results):
-            picks = [auto.result] if auto else []
-            picks += [a.result for a in alts if (auto is None or a is not auto)]
-            chosen = _pick_quality_locked(picks, quality_lock) if picks else None
-            if chosen is not None:
-                chosen_per_track[t["id"]] = chosen
-                track_provenance[t["id"]] = chosen.username
-                # Lock onto the first per-track quality we settle on, so later
-                # gaps are constrained too (when nothing was set yet).
-                if quality_lock is None:
-                    quality_lock = (chosen.bit_depth, chosen.sample_rate)
-            track_alts[t["id"]] = [r for r in picks if r is not chosen]
+                        n_tracks - folder_match.missing_count, n_tracks,
+                        _quality_label(quality_lock), alt_note)
 
     # Prefetch lyrics in parallel; the per-track download awaits its own task.
     lyrics_tasks: dict[str, asyncio.Task] = {
@@ -541,23 +556,28 @@ async def download_album(
         for _, t in to_download
     }
 
-    # Download tracks sequentially — slskd handles its own per-peer queue.
+    # Stable per-track index for the bot's progress UI — same value across
+    # retries from different peers.
     download_total = len(to_download)
-    for download_idx, (i, track) in enumerate(to_download, 1):
-        primary = chosen_per_track.get(track["id"])
-        candidates: list[SearchResult] = []
-        if primary is not None:
-            candidates.append(primary)
-        candidates.extend(track_alts.get(track["id"], []))
+    progress_idx_by_id = {t["id"]: idx for idx, (_, t) in enumerate(to_download, 1)}
+    remaining_track_ids: set[str] = {t["id"] for _, t in to_download}
+    last_error: dict[str, str] = {}
 
-        # Forward per-chunk transfer info to the album-level callback so the
-        # bot can render speed/ETA in the status message.
+    async def _attempt(i: int, track: dict, candidates: list[SearchResult],
+                       ) -> SearchResult | None:
+        """Try ``candidates`` for ``track`` in order. Updates album-level
+        bookkeeping (downloaded count, byte total, format label, lyrics flag,
+        provenance) on success. Returns the SearchResult that succeeded, or
+        ``None`` on failure (with ``last_error`` updated)."""
+        nonlocal album_bytes, downloaded, format_label, with_lyrics
+        progress_idx = progress_idx_by_id[track["id"]]
+
         async def _on_track_progress(pct: float, speed_bps: int, eta_sec: int,
                                       _i=i, _title=track["title"]):
             if progress:
                 with contextlib.suppress(Exception):
                     await progress(
-                        _i, total, download_idx, download_total, _title,
+                        _i, total, progress_idx, download_total, _title,
                         {"pct": pct, "speed_bps": speed_bps, "eta_sec": eta_sec},
                     )
 
@@ -565,12 +585,8 @@ async def download_album(
         # transfer-progress event fires, so the user sees movement immediately.
         if progress:
             with contextlib.suppress(Exception):
-                await progress(i, total, download_idx, download_total, track["title"], None)
-
-        if not candidates:
-            failed.append((track["title"], "no Soulseek match"))
-            lyrics_tasks[track["id"]].cancel()
-            continue
+                await progress(i, total, progress_idx, download_total,
+                               track["title"], None)
 
         try:
             t0 = time.monotonic()
@@ -578,9 +594,10 @@ async def download_album(
                 candidates, track, album, album_dir, cover_data,
                 lyrics_tasks.get(track["id"]),
                 on_progress=_on_track_progress,
+                max_attempts=max(len(candidates), 1),
             )
             if res is None:
-                raise RuntimeError("no peer returned a usable file")
+                raise PeerTransferError("no peer returned a usable file")
             filepath, size, fmt, chosen = res
             elapsed = time.monotonic() - t0
             mb = size / (1024 * 1024)
@@ -593,16 +610,91 @@ async def download_album(
             )
             album_bytes += size
             downloaded += 1
-            try:
-                if lyrics_tasks[track["id"]].done():
-                    if lyrics_tasks[track["id"]].result():
-                        with_lyrics += 1
-            except Exception:
-                pass
-        except Exception as e:
+            track_provenance[track["id"]] = chosen.username
+            remaining_track_ids.discard(track["id"])
+            last_error.pop(track["id"], None)
+            with contextlib.suppress(Exception):
+                if lyrics_tasks[track["id"]].done() and lyrics_tasks[track["id"]].result():
+                    with_lyrics += 1
+            return chosen
+        except PeerTransferError as e:
+            last_error[track["id"]] = str(e)
             logger.warning("  [%d/%d] track %s — failed: %s",
                            i, total, track["title"], e)
-            failed.append((track["title"], str(e)))
+            return None
+
+    # === Folder-chain phase ===
+    # Walk ranked folder peers, abandoning any that rack up K consecutive
+    # rejections. Successes from earlier peers stay; only the unfilled tail
+    # moves to the next peer.
+    for folder_rank, folder in enumerate(folder_chain):
+        if not remaining_track_ids:
+            break
+        folder_chosen: dict[str, SearchResult] = {}
+        for tr, sr in zip(album["tracks"], folder.matched_files):
+            if tr["id"] in remaining_track_ids and sr is not None:
+                folder_chosen[tr["id"]] = sr
+        if not folder_chosen:
+            continue
+        if folder_rank > 0:
+            logger.info(
+                "Folder fallback #%d: peer=%s score=%.1f covers %d remaining track(s)",
+                folder_rank, folder.folder.username, folder.score, len(folder_chosen),
+            )
+        failures_in_a_row = 0
+        for i, track in to_download:
+            if track["id"] not in folder_chosen:
+                continue
+            if track["id"] not in remaining_track_ids:
+                continue
+            used = await _attempt(i, track, [folder_chosen[track["id"]]])
+            if used is not None:
+                failures_in_a_row = 0
+            else:
+                failures_in_a_row += 1
+                if failures_in_a_row >= PEER_ABANDON_K:
+                    logger.warning(
+                        "Abandoning peer %s after %d consecutive failures, switching to next folder",
+                        folder.folder.username, failures_in_a_row,
+                    )
+                    break
+
+    # === Per-track fallback phase ===
+    # Tracks that no folder covered — or whose folder chain failed entirely.
+    # Single-track searches accept Frankenstein assembly across peers, with
+    # the modal quality_lock keeping the album uniform where possible.
+    if remaining_track_ids:
+        needs_per_track = [(i, t) for (i, t) in to_download
+                           if t["id"] in remaining_track_ids]
+        logger.info("Per-track search for %d remaining track(s)", len(needs_per_track))
+        per_track_results = await find_tracks_concurrent(
+            [t for _, t in needs_per_track],
+            album_artist=album["artist"],
+        )
+        for (i, track), (auto, alts) in zip(needs_per_track, per_track_results):
+            picks = [auto.result] if auto else []
+            picks += [a.result for a in alts if (auto is None or a is not auto)]
+            chosen = _pick_quality_locked(picks, quality_lock) if picks else None
+            if chosen is None:
+                last_error.setdefault(track["id"], "no Soulseek match")
+                continue
+            track_alts_local = [r for r in picks if r is not chosen]
+            candidates = [chosen] + track_alts_local
+            used = await _attempt(i, track, candidates)
+            if used is not None and quality_lock is None:
+                quality_lock = (used.bit_depth, used.sample_rate)
+
+    # Cancel orphaned lyrics tasks for tracks we never managed to download.
+    for tid in remaining_track_ids:
+        with contextlib.suppress(Exception):
+            if not lyrics_tasks[tid].done():
+                lyrics_tasks[tid].cancel()
+
+    # Tally final failures from whatever's still unfilled.
+    for _, track in to_download:
+        if track["id"] in remaining_track_ids:
+            failed.append((track["title"],
+                           last_error.get(track["id"], "no Soulseek match")))
 
     elapsed = time.monotonic() - album_t0
     mb = album_bytes / (1024 * 1024)
