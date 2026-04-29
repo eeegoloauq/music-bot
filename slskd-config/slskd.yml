@@ -1,5 +1,7 @@
-# slskd configuration. Soulseek username/password come from SLSKD_SLSK_USERNAME
-# and SLSKD_SLSK_PASSWORD env vars (set by docker-compose from .env).
+# slskd configuration. Soulseek username/password and the peer-listen port
+# come from env vars (SLSKD_SLSK_USERNAME, SLSKD_SLSK_PASSWORD,
+# SLSKD_SLSK_LISTEN_PORT) — see compose.yaml + .env. Listen port lives there
+# rather than here so users can pick it without editing this file.
 #
 # Web UI is reachable at http://127.0.0.1:5030 on the host (auth disabled —
 # only listens on internal docker network + localhost).
@@ -8,11 +10,12 @@ remote_configuration: false
 
 soulseek:
   description: "music collector"
-  listen_port: 50300
 
 shares:
   directories:
     - "/shared"
+    - "!/shared/.slskd-downloads"
+    - "!/shared/lost+found"
 
 directories:
   downloads: /downloads
