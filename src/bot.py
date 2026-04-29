@@ -146,7 +146,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"<b>Commands:</b>\n"
         f"/help — show all features\n"
-        f"/scan — trigger library rescan\n\n"
+        f"/scan — trigger Navidrome library rescan\n"
+        f"/sharescan — trigger heavy slskd share rescan\n\n"
         f"Send a music link (Tidal, Spotify, Apple Music, Deezer, etc.) to download.\n"
         f"Type <code>@{bot_me.username}</code> in any chat for inline mode.",
         parse_mode="HTML",
@@ -168,7 +169,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"<code>@{bot_me.username} lib name</code> — search library\n"
         f"<code>@{bot_me.username} del name</code> — delete album\n\n"
         "<b>Commands</b>\n"
-        "/scan — trigger library rescan\n"
+        "/scan — trigger Navidrome library rescan\n"
+        "/sharescan — trigger heavy slskd share rescan\n"
         "/stats — library statistics\n"
         "/retag — refresh tags on every album from Deezer + Last.fm "
         "(dry-run, then <code>/retag confirm</code>)",
@@ -179,6 +181,12 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @authorized
 async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     note = await _trigger_scan()
+    await update.message.reply_text(note)
+
+
+@authorized
+async def cmd_share_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    note = await _trigger_scan(slskd_mode="immediate")
     await update.message.reply_text(note)
 
 
@@ -528,7 +536,7 @@ async def _do_retag_apply(update: Update, plans: list):
             out.append(f"  +{len(stats['failed']) - 3} more")
 
     out.append("")
-    out.append(await _trigger_scan())
+    out.append(await _trigger_scan(slskd_mode="scheduled"))
     try:
         await status_msg.edit_text("\n".join(out), parse_mode="HTML")
     except TelegramError:
@@ -591,23 +599,44 @@ async def _handle_delete(update: Update, rel_path: str):
     if await asyncio.to_thread(_remove_if_empty, artist_dir):
         logger.info("Removed empty artist folder: %s", artist_name)
 
-    scan_note = await _trigger_scan()
+    scan_note = await _trigger_scan(slskd_mode="scheduled")
     await update.message.reply_text(f"Deleted: {artist_name} — {album_name}\n{scan_note}")
 
 
-async def _trigger_scan() -> str:
-    """Attempt a Navidrome library scan. Returns a status line for the user."""
+async def _trigger_scan(*, slskd_mode: str = "none") -> str:
+    """Trigger Navidrome library scan + slskd share rescan scheduling.
+
+    Navidrome reflects new tags to playback users, so it runs immediately.
+    slskd exposes only a full share scan and it is expensive; normal downloads
+    skip it, delete/retag schedule a delayed quiet-period scan, and explicit
+    /sharescan requests an immediate slskd scan.
+    Returns a status line for the user.
+    """
+    if slskd_mode == "immediate":
+        asyncio.create_task(soulseek.rescan_shares())
+        slskd_note = "slskd share scan triggered."
+    elif slskd_mode == "scheduled":
+        delay = soulseek.schedule_rescan_shares()
+        mins = max(1, round(delay / 60))
+        slskd_note = f"slskd share scan scheduled in ~{mins}m."
+    else:
+        slskd_note = ""
+
     if not NAVI_LOGIN or not NAVI_PASS:
-        return "Library scan not configured (NAVIDROME_USER/NAVIDROME_PASS not set)."
+        note = "Library scan not configured (NAVIDROME_USER/NAVIDROME_PASS not set)."
+        return f"{note} {slskd_note}".strip()
     try:
         await navidrome.start_scan()
-        return "Library scan triggered."
+        note = "Library scan triggered."
+        return f"{note} {slskd_note}".strip()
     except navidrome.NavidromeAuthError:
         logger.warning("Navidrome scan: wrong credentials")
-        return "Library scan failed: wrong credentials."
+        note = "Library scan failed: wrong credentials."
+        return f"{note} {slskd_note}".strip()
     except Exception as e:
         logger.warning("Navidrome scan failed: %s", e)
-        return "Library scan failed."
+        note = "Library scan failed."
+        return f"{note} {slskd_note}".strip()
 
 
 async def _resolve_and_download(update: Update, url: str, force: bool = False):
@@ -1050,7 +1079,8 @@ async def _error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> 
 async def _post_init(app: Application) -> None:
     await app.bot.set_my_commands([
         BotCommand("help", "Show all features"),
-        BotCommand("scan", "Trigger library rescan"),
+        BotCommand("scan", "Trigger Navidrome library rescan"),
+        BotCommand("sharescan", "Trigger heavy slskd share rescan"),
         BotCommand("stats", "Library statistics"),
         BotCommand("retag", "Re-tag library from current Deezer + Last.fm metadata"),
     ])
@@ -1079,6 +1109,7 @@ def _build_app() -> Application:
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("scan", cmd_scan))
+    app.add_handler(CommandHandler("sharescan", cmd_share_scan))
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("retag", cmd_retag))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))

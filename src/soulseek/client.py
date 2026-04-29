@@ -114,8 +114,69 @@ def _get_client() -> slskd_api.SlskdClient:
 
 async def close():
     """Reset the cached client. slskd-api uses requests under the hood — no async to close."""
-    global _client
+    global _client, _scheduled_rescan_task
+    if _scheduled_rescan_task and not _scheduled_rescan_task.done():
+        _scheduled_rescan_task.cancel()
+    _scheduled_rescan_task = None
     _client = None
+
+
+# --- shares ------------------------------------------------------------------
+
+_RESCAN_DELAY_SECS = int(os.environ.get("SLSKD_RESCAN_DELAY_SECS", "600"))
+_scheduled_rescan_task: asyncio.Task | None = None
+
+
+async def rescan_shares() -> bool:
+    """Kick an immediate full slskd share rescan.
+
+    slskd exposes only a full scan endpoint for shares. Use this for manual
+    scans; normal post-download updates should go through
+    ``schedule_rescan_shares`` so batches of albums produce one scan instead
+    of one expensive full-library scan each.
+    """
+    client = _get_client()
+    try:
+        await asyncio.to_thread(client.shares.start_scan)
+        logger.info("slskd share rescan triggered")
+        return True
+    except Exception as e:
+        # 409 (scan already running) is success-equivalent for us. Any other
+        # error we log and move on — Navidrome's scan still runs independently.
+        msg = str(e)
+        if "409" in msg or "already" in msg.lower():
+            return True
+        logger.warning("slskd share rescan failed: %s", msg)
+        return False
+
+
+def schedule_rescan_shares(delay_secs: int | None = None) -> int:
+    """Schedule a delayed full share rescan, coalescing repeated changes.
+
+    Downloads, deletes, and retags mutate many files in bursts. A full slskd
+    scan currently takes about 90-105s on this library, so rescanning after
+    every album is wasteful. Each call resets the quiet timer; the scan runs
+    once after the last change has been idle for ``delay_secs``.
+    """
+    global _scheduled_rescan_task
+    delay = _RESCAN_DELAY_SECS if delay_secs is None else max(0, delay_secs)
+    if _scheduled_rescan_task and not _scheduled_rescan_task.done():
+        _scheduled_rescan_task.cancel()
+    _scheduled_rescan_task = asyncio.create_task(_delayed_rescan_shares(delay))
+    logger.info("slskd share rescan scheduled in %ds", delay)
+    return delay
+
+
+async def _delayed_rescan_shares(delay_secs: int) -> None:
+    global _scheduled_rescan_task
+    try:
+        await asyncio.sleep(delay_secs)
+    except asyncio.CancelledError:
+        return
+    task = asyncio.current_task()
+    if task is _scheduled_rescan_task:
+        _scheduled_rescan_task = None
+    await rescan_shares()
 
 
 # --- search ------------------------------------------------------------------
