@@ -4,27 +4,32 @@ services:
     container_name: slskd
     restart: unless-stopped
     environment:
-      SLSKD_SLSK_USERNAME: "${SOULSEEK_USERNAME}"
-      SLSKD_SLSK_PASSWORD: "${SOULSEEK_PASSWORD}"
+      SLSKD_SLSK_USERNAME: ${SOULSEEK_USERNAME}
+      SLSKD_SLSK_PASSWORD: ${SOULSEEK_PASSWORD}
+      # Peer-listen port. Override SLSKD_LISTEN_PORT in .env if 50300 is taken
+      # or you've forwarded a different port on your router.
+      SLSKD_SLSK_LISTEN_PORT: ${SLSKD_LISTEN_PORT:-50300}
       SLSKD_NO_AUTH: "true"
     volumes:
       - ./slskd-config:/app
       - /media/music/.slskd-downloads:/downloads
       - /media/music:/shared:ro
     ports:
-      - "127.0.0.1:5030:5030"
-      - "50300:50300"
+      - 127.0.0.1:5030:5030
+      - ${SLSKD_LISTEN_PORT:-50300}:${SLSKD_LISTEN_PORT:-50300}
     # Ready when slskd has finished logging into the Soulseek network.
     # Until then `/api/v0/searches` returns 503 — the bot's `depends_on`
     # below uses this to gate startup so first-message searches don't
     # see empty pools.
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:5030/api/v0/server | grep -q '\"isLoggedIn\":true' || exit 1"]
+      test:
+        - CMD-SHELL
+        - wget -qO- http://localhost:5030/api/v0/server | grep -q
+          '"isLoggedIn":true' || exit 1
       interval: 5s
       timeout: 3s
       retries: 30
       start_period: 15s
-
   music-bot:
     image: ghcr.io/eeegoloauq/music-bot:latest
     build:
@@ -33,14 +38,8 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
-      SLSKD_HOST: "http://slskd:5030"
-      SLSKD_DOWNLOAD_DIR: "/music/.slskd-downloads"
-      # Quality cap on Soulseek peer selection. Files exceeding either
-      # cap are skipped during scoring. Defaults below match the upstream
-      # config: 24-bit / 96 kHz covers all reasonable hi-res masters and
-      # rejects 24/192 monsters that double the file size with no audible
-      # benefit on consumer playback. Set 16 / 44100 for redbook-only
-      # (smaller files, more peers available).
+      SLSKD_HOST: http://slskd:5030
+      SLSKD_DOWNLOAD_DIR: /music/.slskd-downloads
       MAX_BIT_DEPTH: "24"
       MAX_SAMPLE_RATE_HZ: "96000"
     volumes:
