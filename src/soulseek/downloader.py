@@ -185,6 +185,33 @@ def _prune_empty_parents(start_dir: str, stop_dir: str) -> None:
         current = os.path.dirname(current)
 
 
+def _remove_staging_traces(username: str, remote_filename: str) -> None:
+    """Best-effort removal of partial / orphaned files from a failed transfer.
+
+    Cleans both the main download tree (where slskd writes the completed
+    file) and slskd's ``.incomplete/`` sidecar (where in-flight bytes live),
+    then prunes any now-empty parent dirs back up to the staging root. All
+    failures are swallowed — this is a janitor pass, not a correctness path.
+    """
+    basename = remote_filename.rsplit("\\", 1)[-1] if "\\" in remote_filename \
+               else remote_filename.rsplit("/", 1)[-1]
+
+    candidates: list[str] = []
+    located = slskd.find_local_file(SLSKD_DOWNLOAD_DIR, username, remote_filename)
+    if located:
+        candidates.append(located)
+    incomplete_root = os.path.join(SLSKD_DOWNLOAD_DIR, ".incomplete")
+    if os.path.isdir(incomplete_root):
+        for root, _, files in os.walk(incomplete_root):
+            if basename in files:
+                candidates.append(os.path.join(root, basename))
+
+    for path in candidates:
+        with contextlib.suppress(OSError):
+            os.remove(path)
+        _prune_empty_parents(os.path.dirname(path), SLSKD_DOWNLOAD_DIR)
+
+
 def _format_label_from_result(r: SearchResult) -> str:
     ext = r.extension.upper()
     bd = r.bit_depth
@@ -271,10 +298,12 @@ async def _download_chosen(
     if "succeeded" not in state.lower():
         with contextlib.suppress(Exception):
             await slskd.cancel_download(chosen.username, chosen.filename)
+        _remove_staging_traces(chosen.username, chosen.filename)
         raise PeerTransferError(f"transfer ended in state '{state}'")
 
     src_path = slskd.find_local_file(SLSKD_DOWNLOAD_DIR, chosen.username, chosen.filename)
     if not src_path or not os.path.isfile(src_path):
+        _remove_staging_traces(chosen.username, chosen.filename)
         raise PeerTransferError(f"could not locate downloaded file for {chosen.basename}")
 
     disc = track.get("discNumber", 1)
