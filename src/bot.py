@@ -1084,6 +1084,10 @@ async def _post_init(app: Application) -> None:
         BotCommand("stats", "Library statistics"),
         BotCommand("retag", "Re-tag library from current Deezer + Last.fm metadata"),
     ])
+    # Reclaim space from prior failed sessions — partial files left in
+    # the slskd staging dir would otherwise pile up forever. Async so the
+    # bot is responsive even on a slow fs scan.
+    asyncio.create_task(soulseek.cleanup_orphan_staging())
 
 
 async def _shutdown(app: Application) -> None:

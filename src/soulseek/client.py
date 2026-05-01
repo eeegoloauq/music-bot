@@ -179,6 +179,83 @@ async def _delayed_rescan_shares(delay_secs: int) -> None:
     await rescan_shares()
 
 
+# --- staging cleanup ---------------------------------------------------------
+
+# Files newer than this are kept regardless of slskd state — we may not yet
+# see them in the transfers API on a freshly-started slskd, and clobbering an
+# in-flight write breaks the download.
+_ORPHAN_GRACE_SECS = 60
+
+
+async def cleanup_orphan_staging(download_dir: str | None = None) -> int:
+    """Remove leftover files in the slskd staging dir that aren't tied to an
+    active transfer. Called once at bot startup to reclaim space from prior
+    failed sessions; safe to skip if the slskd API is unreachable.
+
+    Skips slskd's own ``.incomplete/`` tree (slskd manages its own scratch),
+    files with a basename matching an active (non-Completed) transfer, and
+    anything modified within the last 60s.
+    """
+    if download_dir is None:
+        download_dir = os.environ.get("SLSKD_DOWNLOAD_DIR", "/music/.slskd-downloads")
+    if not os.path.isdir(download_dir):
+        return 0
+
+    client = _get_client()
+    active_basenames: set[str] = set()
+    try:
+        users = await asyncio.to_thread(client.transfers.get_all_downloads)
+        for u in users:
+            for d in u.get("directories", []):
+                for f in d.get("files", []):
+                    state = f.get("state", "")
+                    if "Completed" in state:
+                        continue
+                    fname = f.get("filename", "")
+                    bn = fname.rsplit("\\", 1)[-1] if "\\" in fname \
+                        else fname.rsplit("/", 1)[-1]
+                    if bn:
+                        active_basenames.add(bn)
+    except Exception as e:
+        logger.warning("Orphan sweep skipped — couldn't query slskd transfers: %s", e)
+        return 0
+
+    cutoff = time.time() - _ORPHAN_GRACE_SECS
+    removed = 0
+    for entry in os.scandir(download_dir):
+        if entry.name == ".incomplete":
+            continue
+        if entry.is_dir(follow_symlinks=False):
+            for root, _, files in os.walk(entry.path, topdown=False):
+                for fname in files:
+                    if fname in active_basenames:
+                        continue
+                    fp = os.path.join(root, fname)
+                    try:
+                        if os.path.getmtime(fp) >= cutoff:
+                            continue
+                        os.remove(fp)
+                        removed += 1
+                    except OSError:
+                        pass
+                with contextlib.suppress(OSError):
+                    os.rmdir(root)
+        else:
+            if entry.name in active_basenames:
+                continue
+            try:
+                if entry.stat().st_mtime >= cutoff:
+                    continue
+                os.remove(entry.path)
+                removed += 1
+            except OSError:
+                pass
+
+    if removed:
+        logger.info("Orphan staging sweep: removed %d file(s)", removed)
+    return removed
+
+
 # --- search ------------------------------------------------------------------
 
 
