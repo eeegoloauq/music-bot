@@ -17,9 +17,9 @@ shares:
     - "!/shared/.slskd-downloads"
     - "!/shared/lost+found"
 
-directories:
-  downloads: /downloads
-  incomplete: /downloads/.incomplete
+# `directories.downloads` / `directories.incomplete` come from compose env
+# (SLSKD_DOWNLOADS_DIR / SLSKD_INCOMPLETE_DIR) so the staging contract with
+# music-bot stays in one place — see compose.yaml.
 
 web:
   authentication:

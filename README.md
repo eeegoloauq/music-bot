@@ -41,7 +41,7 @@ Telegram bot that builds and maintains a [Navidrome](https://www.navidrome.org/)
 
 ### Docker compose
 
-The bot runs alongside slskd (Soulseek daemon) which it talks to over its REST API. Sample compose:
+The bot runs alongside slskd (Soulseek daemon) which it talks to over its REST API. Drop this `compose.yaml` next to a `.env` (see [.env.example](.env.example)) and you're done — every host-specific knob lives in `.env`, the compose file itself doesn't need editing.
 
 ```yaml
 services:
@@ -50,16 +50,30 @@ services:
     container_name: slskd
     restart: unless-stopped
     environment:
-      SLSKD_SLSK_USERNAME: "${SOULSEEK_USERNAME}"
-      SLSKD_SLSK_PASSWORD: "${SOULSEEK_PASSWORD}"
+      SLSKD_SLSK_USERNAME: ${SOULSEEK_USERNAME}
+      SLSKD_SLSK_PASSWORD: ${SOULSEEK_PASSWORD}
+      SLSKD_SLSK_LISTEN_PORT: ${SLSKD_LISTEN_PORT:-50300}
+      # Filesystem layout is canonical here so a fresh slskd.yml without a
+      # `directories:` block can't break the staging contract with music-bot.
+      SLSKD_DOWNLOADS_DIR: /downloads
+      SLSKD_INCOMPLETE_DIR: /downloads/.incomplete
       SLSKD_NO_AUTH: "true"
     volumes:
       - ./slskd-config:/app
-      - /media/music/.slskd-downloads:/downloads
-      - /media/music:/shared:ro
+      - ${MUSIC_LIBRARY_DIR:-/media/music}/.slskd-downloads:/downloads
+      - ${MUSIC_LIBRARY_DIR:-/media/music}:/shared:ro
     ports:
-      - "127.0.0.1:5030:5030"
-      - "50300:50300"
+      - 127.0.0.1:5030:5030
+      - ${SLSKD_LISTEN_PORT:-50300}:${SLSKD_LISTEN_PORT:-50300}
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -qO- http://localhost:5030/api/v0/server | grep -q
+          '"isLoggedIn":true' || exit 1
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 15s
 
   music-bot:
     image: ghcr.io/eeegoloauq/music-bot:latest
@@ -67,17 +81,43 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
-      SLSKD_HOST: "http://slskd:5030"
-      SLSKD_DOWNLOAD_DIR: "/music/.slskd-downloads"
+      SLSKD_HOST: http://slskd:5030
+      SLSKD_DOWNLOAD_DIR: /music/.slskd-downloads
+      # Quality cap. 24/96 covers reasonable hi-res; 16/44100 for redbook-only.
+      MAX_BIT_DEPTH: ${MAX_BIT_DEPTH:-24}
+      MAX_SAMPLE_RATE_HZ: ${MAX_SAMPLE_RATE_HZ:-96000}
     volumes:
-      - /media/music:/music
+      - ${MUSIC_LIBRARY_DIR:-/media/music}:/music
     extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - host.docker.internal:host-gateway
     depends_on:
-      - slskd
+      slskd:
+        condition: service_healthy
 ```
 
-slskd's web UI sits on `127.0.0.1:5030` (no auth — internal docker network only). The peer port `50300` needs to be reachable for incoming connections.
+The `slskd-config/slskd.yml` referenced by the bind mount only needs to declare `shares.directories`, `web.port`, and any peer filters you want — the staging-path config (`directories.downloads` / `directories.incomplete`) is supplied via the env vars above and overrides the yml. A minimal `slskd.yml`:
+
+```yaml
+remote_configuration: false
+
+soulseek:
+  description: "music collector"
+
+shares:
+  directories:
+    - "/shared"
+    - "!/shared/.slskd-downloads"
+    - "!/shared/lost+found"
+
+web:
+  authentication:
+    disabled: true
+  port: 5030
+  https:
+    disabled: true
+```
+
+slskd's web UI sits on `127.0.0.1:5030` (no auth — internal docker network only). The peer port (default `50300`, set via `SLSKD_LISTEN_PORT` in `.env`) needs an inbound port forward on your router so remote peers can reach you. The `depends_on: condition: service_healthy` block waits for slskd to finish logging into the Soulseek network before the bot starts — first-message searches won't see an empty peer pool.
 
 ### .env
 
@@ -88,8 +128,17 @@ NAVIDROME_USER=admin
 NAVIDROME_PASS=your_password
 ALLOWED_USERS=123456789
 
+# Host path holding the music library AND the staging dir
+# (.slskd-downloads/). Both must be on the same filesystem so the
+# post-download import is an atomic rename.
+MUSIC_LIBRARY_DIR=/media/music
+
 SOULSEEK_USERNAME=your_slsk_username
 SOULSEEK_PASSWORD=your_slsk_password
+
+# Optional: change if 50300 is already in use or you've forwarded a
+# different port on your router for Soulseek.
+SLSKD_LISTEN_PORT=50300
 ```
 
 If Navidrome is in the same compose stack, use `NAVIDROME_URL=http://navidrome:4533`. The `.env` is loaded by Python directly — special characters like `$` work without escaping.
@@ -114,7 +163,9 @@ python src/bot.py
 | `ALLOWED_USERS` | yes | | Comma-separated Telegram user IDs |
 | `SOULSEEK_USERNAME` | yes | | Soulseek account username |
 | `SOULSEEK_PASSWORD` | yes | | Soulseek account password |
-| `MUSIC_DIR` | | `/music` | Music library path inside the bot container |
+| `MUSIC_LIBRARY_DIR` | | `/media/music` | **Host** path to the music library — used by compose to bind-mount into both containers. The library and the `.slskd-downloads/` staging dir live here on the same filesystem (atomic rename on import). |
+| `SLSKD_LISTEN_PORT` | | `50300` | Soulseek peer port. Forward this on your router for inbound peer connections. |
+| `MUSIC_DIR` | | `/music` | Container-internal mount point the bot looks for the library at. Don't override unless you also adjust the music-bot volume mapping. |
 | `STREAM_BITRATE` | | `320` | MP3 bitrate Navidrome transcodes to for the inline `np` audio (kbps) |
 | `NAVIDROME_PUBLIC_URL` | | | Public Navidrome URL for share links. Sharing disabled if not set. |
 | `LASTFM_API_KEY` | | | Last.fm API key — when set, community tags get merged into album genres. Free at https://www.last.fm/api/account/create |
