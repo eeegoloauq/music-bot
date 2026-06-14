@@ -230,3 +230,10 @@ Metadata is written to every downloaded file:
 Fields covered: artist, albumartist, album, title, track / disc number, total tracks / discs, date / year / originaldate / releasedate (the four-field quartet keeps Navidrome from splitting FLAC and M4A copies of the same album into separate entries), copyright, ISRC, UPC, label, releasetype, BPM, multi-value GENRE (Deezer + Last.fm), ReplayGain track + album gain (from Deezer's gain field), embedded cover art, and lyrics from [lrclib.net](https://lrclib.net).
 
 The download path uses force-mode tagging (peer-supplied tags get wiped and replaced with canonical Deezer-derived values) but preserves a small allow-list — `composer`, `lyricist`, `performer`, and any peer comment is appended to the bot's identifier in the comment field. Re-tagging via `/retag` is fully surgical: it only updates fields that differ from canonical, so embedded pictures and any unmanaged tag stay intact.
+
+## Deployment
+
+Source of truth lives in self-hosted Forgejo (`homelab/music-bot`). The `.50`
+host auto-deploys: a `deploy` user (non-root, read-only deploy key) pulls
+`main` from Forgejo on a systemd timer and runs `docker compose build && up`
+only when the commit changes. Push to `main` → live within a few minutes.
