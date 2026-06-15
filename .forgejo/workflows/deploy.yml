@@ -1,0 +1,50 @@
+name: Build & Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ${{ secrets.REGISTRY }}
+  IMAGE: ${{ secrets.REGISTRY }}/homelab/music-bot
+
+jobs:
+  build:
+    runs-on: docker
+    container:
+      image: node:22-bookworm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install docker CLI
+        run: |
+          curl -fsSL https://download.docker.com/linux/static/stable/x86_64/docker-27.5.1.tgz \
+            | tar xz --strip-components=1 -C /usr/local/bin docker/docker
+          docker version --format '{{.Client.Version}}'
+
+      - name: Login to registry
+        run: echo "${{ secrets.REGISTRY_TOKEN }}" | docker login "$REGISTRY" -u egor --password-stdin
+
+      - name: Build & push
+        run: |
+          docker build -t "$IMAGE:${{ github.sha }}" -t "$IMAGE:latest" .
+          docker push "$IMAGE:${{ github.sha }}"
+          docker push "$IMAGE:latest"
+
+  deploy:
+    runs-on: docker
+    container:
+      image: node:22-bookworm
+    needs: build
+    steps:
+      - name: Deploy to .50
+        run: |
+          apt-get update -q && apt-get install -y -q openssh-client
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          echo "${{ secrets.MUSICBOT_DEPLOY_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${{ secrets.DEPLOY_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes \
+            deploy@${{ secrets.DEPLOY_HOST }} "${{ github.sha }}"
