@@ -23,10 +23,11 @@ hi-res used to dominate.
 
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from config import MAX_BIT_DEPTH, MAX_SAMPLE_RATE_HZ
 from soulseek.client import SearchResult, PeerFolder
+from soulseek.selection import group_copies
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,10 @@ REMASTER_KEYWORDS = ("remaster", "remastered")
 class ScoredTrack:
     result: SearchResult
     score: float
+    # Every scored copy of this recording (identical basename on other
+    # peers), best first — result is sources[0]. Transfer retries walk these
+    # before falling to a different recording.
+    sources: list[SearchResult] = field(default_factory=list)
 
 
 @dataclass
@@ -222,7 +227,8 @@ def score_track_results(
 ) -> list[ScoredTrack]:
     """Score and rank candidates for a single track. Excluded items are dropped.
 
-    Dedupes by basename keeping the highest score per filename.
+    Copies of the same recording (identical basename on several peers) are
+    grouped: one ranking entry, all copies kept in its ``sources``.
     """
     title_lower = (track_title or "").lower()
     out: list[ScoredTrack] = []
@@ -262,17 +268,9 @@ def score_track_results(
 
     out.sort(key=lambda x: x.score, reverse=True)
 
-    # Dedupe by basename (keep highest)
-    seen: set[str] = set()
-    deduped: list[ScoredTrack] = []
-    for st in out:
-        key = st.result.basename.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(st)
-
-    return deduped
+    # One ranking entry per recording; other peers' copies stay reachable
+    # as sources for transfer retries.
+    return group_copies(out)
 
 
 def _match_folder_to_tracks(
