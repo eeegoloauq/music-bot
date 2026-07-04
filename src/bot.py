@@ -957,6 +957,18 @@ async def _offer_mp3_fallback(
     _purge_stale_lossy()
     try:
         candidates = await soulseek.find_lossy_candidates(track, album_ctx)
+    except soulseek.SearchError as e:
+        # Searches are being throttled or slskd is down — "no fallback found"
+        # would be a lie. Report the real reason and stop here.
+        logger.warning("Lossy fallback search couldn't run: %s", e)
+        reason = "rate-limited" if isinstance(e, soulseek.SearchThrottledError) \
+            else "search error"
+        with contextlib.suppress(TelegramError):
+            await status_msg.edit_text(
+                f"Soulseek search couldn't run for {track['artist']} — "
+                f"{track['title']} ({reason}). Try again in a few minutes."
+            )
+        return True
     except Exception as e:
         logger.warning("Lossy fallback search failed: %s", e)
         return False

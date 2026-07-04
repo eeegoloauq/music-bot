@@ -33,7 +33,7 @@ from library.tagger import (
 
 from soulseek import client as slskd
 from soulseek.client import SearchResult
-from soulseek.matcher import find_album, find_track, find_tracks_concurrent
+from soulseek.matcher import find_album, find_track
 from soulseek.scorer import ScoredFolder
 
 logger = logging.getLogger(__name__)
@@ -336,12 +336,18 @@ async def _try_candidates(
     lyrics_task: asyncio.Task | None,
     on_progress=None,
     max_attempts: int = 3,
+    failed_keys: set[tuple[str, str]] | None = None,
 ) -> tuple[str, int, str, SearchResult] | None:
     """Try peers in order; return on first success. Only ``PeerTransferError``
     is treated as 'try the next peer' — any other exception (local I/O,
     tagging, etc.) is a real bug and propagates so it doesn't get silently
-    swallowed as a peer issue."""
-    seen: set[tuple[str, str]] = set()
+    swallowed as a peer issue.
+
+    ``failed_keys`` (optional) is a (username, filename) set shared across an
+    album's phases: candidates that already failed there are skipped, and new
+    failures are recorded — so the per-track fallback retries *other* peers
+    instead of re-waiting on the one that just errored."""
+    seen: set[tuple[str, str]] = set(failed_keys or ())
     last_err: str | None = None
     attempts = 0
     for cand in candidates:
@@ -362,11 +368,15 @@ async def _try_candidates(
             return filepath, size, fmt, cand
         except PeerTransferError as e:
             last_err = str(e)
+            if failed_keys is not None:
+                failed_keys.add(key)
             logger.warning("candidate %s failed for %s: %s",
                            cand.username, track.get("title"), e)
             continue
     if last_err:
         raise PeerTransferError(last_err)
+    if attempts == 0 and failed_keys and any(c is not None for c in candidates):
+        raise PeerTransferError("all matching peers already failed this album")
     return None
 
 
@@ -545,7 +555,7 @@ async def download_album(
     # next folder-rank alternative (a single peer with bad share/queue state
     # otherwise eats the whole album).
     track_provenance: dict[str, str] = {}
-    folder_match, folder_alternatives = await find_album(album)
+    folder_match, folder_alternatives, album_pool = await find_album(album)
 
     # Folder-match strategy
     #   complete coverage (missing_count == 0): prefer it whole. Frankenstein
@@ -595,6 +605,9 @@ async def download_album(
     progress_idx_by_id = {t["id"]: idx for idx, (_, t) in enumerate(to_download, 1)}
     remaining_track_ids: set[str] = {t["id"] for _, t in to_download}
     last_error: dict[str, str] = {}
+    # (username, filename) pairs that already failed a transfer this album —
+    # shared across phases so retries go to *other* peers.
+    failed_candidate_keys: set[tuple[str, str]] = set()
 
     async def _attempt(i: int, track: dict, candidates: list[SearchResult],
                        ) -> SearchResult | None:
@@ -628,6 +641,7 @@ async def download_album(
                 lyrics_tasks.get(track["id"]),
                 on_progress=_on_track_progress,
                 max_attempts=max(len(candidates), 1),
+                failed_keys=failed_candidate_keys,
             )
             if res is None:
                 raise PeerTransferError("no peer returned a usable file")
@@ -694,22 +708,46 @@ async def download_album(
 
     # === Per-track fallback phase ===
     # Tracks that no folder covered — or whose folder chain failed entirely.
-    # Single-track searches accept Frankenstein assembly across peers, with
-    # the modal quality_lock keeping the album uniform where possible.
+    # Matches against the album-query result pool first (zero extra searches
+    # for tracks the album queries already surfaced), then searches. Accepts
+    # Frankenstein assembly across peers, with the modal quality_lock keeping
+    # the album uniform where possible.
     if remaining_track_ids:
         needs_per_track = [(i, t) for (i, t) in to_download
                            if t["id"] in remaining_track_ids]
-        logger.info("Per-track search for %d remaining track(s)", len(needs_per_track))
-        per_track_results = await find_tracks_concurrent(
-            [t for _, t in needs_per_track],
-            album_artist=album["artist"],
-        )
-        for (i, track), (auto, alts) in zip(needs_per_track, per_track_results):
+        logger.info("Per-track matching for %d remaining track(s)%s",
+                    len(needs_per_track),
+                    f", reusing {len(album_pool)} pooled result(s)" if album_pool else "")
+        search_dead: str | None = None  # searching stopped being useful — why
+        for i, track in needs_per_track:
+            try:
+                # Once searching has proven throttled/broken, keep matching
+                # the remaining tracks against the pool only — a pool hit
+                # still downloads fine without touching the network.
+                auto, alts = await find_track(
+                    track, album_artist=album["artist"], preseed=album_pool,
+                    allow_search=search_dead is None,
+                )
+            except slskd.SearchError as e:
+                # Not a miss — stop searching so we don't dig the throttle
+                # hole deeper; unmatched tracks report the real reason.
+                search_dead = "search rate-limited — retry later" \
+                    if isinstance(e, slskd.SearchThrottledError) \
+                    else "Soulseek search failed — retry later"
+                logger.warning("Search failed on %s (%s) — pool-only matching "
+                               "from here on", track["title"], e)
+                # Give this track its pool shot too — its own search raising
+                # shouldn't cost it a match the pool already holds.
+                auto, alts = await find_track(
+                    track, album_artist=album["artist"], preseed=album_pool,
+                    allow_search=False,
+                )
             picks = [auto.result] if auto else []
             picks += [a.result for a in alts if (auto is None or a is not auto)]
             chosen = _pick_quality_locked(picks, quality_lock) if picks else None
             if chosen is None:
-                last_error.setdefault(track["id"], "no Soulseek match")
+                last_error.setdefault(track["id"],
+                                      search_dead or "no Soulseek match")
                 continue
             track_alts_local = [r for r in picks if r is not chosen]
             candidates = [chosen] + track_alts_local

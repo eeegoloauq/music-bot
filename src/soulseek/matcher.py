@@ -12,7 +12,6 @@ Two-stage strategy for albums:
 Single-track downloads skip stage 1 entirely.
 """
 
-import asyncio
 import logging
 import re
 import unicodedata
@@ -195,11 +194,13 @@ def _dedup_lower(items: list[str]) -> list[str]:
 async def find_album(
     album_meta: dict,
     duration_tolerance: int = 5,
-) -> tuple[ScoredFolder | None, list[ScoredFolder]]:
+) -> tuple[ScoredFolder | None, list[ScoredFolder], list[SearchResult]]:
     """Search for a peer-folder that holds the whole album. Returns
-    ``(best, alternatives)`` — best is the highest-scored folder regardless
-    of coverage; the downloader applies its own coverage threshold to decide
-    whether to use it whole, partial, or fall back to per-track."""
+    ``(best, alternatives, pool)`` — best is the highest-scored folder
+    regardless of coverage; the downloader applies its own coverage threshold
+    to decide whether to use it whole, partial, or fall back to per-track.
+    ``pool`` is every lossless file the album queries surfaced — the
+    downloader reuses it to match leftover tracks without new searches."""
     artist = album_meta.get("artist", "")
     title = album_meta.get("title", "")
     tracks = album_meta.get("tracks", [])
@@ -208,14 +209,12 @@ async def find_album(
 
     primary, fallbacks = _build_album_queries(artist, title)
     if not primary:
-        return None, []
+        return None, [], []
 
-    sem = asyncio.Semaphore(2)
     all_folders: dict[tuple[str, str], slskd.PeerFolder] = {}
 
     async def _run_query(q: str) -> None:
-        async with sem:
-            responses = await slskd.search(q, timeout_secs=20, response_limit=200)
+        responses = await slskd.search(q, timeout_secs=20, response_limit=200)
         results = slskd.parse_files(responses, lossless_only=True)
         for f in slskd.group_by_folder(results):
             all_folders.setdefault((f.username, f.directory), f)
@@ -232,30 +231,36 @@ async def find_album(
             duration_tolerance=duration_tolerance,
         )
 
-    # Tier 1 — primary query alone. Most popular albums hit a complete folder
-    # match here and we never touch slskd again for this album.
-    await _run_query(primary)
-    scored = _rescore()
-    if scored and scored[0].missing_count == 0:
-        return scored[0], scored[1:6]
-
-    # Tier 2 — fallbacks only if primary didn't yield a complete-folder match.
-    # The fallbacks were chosen by `_build_album_queries` to target specific
-    # failure modes (title-only / ASCII-fold / junk-symbol rescue).
-    if fallbacks:
-        await asyncio.gather(*[_run_query(q) for q in fallbacks])
+    # One query at a time (the client serializes + paces searches globally),
+    # stopping at the first complete-coverage folder — most popular albums
+    # resolve on the primary alone and never burn a fallback search. The
+    # fallbacks target specific failure modes (title-only / ASCII-fold /
+    # junk-symbol rescue).
+    scored: list[ScoredFolder] = []
+    for q in (primary, *fallbacks):
+        try:
+            await _run_query(q)
+        except slskd.SearchError as e:
+            # With nothing gathered there's no honest "no match" to report —
+            # surface the real reason. With partial results, matching on what
+            # we have beats hammering a throttled server with more queries.
+            if not all_folders:
+                raise
+            logger.warning("Album query %r failed (%s) — matching with "
+                           "results gathered so far", q, e)
+            break
         scored = _rescore()
+        if scored and scored[0].missing_count == 0:
+            break
 
+    pool = [f for folder in all_folders.values() for f in folder.files]
     if not scored:
-        return None, []
-
-    best = scored[0]
-    alternatives = scored[1:6]   # cap returned alternatives to keep UI manageable
+        return None, [], pool
 
     # Always return the best folder candidate. The downloader's coverage
     # threshold decides whether to use it whole, partial+gap-fill, or skip
     # it entirely — keeping that policy in one place.
-    return best, alternatives
+    return scored[0], scored[1:6], pool
 
 
 # --- per-track matching ----------------------------------------------------
@@ -265,6 +270,8 @@ async def find_track(
     album_artist: str | None = None,
     duration_tolerance: int = 5,
     accept_lossy: bool = False,
+    preseed: list[SearchResult] | None = None,
+    allow_search: bool = True,
 ) -> tuple[ScoredTrack | None, list[ScoredTrack]]:
     """Search and score for a single track. Returns ``(auto_pick, alternatives)``.
 
@@ -274,6 +281,14 @@ async def find_track(
     ``accept_lossy`` (mp3-fallback path): instead of FLAC-only, search for
     mp3≥256kbps + m4a, score them with a flat 5pt quality reward. Used after
     a FLAC search came up empty and the user has explicitly opted in.
+
+    ``preseed``: results already fetched by earlier searches (the album-query
+    pool). Scored before any new search — a confident hit there costs zero
+    searches, and the rest still enriches the candidate list for peer retries.
+
+    ``allow_search=False`` matches against ``preseed`` only — used once
+    searching has proven throttled/broken, so remaining tracks can still be
+    filled from the pool without touching the network.
     """
     artist = track_meta.get("artist", "") or album_artist or ""
     title = track_meta.get("title", "")
@@ -286,10 +301,8 @@ async def find_track(
     seen_files: set[tuple[str, str]] = set()
     pooled: list[SearchResult] = []
 
-    async def _run(q: str) -> None:
-        responses = await slskd.search(q, timeout_secs=18, response_limit=180)
-        parsed = slskd.parse_files(responses, lossless_only=not accept_lossy)
-        for r in parsed:
+    def _absorb(results: list[SearchResult]) -> None:
+        for r in results:
             if accept_lossy and not _is_acceptable_lossy(r):
                 continue
             key = (r.username, r.filename.lower())
@@ -297,6 +310,10 @@ async def find_track(
                 continue
             seen_files.add(key)
             pooled.append(r)
+
+    async def _run(q: str) -> None:
+        responses = await slskd.search(q, timeout_secs=18, response_limit=180)
+        _absorb(slskd.parse_files(responses, lossless_only=not accept_lossy))
 
     def _scored() -> list[ScoredTrack]:
         return score_track_results(
@@ -307,20 +324,37 @@ async def find_track(
             duration_tolerance=duration_tolerance,
         )
 
-    # Tier 1 — primary alone. Stop here if we already have a confident pick.
-    await _run(primary)
-    scored = _scored()
-    if scored and scored[0].score >= TRACK_AUTO_THRESHOLD:
-        return scored[0], scored[1:5]
-
-    # Tier 2 — fallbacks (title-only, ASCII-fold) sequentially with early exit.
-    for q in fallbacks:
-        await _run(q)
-        if len(pooled) >= 60:
-            break  # diminishing returns
+    # Tier 0 — reuse what earlier searches already fetched. A confident pick
+    # here means this track never touches the network again.
+    if preseed:
+        _absorb(preseed)
         scored = _scored()
         if scored and scored[0].score >= TRACK_AUTO_THRESHOLD:
-            break
+            return scored[0], scored[1:5]
+
+    if allow_search:
+        # Tier 1 — primary alone. Stop here if we already have a confident pick.
+        try:
+            await _run(primary)
+        except slskd.SearchError:
+            if not pooled:
+                raise  # nothing to fall back on — let the caller see the reason
+            fallbacks = []  # don't hammer a struggling server with more queries
+        scored = _scored()
+        if scored and scored[0].score >= TRACK_AUTO_THRESHOLD:
+            return scored[0], scored[1:5]
+
+        # Tier 2 — fallbacks (title-only, ASCII-fold) sequentially with early exit.
+        for q in fallbacks:
+            try:
+                await _run(q)
+            except slskd.SearchError:
+                break  # score whatever we've gathered
+            if len(pooled) >= 60:
+                break  # diminishing returns
+            scored = _scored()
+            if scored and scored[0].score >= TRACK_AUTO_THRESHOLD:
+                break
 
     scored = _scored()
     if not scored:
@@ -333,27 +367,3 @@ async def find_track(
     if best.score >= TRACK_PICK_THRESHOLD:
         return None, [best] + alternatives
     return None, []
-
-
-async def find_tracks_concurrent(
-    tracks: list[dict],
-    album_artist: str,
-    duration_tolerance: int = 5,
-    concurrency: int = 2,
-    stagger: float = 0.4,
-) -> list[tuple[ScoredTrack | None, list[ScoredTrack]]]:
-    """Run per-track searches concurrently with a small semaphore + stagger.
-
-    slskd rate-limits ``POST /api/v0/searches`` (returns 429 above ~3 starts/s).
-    Concurrency 2 with a 0.4s start stagger stays under the limit while still
-    amortising network latency across the album.
-    """
-    sem = asyncio.Semaphore(concurrency)
-
-    async def _one(idx: int, t: dict):
-        await asyncio.sleep(idx * stagger)
-        async with sem:
-            return await find_track(t, album_artist=album_artist,
-                                      duration_tolerance=duration_tolerance)
-
-    return await asyncio.gather(*[_one(i, t) for i, t in enumerate(tracks)])
