@@ -10,8 +10,6 @@ venv/
 node_modules/
 package.json
 package-lock.json
-AGENTS.md
-src/tidal/AGENTS.md
 slskd-config/*
 !slskd-config/slskd.yml
 !slskd-config/.gitkeep
