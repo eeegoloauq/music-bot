@@ -1,6 +1,6 @@
 [project]
 name = "music-bot"
-version = "0.1.0"
+version = "2.2.0"
 description = "Telegram bot for Soulseek music downloads via slskd"
 requires-python = ">=3.12"
 dependencies = [

@@ -61,3 +61,5 @@ today: `soulseek`.
   so `pyproject.toml` / `Dockerfile` changes need `docker compose up -d --build`.
 - After `docker compose up -d music-bot` recreates the container, prior `docker cp` hot-reloads are
   gone — resync `src/` or rebuild.
+- **Releases** — tag `vX.Y.Z` on `main`; GitHub Actions builds the multi-arch image, publishes it to
+  GHCR (`ghcr.io/eeegoloauq/music-bot`), and cuts a GitHub Release with auto-generated notes.
