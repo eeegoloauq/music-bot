@@ -8,7 +8,6 @@ back) under the cap even when individual call sites use ``asyncio.gather``.
 import asyncio
 import logging
 import time
-import urllib.parse
 
 import aiohttp
 
@@ -148,21 +147,25 @@ def _clean_title(s: str) -> str:
     return s.strip()
 
 
-async def find_album_id(artist: str, title: str) -> str | None:
-    """Find a Deezer album ID matching ``artist`` and ``title``. Strips common
-    title decorations (``[Explicit]``, ``(Deluxe)``, etc) and co-artist suffixes
-    (``& Ye``, ``feat. X``) so the search matches Deezer's plainer canonical."""
+async def _find_id(artist: str, title: str, search_fn, key: str,
+                   title_only_fallback: bool) -> str | None:
+    """Search Deezer for an ``artist``/``title`` match, returning its id.
+
+    Strips title decorations (``[Explicit]``, ``(Deluxe)``) and co-artist
+    suffixes (``& Ye``, ``feat. X``) to match Deezer's plainer canonical, then
+    tries progressively looser queries. Prefers an exact artist-name match,
+    falling back to word-overlap. ``key`` is ``album``/``track`` (the Deezer
+    advanced-search field); ``title_only_fallback`` adds a bare-title query —
+    fine for albums (distinctive) but too noisy for tracks."""
     a = _clean_artist(artist)
     t = _clean_title(title)
-    queries = [
-        f'artist:"{a}" album:"{t}"',
-        f"{a} {t}",
-        t,
-    ]
+    queries = [f'artist:"{a}" {key}:"{t}"', f"{a} {t}"]
+    if title_only_fallback:
+        queries.append(t)
     artist_lower = (a or "").lower()
     for q in queries:
         try:
-            hits = await search_albums(q, limit=5)
+            hits = await search_fn(q, limit=5)
         except DeezerError:
             continue
         if not hits:
@@ -174,27 +177,11 @@ async def find_album_id(artist: str, title: str) -> str | None:
             if _artist_word_overlap(a, h.get("artist", {}).get("name", "")):
                 return str(h["id"])
     return None
+
+
+async def find_album_id(artist: str, title: str) -> str | None:
+    return await _find_id(artist, title, search_albums, "album", True)
 
 
 async def find_track_id(artist: str, title: str) -> str | None:
-    a = _clean_artist(artist)
-    t = _clean_title(title)
-    queries = [
-        f'artist:"{a}" track:"{t}"',
-        f"{a} {t}",
-    ]
-    artist_lower = (a or "").lower()
-    for q in queries:
-        try:
-            hits = await search_tracks(q, limit=5)
-        except DeezerError:
-            continue
-        if not hits:
-            continue
-        for h in hits:
-            if h.get("artist", {}).get("name", "").lower() == artist_lower:
-                return str(h["id"])
-        for h in hits:
-            if _artist_word_overlap(a, h.get("artist", {}).get("name", "")):
-                return str(h["id"])
-    return None
+    return await _find_id(artist, title, search_tracks, "track", False)

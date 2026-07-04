@@ -553,7 +553,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await _handle_delete(update, rel_path)
         return
 
-    force = bool(_FORCE_RE.search(text))
+    # Match force words against the text with URLs removed — album/track slugs
+    # like ".../album/re-animator" contain hyphen-delimited "re" that would
+    # otherwise silently trigger a destructive re-download.
+    force = bool(_FORCE_RE.search(_MUSIC_LINK_RE.sub(" ", text)))
 
     music_matches = _MUSIC_LINK_RE.findall(text)
     if music_matches:
@@ -690,6 +693,21 @@ async def _download_album(update: Update, album_id: str, force: bool = False):
         _in_flight.discard(key)
 
 
+async def _restore_backup(backup_dir: str | None, restore_target: str | None) -> None:
+    """Move a staged force-redownload backup back to its original location,
+    discarding whatever the failed/partial fresh download left there. No-op
+    if there's no backup to restore."""
+    if not (backup_dir and restore_target and os.path.isdir(backup_dir)):
+        return
+    try:
+        if os.path.isdir(restore_target):
+            await asyncio.to_thread(shutil.rmtree, restore_target)
+        os.rename(backup_dir, restore_target)
+        logger.info("Restored original album: %s", restore_target)
+    except OSError as e:
+        logger.error("Failed to restore backup %s -> %s: %s", backup_dir, restore_target, e)
+
+
 async def _do_download_album(update: Update, album_id: str, force: bool = False):
     if _download_semaphore.locked():
         status_msg = await update.message.reply_text("Queued, waiting for current download...")
@@ -705,19 +723,26 @@ async def _do_download_album(update: Update, album_id: str, force: bool = False)
             await status_msg.edit_text(f"Failed to fetch album info: {_short(e)}")
             return
 
-        # Force re-download: rename existing album directory to .bak. We
-        # locate it by tag (not by name) so a folder created by another
-        # tool's sanitiser doesn't escape the rename and end up alongside
-        # the new download.
+        # Force re-download: move the existing album OUT of the artist tree
+        # into a hidden staging dir, then download fresh. It has to leave the
+        # tree entirely: the downloader re-runs tag-based _locate_existing_album,
+        # and a ".bak" sibling still carries our canonical comment, so an
+        # in-tree backup gets re-selected as the target and every track is
+        # skipped as "already present" — which then destroyed the only copy.
+        # We locate by tag (not name) so a foreign-sanitised folder still moves.
         backup_dir = None
+        restore_target = None
         if force:
-            existing_dir = _locate_existing_album(MUSIC_DIR, album)
+            existing_dir = await asyncio.to_thread(_locate_existing_album, MUSIC_DIR, album)
             if existing_dir and os.path.isdir(existing_dir):
-                backup_dir = existing_dir + ".bak"
+                backup_root = os.path.join(MUSIC_DIR, ".redownload-backup")
+                os.makedirs(backup_root, exist_ok=True)
+                restore_target = existing_dir
+                backup_dir = os.path.join(backup_root, os.path.basename(existing_dir.rstrip("/")))
                 if os.path.exists(backup_dir):
-                    shutil.rmtree(backup_dir)
+                    await asyncio.to_thread(shutil.rmtree, backup_dir)
                 os.rename(existing_dir, backup_dir)
-                logger.info("Force re-download: renamed %s -> .bak", existing_dir)
+                logger.info("Force re-download: staged backup %s -> %s", existing_dir, backup_dir)
 
         try:
             await status_msg.edit_text(
@@ -777,18 +802,38 @@ async def _do_download_album(update: Update, album_id: str, force: bool = False)
             )
         except Exception as e:
             logger.error("Album download failed (%s — %s): %s", album["artist"], album["title"], e)
-            if backup_dir and os.path.isdir(backup_dir):
-                target = backup_dir.removesuffix(".bak")
-                if os.path.exists(target):
-                    shutil.rmtree(target)
-                os.rename(backup_dir, target)
-                logger.info("Force re-download failed, restored backup: %s", target)
+            await _restore_backup(backup_dir, restore_target)
             await status_msg.edit_text(f"Download failed: {_short(e)}")
             return
 
+        # Only drop the backup once the fresh copy is a clean, complete success.
+        # A partial or empty re-download (dead peers, some tracks missing) must
+        # NOT delete the known-good original — restore it and keep the backup net.
+        restored = False
         if backup_dir and os.path.isdir(backup_dir):
-            shutil.rmtree(backup_dir)
-            logger.info("Force re-download succeeded, removed backup: %s", backup_dir)
+            if result["downloaded"] > 0 and not result["failed"]:
+                await asyncio.to_thread(shutil.rmtree, backup_dir)
+                logger.info("Force re-download complete (%d saved), removed backup",
+                            result["downloaded"])
+            else:
+                await _restore_backup(backup_dir, restore_target)
+                restored = True
+                logger.warning(
+                    "Force re-download incomplete (%d saved, %d failed) — restored original",
+                    result["downloaded"], len(result["failed"]),
+                )
+
+        if restored:
+            # The fresh copy was discarded — report what actually happened
+            # rather than the (now untrue) per-track download tally.
+            got = result["downloaded"]
+            miss = len(result["failed"])
+            await status_msg.edit_text(
+                f"Kept existing: {album['artist']} — {album['title']}\n"
+                f"Re-download was incomplete ({got} ok, {miss} unavailable), "
+                f"so the original copy was restored."
+            )
+            return
 
         if result["downloaded"] == 0 and not result["failed"]:
             done_text = f"Already in library: {album['artist']} — {album['title']}"
