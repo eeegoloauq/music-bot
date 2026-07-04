@@ -36,14 +36,16 @@ TRACK_PICK_THRESHOLD = 45.0   # 45..70 — show picker; <45 — give up
 # search came up empty). Lower bound on mp3 quality keeps us from saving
 # 128kbps junk to disk; m4a is allowed without a bitrate floor because it
 # might be ALAC (lossless) — we can't tell without parsing the stream.
+# slskd passes through the Soulseek protocol's bitrate attribute, which is
+# in kbps (320 for CBR mp3, ~245 for V0) — verified against the live daemon.
 _LOSSY_FALLBACK_EXTS = {"mp3", "m4a"}
-_LOSSY_MIN_MP3_BITRATE = 256_000
+MP3_MIN_KBPS = 256
 
 
 def _is_acceptable_lossy(r) -> bool:
     if r.extension not in _LOSSY_FALLBACK_EXTS:
         return False
-    if r.extension == "mp3" and (r.bit_rate or 0) < _LOSSY_MIN_MP3_BITRATE:
+    if r.extension == "mp3" and (r.bit_rate or 0) < MP3_MIN_KBPS:
         return False
     return True
 

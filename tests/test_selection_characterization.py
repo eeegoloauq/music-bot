@@ -205,15 +205,14 @@ def test_token_rescue():
 
 # --- lossy fallback gate ----------------------------------------------------
 
-def test_f5_mp3_floor_rejects_kbps_scale_bitrates():
-    """F5: slskd reports bitRate in kbps (320 for CBR mp3), but the floor is
-    256_000 — every real-world mp3 fails it, so the fallback is m4a-only."""
-    mp3_320 = make_result("peer", "M\\A\\01 - Song.mp3", bit_rate=320)
-    assert not _is_acceptable_lossy(mp3_320)
-    mp3_unreported = make_result("peer", "M\\A\\01 - Song.mp3", bit_rate=None)
-    assert not _is_acceptable_lossy(mp3_unreported)
-    # what the code currently expects the field to look like:
-    assert _is_acceptable_lossy(make_result("peer", "M\\A\\01.mp3", bit_rate=320_000))
+def test_mp3_floor_is_in_protocol_units():
+    """F5 (fixed): slskd reports bitRate in kbps (320 for CBR mp3) and the
+    floor now matches — real-world 320/256 mp3s pass, 128 and unreported
+    bitrates don't."""
+    assert _is_acceptable_lossy(make_result("peer", "M\\A\\01.mp3", bit_rate=320))
+    assert _is_acceptable_lossy(make_result("peer", "M\\A\\01.mp3", bit_rate=256))
+    assert not _is_acceptable_lossy(make_result("peer", "M\\A\\01.mp3", bit_rate=128))
+    assert not _is_acceptable_lossy(make_result("peer", "M\\A\\01.mp3", bit_rate=None))
     # m4a has no floor (might be ALAC); flac is never "acceptable lossy"
     assert _is_acceptable_lossy(make_result("peer", "M\\A\\01.m4a"))
     assert not _is_acceptable_lossy(make_result("peer", "M\\A\\01.flac"))
