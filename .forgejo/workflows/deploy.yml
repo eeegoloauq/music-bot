@@ -5,15 +5,14 @@ on:
     branches: [main]
   workflow_dispatch:
 
-env:
-  REGISTRY: ${{ secrets.REGISTRY }}
-  IMAGE: ${{ secrets.REGISTRY }}/homelab/music-bot
-
 jobs:
   build:
     runs-on: docker
     container:
       image: node:22-bookworm
+    env:
+      REGISTRY: ${{ secrets.REGISTRY }}
+      IMAGE: ${{ secrets.REGISTRY }}/homelab/music-bot
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -39,12 +38,12 @@ jobs:
       image: node:22-bookworm
     needs: build
     steps:
-      - name: Deploy to .50
+      - name: Deploy
         run: |
           apt-get update -q && apt-get install -y -q openssh-client
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
           echo "${{ secrets.MUSICBOT_DEPLOY_KEY }}" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan -H ${{ secrets.DEPLOY_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+          ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
           ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes \
-            deploy@${{ secrets.DEPLOY_HOST }} "${{ github.sha }}"
+            deploy@"${{ secrets.DEPLOY_HOST }}" "${{ github.sha }}"
