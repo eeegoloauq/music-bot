@@ -6,10 +6,34 @@ on:
   workflow_dispatch:
 
 jobs:
+  test:
+    runs-on: docker
+    container:
+      image: ghcr.io/astral-sh/uv:python3.12-bookworm
+    steps:
+      # The uv image has no node, so the JS-based actions/checkout can't run —
+      # plain shell checkout of the pushed ref using the job token (same
+      # pattern as aether's go-check job).
+      - name: Checkout
+        run: |
+          git init -q .
+          git config --global --add safe.directory "$PWD"
+          origin=$(echo "${{ github.server_url }}/${{ github.repository }}.git" \
+            | sed "s|://|://x-access-token:${{ github.token }}@|")
+          git remote add origin "$origin"
+          git fetch -q --depth 1 origin "+${{ github.ref }}:refs/ci"
+          git checkout -q refs/ci
+
+      - name: Run tests
+        run: |
+          uv sync --frozen
+          uv run --no-sync pytest -q
+
   build:
     runs-on: docker
     container:
       image: node:22-bookworm
+    needs: test
     env:
       REGISTRY: ${{ secrets.REGISTRY }}
       IMAGE: ${{ secrets.REGISTRY }}/homelab/music-bot
