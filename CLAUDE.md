@@ -43,6 +43,12 @@ today: `soulseek`.
   then `searches.stop()` to force the transition (not a cancel — responses are preserved), then
   reads. Don't run global stale-search cleanup before new queries: under concurrency it 404's
   siblings that just finished.
+- **Search pacing** — the Soulseek server silently drops search floods (reads back as `0 files /
+  0 peers` for stuff that exists) and can 30-min-ban. All searches are globally serialized with a
+  min start interval (`SLSKD_SEARCH_MIN_INTERVAL_SECS`, default 10s). 429s back off and retry; a
+  burst of consecutive empty searches triggers a 90s cooldown + re-check of the same query. A
+  search that *couldn't run* raises `SearchError`/`SearchThrottledError` — `[]` always means
+  "ran, genuinely nothing" — so don't catch-and-return-empty around `slskd.search()`.
 - **Album dedup is tag-based, not name-based** (`library/files.py::_locate_existing_album`) —
   identity is the `comment` tag (the Deezer album URL the bot wrote) + `album` tag, not the folder
   name, so folders re-sanitised by other tools still match.

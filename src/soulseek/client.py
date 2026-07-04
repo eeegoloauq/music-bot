@@ -1,10 +1,16 @@
 """slskd-api wrapper: search, parse results, enqueue download, monitor.
 
-Two known slskd quirks handled here:
-  1. completed searches accumulate and silently break ``state(includeResponses=True)``,
-     so we delete stale searches before each new one
-  2. ``state(includeResponses=True)`` sometimes returns an empty list even when
-     ``responseCount > 0``, so we fall back to ``search_responses(id)``
+Search behavior worth knowing:
+  1. All searches are globally serialized and paced — the Soulseek server
+     silently drops search floods (and hands out 30-minute bans for sustained
+     abuse), which reads back as "0 files / 0 peers" for queries that would
+     otherwise hit. See ``search`` for the full contract.
+  2. A search that *couldn't run* raises ``SearchError`` /
+     ``SearchThrottledError``; an empty return always means the search ran
+     and genuinely found nothing.
+  3. ``state(includeResponses=True)`` sometimes returns an empty list even
+     when ``responseCount > 0``, so we read ``search_responses(id)`` after
+     forcing a flush via ``searches.stop()``.
 All sync slskd-api calls go through ``asyncio.to_thread`` to keep the event loop free.
 """
 
@@ -16,11 +22,23 @@ import re
 import time
 from dataclasses import dataclass, field
 
+import requests
 import slskd_api
 
 from config import MAX_FILE_BYTES
 
 logger = logging.getLogger(__name__)
+
+
+class SearchError(Exception):
+    """The search could not be executed (slskd unreachable, API error).
+    Distinct from a search that ran and found nothing — callers must not
+    report this as 'no match'."""
+
+
+class SearchThrottledError(SearchError):
+    """slskd (or the Soulseek server behind it) is rate-limiting our
+    searches and backoff didn't clear it."""
 
 
 # LOSSLESS_EXTS is FLAC-only because the tagger has no native WAV/AIFF writer
@@ -263,9 +281,118 @@ async def cleanup_orphan_staging(download_dir: str | None = None) -> int:
 
 # --- search ------------------------------------------------------------------
 
+# The Soulseek server silently drops search floods and bans repeat offenders
+# for 30 minutes. slsk-batchdl — the reference batch downloader — caps itself
+# at 34 searches per 220s (~1 per 6.5s) for exactly this reason. One search
+# per 10s stays under that ceiling with headroom for manual searches from the
+# slskd web UI, which share the same server connection but bypass this pacer.
+SEARCH_MIN_INTERVAL_SECS = float(os.environ.get("SLSKD_SEARCH_MIN_INTERVAL_SECS", "10"))
 
-async def search(query: str, timeout_secs: int = 20, response_limit: int = 200) -> list[dict]:
+# 429 from slskd's own API means search starts piled up locally. The observed
+# server-side drop window after a flood is ~90s, so back off in growing steps
+# before declaring the search impossible.
+_HTTP_429_BACKOFFS_SECS = (30.0, 60.0, 90.0)
+
+# N consecutive all-empty searches are treated as suspected server-side
+# throttling (the server drops flooded searches silently instead of erroring):
+# cool down once, re-run the query, and only believe the emptiness if the
+# re-check is empty too — then trust further empties for the verified window
+# instead of cooling down over and over.
+_ZERO_BURST_THRESHOLD = 3
+_ZERO_BURST_COOLDOWN_SECS = 90.0
+_ZERO_VERIFIED_WINDOW_SECS = 300.0
+
+_search_lock = asyncio.Lock()
+_next_search_start = 0.0    # monotonic; no search may start before this
+_zero_streak = 0            # consecutive searches that returned no responses
+_zero_verified_until = 0.0  # monotonic; while in the window, empties are trusted
+
+
+def _defer_search(delay_secs: float) -> None:
+    """Push the earliest allowed start of the next search further out."""
+    global _next_search_start
+    _next_search_start = max(_next_search_start, time.monotonic() + delay_secs)
+
+
+async def _start_search(client, query: str, timeout_secs: int,
+                        response_limit: int) -> dict:
+    """Start a search on slskd, retrying 429s through the backoff ladder.
+    Must be called with ``_search_lock`` held."""
+    for attempt, next_backoff in enumerate((*_HTTP_429_BACKOFFS_SECS, None)):
+        wait = _next_search_start - time.monotonic()
+        if wait > 0:
+            await asyncio.sleep(wait)
+        try:
+            state = await asyncio.to_thread(
+                client.searches.search_text,
+                searchText=query,
+                searchTimeout=timeout_secs * 1000,
+                responseLimit=response_limit,
+            )
+        except requests.HTTPError as e:
+            status = getattr(e.response, "status_code", None)
+            if status != 429:
+                raise SearchError(f"slskd search API error: {e}") from e
+            if next_backoff is None:
+                raise SearchThrottledError(
+                    "slskd kept rate-limiting searches (429) through "
+                    f"{len(_HTTP_429_BACKOFFS_SECS)} backoff retries"
+                ) from e
+            logger.warning("slskd returned 429 for search %r (attempt %d) — "
+                           "backing off %.0fs", query, attempt + 1, next_backoff)
+            _defer_search(next_backoff)
+            continue
+        except Exception as e:
+            raise SearchError(f"failed to start slskd search: {e}") from e
+        _defer_search(SEARCH_MIN_INTERVAL_SECS)
+        return state
+    raise AssertionError("unreachable")  # loop always returns or raises
+
+
+async def search(query: str, timeout_secs: int = 20, response_limit: int = 200,
+                 _throttle_probe: bool = False) -> list[dict]:
     """Run a slskd search and return the raw peer responses.
+
+    Contract: an empty list means the search *ran* and nobody had a match.
+    A search that couldn't run raises ``SearchError`` (``SearchThrottledError``
+    when rate-limiting persisted through backoff). When a burst of consecutive
+    searches comes back empty, the Soulseek server is probably silently
+    dropping our queries — cool down and re-run the query once before
+    believing the emptiness (``_throttle_probe`` marks that internal retry).
+    """
+    global _zero_streak, _zero_verified_until
+
+    responses = await _search_once(query, timeout_secs, response_limit)
+    if responses:
+        _zero_streak = 0
+        return responses
+
+    _zero_streak += 1
+    if _throttle_probe or _zero_streak < _ZERO_BURST_THRESHOLD \
+            or time.monotonic() < _zero_verified_until:
+        return responses
+
+    logger.warning(
+        "%d consecutive empty searches — suspecting server-side search "
+        "throttling; cooling down %.0fs before re-checking %r",
+        _zero_streak, _ZERO_BURST_COOLDOWN_SECS, query,
+    )
+    _defer_search(_ZERO_BURST_COOLDOWN_SECS)
+    retry = await search(query, timeout_secs, response_limit, _throttle_probe=True)
+    if retry:
+        logger.warning("Throttling confirmed: %r found %d peer(s) after the "
+                       "cooldown", query, len(retry))
+    else:
+        _zero_verified_until = time.monotonic() + _ZERO_VERIFIED_WINDOW_SECS
+        logger.info("Re-check still empty — trusting empty results for the "
+                    "next %.0fs", _ZERO_VERIFIED_WINDOW_SECS)
+    return retry
+
+
+async def _search_once(query: str, timeout_secs: int, response_limit: int) -> list[dict]:
+    """One serialized, paced search. Holds the global search lock from the
+    pacing wait through the response read, so searches never overlap and
+    never start closer than ``SEARCH_MIN_INTERVAL_SECS`` apart.
 
     Lifecycle (empirically verified against the slskd/slskd:latest image):
 
@@ -287,66 +414,58 @@ async def search(query: str, timeout_secs: int = 20, response_limit: int = 200) 
     """
     client = _get_client()
 
-    try:
-        state = await asyncio.to_thread(
-            client.searches.search_text,
-            searchText=query,
-            searchTimeout=timeout_secs * 1000,
-            responseLimit=response_limit,
-        )
-    except Exception as e:
-        logger.warning("Failed to start slskd search '%s': %s", query, e)
-        return []
+    async with _search_lock:
+        state = await _start_search(client, query, timeout_secs, response_limit)
 
-    search_id = state["id"]
-    logger.info("Search started: id=%s query=%r", search_id, query)
+        search_id = state["id"]
+        logger.info("Search started: id=%s query=%r", search_id, query)
 
-    # Poll for stability or natural completion.
-    start = time.monotonic()
-    last_count = -1
-    stable_since: float | None = None
-    file_count = 0
-    while time.monotonic() - start < timeout_secs:
-        await asyncio.sleep(0.5)
-        try:
-            state = await asyncio.to_thread(client.searches.state, id=search_id)
-        except Exception:
-            continue
-        file_count = state.get("fileCount", 0)
-        if state.get("isComplete"):
-            break
-        if file_count != last_count:
-            last_count = file_count
-            stable_since = time.monotonic()
-        elif stable_since and (time.monotonic() - stable_since) > 6 and file_count > 0:
-            break
+        # Poll for stability or natural completion.
+        start = time.monotonic()
+        last_count = -1
+        stable_since: float | None = None
+        file_count = 0
+        while time.monotonic() - start < timeout_secs:
+            await asyncio.sleep(0.5)
+            try:
+                state = await asyncio.to_thread(client.searches.state, id=search_id)
+            except Exception:
+                continue
+            file_count = state.get("fileCount", 0)
+            if state.get("isComplete"):
+                break
+            if file_count != last_count:
+                last_count = file_count
+                stable_since = time.monotonic()
+            elif stable_since and (time.monotonic() - stable_since) > 6 and file_count > 0:
+                break
 
-    # Force a flush so /responses populates. stop() is the only API that
-    # does this for our slskd version.
-    with contextlib.suppress(Exception):
-        await asyncio.to_thread(client.searches.stop, id=search_id)
-    # Brief wait for slskd to mark complete and persist responses.
-    for _ in range(8):
-        await asyncio.sleep(0.25)
-        try:
-            state = await asyncio.to_thread(client.searches.state, id=search_id)
-        except Exception:
-            break
-        if state.get("isComplete"):
-            break
+        # Force a flush so /responses populates. stop() is the only API that
+        # does this for our slskd version.
+        with contextlib.suppress(Exception):
+            await asyncio.to_thread(client.searches.stop, id=search_id)
+        # Brief wait for slskd to mark complete and persist responses.
+        for _ in range(8):
+            await asyncio.sleep(0.25)
+            try:
+                state = await asyncio.to_thread(client.searches.state, id=search_id)
+            except Exception:
+                break
+            if state.get("isComplete"):
+                break
 
-    responses: list[dict] = []
-    with contextlib.suppress(Exception):
-        responses = await asyncio.to_thread(
-            client.searches.search_responses, id=search_id
-        ) or []
+        responses: list[dict] = []
+        with contextlib.suppress(Exception):
+            responses = await asyncio.to_thread(
+                client.searches.search_responses, id=search_id
+            ) or []
 
-    logger.info("Search done: %d files / %d peers", file_count, len(responses))
+        logger.info("Search done: %d files / %d peers", file_count, len(responses))
 
-    with contextlib.suppress(Exception):
-        await asyncio.to_thread(client.searches.delete, id=search_id)
+        with contextlib.suppress(Exception):
+            await asyncio.to_thread(client.searches.delete, id=search_id)
 
-    return responses
+        return responses
 
 
 # --- parse -------------------------------------------------------------------
