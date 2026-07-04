@@ -42,17 +42,18 @@ _SHAZAM_SONG_RE = re.compile(r"shazam\.com/(?:[a-z]{2}(?:-[a-z]{2})?/)?song/(\d+
 _SHAZAM_TRACK_RE = re.compile(r"shazam\.com/(?:[a-z]{2}(?:-[a-z]{2})?/)?track/(\d+)")
 _SHAZAM_DISCOVERY_URL = "https://www.shazam.com/discovery/v5/en-US/US/web/-/track"
 
-# Tidal og:title format: "Artist - Album"  (sometimes "Artist & Co - Album")
-_TIDAL_OG_TITLE_RE = re.compile(
-    r'<meta\s+property=["\']og:title["\']\s+content=["\']([^"\']+)["\']',
-    re.IGNORECASE,
-)
-# Spotify og:title: "Album - Album by Artist | Spotify"  /
-#                   "Track - song and lyrics by Artist | Spotify"
-_SPOTIFY_OG_TITLE_RE = re.compile(
-    r'<meta\s+property=["\']og:title["\']\s+content=["\']([^"\']+)["\']',
-    re.IGNORECASE,
-)
+# og:title formats we parse:
+#   Tidal   — "Artist - Album"  (sometimes "Artist & Co - Album")
+#   Spotify — "Album - Album by Artist | Spotify" /
+#             "Track - song and lyrics by Artist | Spotify"
+def _og_meta(html: str, prop: str) -> str | None:
+    """Return the ``content`` of ``<meta property="og:{prop}" content="...">``,
+    or None. One helper for the og:title / og:description scrapes below."""
+    m = re.search(
+        rf'<meta\s+property=["\']og:{re.escape(prop)}["\']\s+content=["\']([^"\']+)["\']',
+        html, re.IGNORECASE,
+    )
+    return m.group(1) if m else None
 
 
 _BROWSER_UA = (
@@ -109,10 +110,10 @@ async def _resolve_tidal(url: str) -> tuple[str, str] | None:
     except Exception as e:
         logger.debug("Tidal scrape failed for %s: %s; falling through", url, e)
         return None
-    om = _TIDAL_OG_TITLE_RE.search(html)
-    if not om:
+    raw = _og_meta(html, "title")
+    if not raw:
         return None
-    raw = om.group(1).replace("&amp;", "&").strip()
+    raw = raw.replace("&amp;", "&").strip()
     if " - " not in raw:
         return None
     artist, _, title = raw.partition(" - ")
@@ -143,16 +144,14 @@ async def _resolve_spotify(url: str) -> tuple[str, str] | None:
         logger.warning("Spotify scrape failed: %s", e)
         return None
 
-    # og:description → "Artist · album · 2016 · 17 songs"
-    desc_m = re.search(
-        r'<meta\s+property=["\']og:description["\']\s+content=["\']([^"\']+)["\']',
-        html, re.IGNORECASE,
-    )
-    title_m = _SPOTIFY_OG_TITLE_RE.search(html)
-    if not title_m or not desc_m:
+    # og:title → "Blonde - Album by Frank Ocean | Spotify"
+    # og:description → "Frank Ocean · album · 2016 · 17 songs"
+    title_full = _og_meta(html, "title")
+    desc = _og_meta(html, "description")
+    if not title_full or not desc:
         return None
-    title_full = title_m.group(1).strip()
-    desc = desc_m.group(1).strip()
+    title_full = title_full.strip()
+    desc = desc.strip()
     # Title parsing: "Blonde - Album by Frank Ocean | Spotify"
     #                "Pyramids - song and lyrics by Frank Ocean | Spotify"
     title_match = re.match(

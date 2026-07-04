@@ -34,7 +34,7 @@ from library.tagger import (
 from soulseek import client as slskd
 from soulseek.client import SearchResult
 from soulseek.matcher import find_album, find_track, find_tracks_concurrent
-from soulseek.scorer import ScoredTrack, ScoredFolder
+from soulseek.scorer import ScoredFolder
 
 logger = logging.getLogger(__name__)
 
@@ -137,26 +137,23 @@ async def _download_cover(cover_uuid: str, album_dir: str) -> bytes | None:
 
 
 def _move_into_library(src: str, dest: str) -> None:
-    """Atomic-ish move from slskd download dir to library album dir.
-    Writes to ``dest + .importing`` first so Navidrome's scanner doesn't pick
-    up a partially-written file.
+    """Move a downloaded file from slskd's staging dir into the library album
+    dir. Lands on ``dest + .importing`` first so Navidrome's scanner never sees
+    a partial file, then renames into place.
+
+    ``shutil.move`` renames when staging and library share a filesystem — they
+    do, both under the /media/music mount — so this is a metadata op, not a
+    multi-MB byte copy (the old code always copy2'd because src/dest dirs
+    differ). It falls back to copy+delete only across devices.
     """
     tmp = dest + ".importing"
     try:
-        if os.path.dirname(src) != os.path.dirname(dest):
-            shutil.copy2(src, tmp)
-        else:
-            shutil.move(src, tmp)
+        shutil.move(src, tmp)
         os.replace(tmp, dest)
         try:
             os.chmod(dest, 0o666)
         except OSError:
             pass
-        if os.path.exists(src) and os.path.abspath(src) != os.path.abspath(dest):
-            try:
-                os.remove(src)
-            except OSError:
-                pass
     except BaseException:
         if os.path.exists(tmp):
             try:
@@ -476,6 +473,13 @@ async def download_album(
     """Download an album. Returns
     ``{album_dir, downloaded, skipped, failed, total, format, with_lyrics}``.
     """
+    # Clear terminal rows from prior sessions/albums before enqueueing. slskd
+    # never prunes history on its own; a stale 'Completed, Errored' row with the
+    # same filename would otherwise resolve this album's wait_for_files instantly
+    # and wrongly. Downloads are serialised (bot holds a Semaphore(1)), so this
+    # can't race a concurrent transfer.
+    await slskd.remove_completed_downloads()
+
     if album is None:
         album = await fetch_album(album_id)
         await enrich_genres(album)

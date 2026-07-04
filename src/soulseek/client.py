@@ -107,8 +107,13 @@ def _get_client() -> slskd_api.SlskdClient:
         # but slskd-api's constructor requires *some* non-empty value to pick
         # an auth path. Any string works — slskd lets the request through.
         api_key = os.environ.get("SLSKD_API_KEY") or "anonymous"
-        _client = slskd_api.SlskdClient(host, api_key)
-        logger.info("slskd client initialized (host=%s)", host)
+        # Without a timeout, slskd-api's requests session waits forever — if
+        # slskd restarts or a connection dies silently, the to_thread worker
+        # running the call blocks permanently, and enough of those exhaust the
+        # default thread pool and wedge every other to_thread caller.
+        timeout = float(os.environ.get("SLSKD_API_TIMEOUT_SECS", "30"))
+        _client = slskd_api.SlskdClient(host, api_key, timeout=timeout)
+        logger.info("slskd client initialized (host=%s, timeout=%ss)", host, timeout)
     return _client
 
 
@@ -346,9 +351,6 @@ async def search(query: str, timeout_secs: int = 20, response_limit: int = 200) 
 
 # --- parse -------------------------------------------------------------------
 
-_DURATION_FROM_NAME = re.compile(r"\b(\d{1,2}):(\d{2})\b")
-
-
 def _flatten(responses: list[dict], lossless_only: bool = True) -> list[SearchResult]:
     """Convert slskd peer responses into flat SearchResult list, audio-extensions only."""
     allowed = LOSSLESS_EXTS if lossless_only else AUDIO_EXTS
@@ -510,13 +512,42 @@ async def wait_for_files(
 
 
 async def cancel_download(username: str, filename: str, remove: bool = True) -> None:
-    """Cancel a queued/in-progress download and optionally remove it from history."""
+    """Cancel a queued/in-progress download and optionally remove it from history.
+
+    slskd's cancel endpoint keys on the transfer GUID, not the filename (the id
+    is interpolated straight into the path). Passing the filename always 404s,
+    which used to be swallowed silently — so stalled transfers were never
+    actually cancelled and kept eating bandwidth + staging disk. Resolve the
+    live transfer's id first, and surface a real failure.
+    """
     client = _get_client()
-    with contextlib.suppress(Exception):
+    transfer_id = None
+    for row in await get_downloads(username):
+        if row.get("filename") == filename:
+            transfer_id = row.get("id")
+            break
+    if not transfer_id:
+        logger.debug("cancel_download: no live transfer for %s / %s", username, filename)
+        return
+    try:
         await asyncio.to_thread(
             client.transfers.cancel_download,
-            username=username, id=filename, remove=remove,
+            username=username, id=transfer_id, remove=remove,
         )
+    except Exception as e:
+        logger.warning("cancel_download failed for %s (%s): %s", filename, transfer_id, e)
+
+
+async def remove_completed_downloads() -> None:
+    """Prune terminal rows from slskd's download history. Left unchecked they
+    accumulate forever and can shadow a re-enqueue of the same filename in
+    wait_for_files (a stale 'Completed, Errored' row resolves the new wait
+    instantly and wrongly). Call after each album."""
+    client = _get_client()
+    try:
+        await asyncio.to_thread(client.transfers.remove_completed_downloads)
+    except Exception as e:
+        logger.debug("remove_completed_downloads failed: %s", e)
 
 
 # --- file location -----------------------------------------------------------
