@@ -1,10 +1,15 @@
 """Score and rank slskd search results against a reference track or album.
 
-Per-track ladder (max ≈ 100):
-   40 — duration match (graduated tolerance)
-   10 — quality (flat reward for any lossless format)
-   25 — source reliability (free slot, upload speed, queue length)
-   15 — filename relevance (artist/title word overlap)
+Per-track scoring is two-axis (see ScoredTrack):
+   match  (0..55) — identity: duration match (40, graduated tolerance) +
+                    name relevance (15, artist/title word overlap across the
+                    peer path), × version penalty. Thresholds
+                    (soulseek.selection) act on this axis only.
+   fetch (−6..35) — desirability: reliability (25: free slot, upload speed,
+                    queue length) + quality (10 flat for lossless within the
+                    cap, 5 lossy). Orders copies, never gates a match.
+Ranking is (match, fetch); ``score`` keeps the legacy blend of both for
+logs and the query-ladder early exit.
 
 For album-folder matching: coverage 50 + quality 10 + reliability 25 +
 filename 15 = 100, then × missing/version penalties.
@@ -52,7 +57,13 @@ REMASTER_KEYWORDS = ("remaster", "remastered")
 @dataclass
 class ScoredTrack:
     result: SearchResult
-    score: float
+    score: float               # legacy blend of both axes (logs + ladder exit)
+    # Identity axis (0..55): duration + name evidence, ×version penalty —
+    # "is this the right recording?" Thresholds act on this axis only.
+    match_score: float = 0.0
+    # Desirability axis (−6..35): reliability + quality — "which copy
+    # first?" Orders candidates, never gates a match.
+    fetch_score: float = 0.0
     # Every scored copy of this recording (identical basename on other
     # peers), best first — result is sources[0]. Transfer retries walk these
     # before falling to a different recording.
@@ -245,7 +256,12 @@ def score_track_results(
             if d_score is None:
                 continue
         else:
-            d_score = 12.0  # neutral when peer didn't report length
+            # Unreported length is weakly consistent with the target (80% of
+            # a perfect match), not punished — name + artist evidence must
+            # still carry the identity, but it *can* carry it: a full name
+            # match reaches confident territory instead of being capped
+            # below every threshold forever.
+            d_score = 32.0
 
         # Hard anti-falsepositive: drop candidates where the artist name
         # appears nowhere in the peer's directory or filename. A title like
@@ -258,15 +274,23 @@ def score_track_results(
         if _exceeds_cap(r.bit_depth, r.sample_rate):
             continue
 
-        score = d_score
-        score += _quality_score_for_result(r)
-        score += _reliability_score(r.has_free_slot, r.upload_speed, r.queue_length)
-        score += _path_relevance(dir_lower, fname_lower, track_artist, track_title)
-        score *= _version_penalty(fname_lower, title_lower)
+        name = _path_relevance(dir_lower, fname_lower, track_artist, track_title)
+        vp = _version_penalty(fname_lower, title_lower)
+        fetch = _quality_score_for_result(r) \
+            + _reliability_score(r.has_free_slot, r.upload_speed, r.queue_length)
 
-        out.append(ScoredTrack(result=r, score=round(score, 2)))
+        out.append(ScoredTrack(
+            result=r,
+            score=round((d_score + name + fetch) * vp, 2),
+            match_score=round((d_score + name) * vp, 2),
+            fetch_score=round(fetch, 2),
+        ))
 
-    out.sort(key=lambda x: x.score, reverse=True)
+    # Identity first, peer desirability second: a correct file from a slow
+    # peer outranks a wrong-ish file from a fast one — retries and
+    # same-recording sources deal with slow peers, nothing deals with
+    # having downloaded the wrong recording.
+    out.sort(key=lambda x: (x.match_score, x.fetch_score), reverse=True)
 
     # One ranking entry per recording; other peers' copies stay reachable
     # as sources for transfer retries.

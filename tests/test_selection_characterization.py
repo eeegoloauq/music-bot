@@ -10,7 +10,7 @@ failure mode.
 import pytest
 
 from soulseek import client as slskd_client
-from soulseek import matcher, scorer
+from soulseek import matcher, scorer, selection
 from soulseek.client import PeerFolder
 from soulseek.downloader import _modal_quality, _pick_quality_locked
 from soulseek.matcher import _is_acceptable_lossy
@@ -60,6 +60,8 @@ def _score_one(filename, **kw):
 def test_perfect_candidate_scores_90():
     scored = _score_one("Music\\Artist - Album\\01 - Song.flac")
     assert scored[0].score == 90.0  # 40 duration + 10 quality + 25 reliability + 15 name
+    assert scored[0].match_score == 55.0  # identity axis: duration 40 + name 15
+    assert scored[0].fetch_score == 35.0  # desirability axis: reliability 25 + quality 10
 
 
 def test_version_penalties():
@@ -102,12 +104,36 @@ def test_same_recording_groups_across_peers():
     assert [r.username for r in scored[0].sources] == ["fastpeer", "slowpeer"]
 
 
-def test_f3_missing_duration_caps_below_auto():
-    """F3: a peer that omits length can never reach TRACK_AUTO_THRESHOLD —
-    12 neutral duration + 10 + 25 + 15 = 62 < 70, however exact the name."""
+def test_missing_duration_carried_by_name_evidence():
+    """F3 (fixed): unknown length is weakly consistent, not punished — a full
+    name match reaches confident territory on the match axis instead of
+    being capped below every threshold forever."""
     scored = _score_one("Music\\Artist - Album\\01 - Song.flac", length=None)
-    assert scored[0].score == 62.0
-    assert scored[0].score < matcher.TRACK_AUTO_THRESHOLD
+    assert scored[0].match_score == 47.0  # 32 unknown-duration credit + 15 name
+    assert scored[0].match_score >= selection.SEARCH_SATISFIED_MATCH
+
+
+def test_correct_file_from_slow_peer_outranks_wrongish_from_fast():
+    """F3 (fixed): identity outranks peer desirability — the exact file from
+    a queued slow peer beats a 6s-off file from an ideal peer (the blended
+    score used to rank them the other way around)."""
+    right_slow = make_result("slowpeer", "M\\Artist - Album\\01 - Song.flac",
+                             has_free_slot=False, upload_speed=0, queue_length=10)
+    close_fast = make_result("fastpeer", "M\\Artist - Album\\05 - Song.flac",
+                             length=206, upload_speed=10_000_000)
+    scored = score_track_results([right_slow, close_fast], track_artist="Artist",
+                                 track_title="Song", track_duration=200)
+    assert [s.result.username for s in scored] == ["slowpeer", "fastpeer"]
+
+
+async def test_version_mismatch_stays_below_the_identity_floor():
+    """The floor keeps version-mismatched files non-downloadable, matching
+    the old blended floor's one virtue: an exact-duration live take scores
+    (40 + 15) × 0.3 = 16.5 < MATCH_FLOOR."""
+    live = make_result("peer", "Music\\Artist - Album\\01 - Song (Live).flac")
+    track = {"artist": "Artist", "title": "Song", "duration": 200}
+    auto, alts = await matcher.find_track(track, preseed=[live], allow_search=False)
+    assert auto is None and alts == []
 
 
 # --- folder matching --------------------------------------------------------

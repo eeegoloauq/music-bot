@@ -17,6 +17,34 @@ deliberately imports nothing from the scorer (candidates are duck-typed
 
 from soulseek.client import SearchResult
 
+# Identity floor (match axis, 0..55): below this the file isn't credibly the
+# same recording, whatever the peer looks like. 20 keeps everything with real
+# name+duration evidence (unknown duration + half a name = 39.5) while
+# retiring what the old blended floor let fast peers sneak in: version
+# mismatches (an exact-duration live take = 16.5) and ≥6s-off files with no
+# title overlap.
+MATCH_FLOOR = 20.0
+
+# Stop escalating the query ladder once the top candidate's identity is this
+# confident: a perfect-duration half-name hit (47.5) or a full-name
+# unknown-duration hit (47) both qualify. More searching can only find
+# faster copies, and same-recording sources already handle slow peers.
+SEARCH_SATISFIED_MATCH = 45.0
+
+# Legacy blended exit, kept alongside the match-axis exit so ladder exits
+# are a strict superset of the old behavior — search volume (10s+ per query
+# under pacing) can only decrease. Candidates here are slightly-off-duration
+# or partial-name hits from ideal peers; probably right, instantly
+# downloadable, not worth another 20s of searching. Removable after
+# observation.
+SEARCH_SATISFIED_BLEND = 70.0
+
+
+def search_satisfied(best) -> bool:
+    """True when the top candidate is good enough to stop searching for."""
+    return (best.match_score >= SEARCH_SATISFIED_MATCH
+            or best.score >= SEARCH_SATISFIED_BLEND)
+
 
 def group_copies(scored: list) -> list:
     """Collapse a best-first ScoredTrack list to one entry per recording.

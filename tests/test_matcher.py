@@ -76,9 +76,8 @@ async def test_find_track_surfaces_throttling_not_no_match(monkeypatch):
 
 async def test_pool_only_mode_never_searches(monkeypatch):
     forbid_search(monkeypatch)
-    # Mediocre candidate (queued peer, no free slot) — lands between the
-    # PICK and AUTO thresholds, so a confident tier-0 exit can't explain
-    # it being returned without a search.
+    # A queued no-slot peer holding the right file: identity-confident on
+    # the match axis, so pool-only matching returns it without any search.
     r = make_result("slowpeer", "Music\\Artist - Album\\01 - Song.flac",
                     has_free_slot=False, upload_speed=0, queue_length=10)
 
