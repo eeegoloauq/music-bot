@@ -24,26 +24,9 @@ from soulseek.scorer import (
     score_track_results,
     score_folder_results,
 )
-from soulseek.selection import MATCH_FLOOR, search_satisfied
+from soulseek.selection import MATCH_FLOOR, is_acceptable_lossy, search_satisfied
 
 logger = logging.getLogger(__name__)
-
-# Mp3-fallback gates. Triggered only when accept_lossy=True (after a FLAC
-# search came up empty). Lower bound on mp3 quality keeps us from saving
-# 128kbps junk to disk; m4a is allowed without a bitrate floor because it
-# might be ALAC (lossless) — we can't tell without parsing the stream.
-# slskd passes through the Soulseek protocol's bitrate attribute, which is
-# in kbps (320 for CBR mp3, ~245 for V0) — verified against the live daemon.
-_LOSSY_FALLBACK_EXTS = {"mp3", "m4a"}
-MP3_MIN_KBPS = 256
-
-
-def _is_acceptable_lossy(r) -> bool:
-    if r.extension not in _LOSSY_FALLBACK_EXTS:
-        return False
-    if r.extension == "mp3" and (r.bit_rate or 0) < MP3_MIN_KBPS:
-        return False
-    return True
 
 
 def _ascii_fold(s: str) -> str:
@@ -322,7 +305,7 @@ async def find_track(
 
     def _absorb(results: list[SearchResult]) -> None:
         for r in results:
-            if accept_lossy and not _is_acceptable_lossy(r):
+            if accept_lossy and not is_acceptable_lossy(r):
                 continue
             key = (r.username, r.filename.lower())
             if key in seen_files:

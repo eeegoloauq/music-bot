@@ -1,8 +1,15 @@
-"""Unit behavior of ``soulseek.selection``: recording grouping and the
-download order it produces."""
+"""Unit behavior of ``soulseek.selection``: recording grouping, the download
+order it produces, and the folder-phase plan."""
 
-from soulseek.scorer import ScoredTrack
-from soulseek.selection import flatten_candidates, group_copies
+from soulseek.client import PeerFolder
+from soulseek.scorer import ScoredFolder, ScoredTrack
+from soulseek.selection import (
+    FOLDER_COVERAGE_MIN,
+    flatten_candidates,
+    group_copies,
+    order_for_download,
+    plan_folder_phase,
+)
 
 from conftest import make_result
 
@@ -49,3 +56,42 @@ def test_flatten_falls_back_to_result_when_ungrouped():
     # ScoredTracks that never went through group_copies have empty sources.
     st = _scored("a", "M\\X\\01.flac", 60.0)
     assert flatten_candidates(st, []) == [st.result]
+
+
+def test_order_for_download_promotes_quality_locked_pick():
+    hires = _scored("a", "M\\X\\01 - Song.flac", 90.0)
+    hires.result.bit_depth, hires.result.sample_rate = 24, 96_000
+    cd = _scored("b", "M\\Y\\01 - Song (cd).flac", 80.0)
+
+    ordered = order_for_download(hires, [cd], quality_lock=(16, 44100))
+    assert ordered == [cd.result, hires.result]  # lock match first, rest kept
+
+    assert order_for_download(hires, [cd]) == [hires.result, cd.result]
+    assert order_for_download(None, [], quality_lock=(16, 44100)) == []
+
+
+def _scored_folder(missing_count, n_matched):
+    files = [make_result("peer", f"M\\Artist - Album\\{i:02d}.flac")
+             for i in range(n_matched)]
+    folder = PeerFolder(username="peer", directory="M\\Artist - Album",
+                        files=files)
+    return ScoredFolder(folder=folder, score=80.0, matched_files=files,
+                        missing_count=missing_count)
+
+
+def test_plan_folder_phase_coverage_boundary():
+    complete = _scored_folder(missing_count=0, n_matched=4)
+    alt = _scored_folder(missing_count=1, n_matched=3)
+
+    plan = plan_folder_phase(complete, [alt], n_tracks=4)
+    assert plan is not None
+    assert plan.chain == [complete, alt]
+    assert plan.quality_lock == (16, 44100)  # modal quality of matched files
+
+    # exactly at the boundary (3/4 = FOLDER_COVERAGE_MIN) still plans
+    assert FOLDER_COVERAGE_MIN == 0.75
+    assert plan_folder_phase(_scored_folder(1, 3), [], n_tracks=4) is not None
+    # below it: straight to per-track
+    assert plan_folder_phase(_scored_folder(2, 2), [], n_tracks=4) is None
+    assert plan_folder_phase(None, [], n_tracks=4) is None
+    assert plan_folder_phase(complete, [], n_tracks=0) is None

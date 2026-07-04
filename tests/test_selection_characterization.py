@@ -12,8 +12,7 @@ import pytest
 from soulseek import client as slskd_client
 from soulseek import matcher, scorer, selection
 from soulseek.client import PeerFolder
-from soulseek.downloader import _modal_quality, _pick_quality_locked
-from soulseek.matcher import _is_acceptable_lossy
+from soulseek.selection import is_acceptable_lossy, modal_quality, pick_quality_locked
 from soulseek.scorer import (
     _duration_score,
     _match_folder_to_tracks,
@@ -260,13 +259,13 @@ def test_mp3_floor_is_in_protocol_units():
     """F5 (fixed): slskd reports bitRate in kbps (320 for CBR mp3) and the
     floor now matches — real-world 320/256 mp3s pass, 128 and unreported
     bitrates don't."""
-    assert _is_acceptable_lossy(make_result("peer", "M\\A\\01.mp3", bit_rate=320))
-    assert _is_acceptable_lossy(make_result("peer", "M\\A\\01.mp3", bit_rate=256))
-    assert not _is_acceptable_lossy(make_result("peer", "M\\A\\01.mp3", bit_rate=128))
-    assert not _is_acceptable_lossy(make_result("peer", "M\\A\\01.mp3", bit_rate=None))
+    assert is_acceptable_lossy(make_result("peer", "M\\A\\01.mp3", bit_rate=320))
+    assert is_acceptable_lossy(make_result("peer", "M\\A\\01.mp3", bit_rate=256))
+    assert not is_acceptable_lossy(make_result("peer", "M\\A\\01.mp3", bit_rate=128))
+    assert not is_acceptable_lossy(make_result("peer", "M\\A\\01.mp3", bit_rate=None))
     # m4a has no floor (might be ALAC); flac is never "acceptable lossy"
-    assert _is_acceptable_lossy(make_result("peer", "M\\A\\01.m4a"))
-    assert not _is_acceptable_lossy(make_result("peer", "M\\A\\01.flac"))
+    assert is_acceptable_lossy(make_result("peer", "M\\A\\01.m4a"))
+    assert not is_acceptable_lossy(make_result("peer", "M\\A\\01.flac"))
 
 
 # --- downloader quality lock ------------------------------------------------
@@ -274,13 +273,13 @@ def test_mp3_floor_is_in_protocol_units():
 def test_modal_quality_and_lock():
     cd = [make_result("p", f"M\\A\\{i}.flac") for i in range(2)]
     hires = make_result("p", "M\\A\\3.flac", bit_depth=24, sample_rate=96_000)
-    assert _modal_quality(cd + [hires]) == (16, 44100)
+    assert modal_quality(cd + [hires]) == (16, 44100)
     unreported = make_result("p", "M\\A\\1.flac", bit_depth=None, sample_rate=None)
-    assert _modal_quality([unreported]) == (None, None)
+    assert modal_quality([unreported]) == (None, None)
 
-    assert _pick_quality_locked([hires, cd[0]], (16, 44100)) is cd[0]
-    assert _pick_quality_locked([hires], (16, 44100)) is hires  # fallback: first pick
-    assert _pick_quality_locked([hires, cd[0]], None) is hires
+    assert pick_quality_locked([hires, cd[0]], (16, 44100)) is cd[0]
+    assert pick_quality_locked([hires], (16, 44100)) is hires  # fallback: first pick
+    assert pick_quality_locked([hires, cd[0]], None) is hires
 
 
 # --- pool assembly ----------------------------------------------------------
