@@ -160,17 +160,40 @@ def test_matched_files_stay_parallel_to_track_list():
     assert matched[0] is not None and matched[1] is None and matched[2] is not None
 
 
-def test_f4_closer_duration_beats_exact_title():
-    """F4: assignment is duration-first; title overlap only breaks exact
-    ties — so two similar-length tracks swap files."""
+def test_exact_title_beats_small_duration_edge():
+    """F4 (fixed): assignment scores (duration, title, track number) jointly
+    — an exact title outweighs a 2-second duration edge, so similar-length
+    tracks no longer swap files."""
     folder = _folder("peer", [
         make_result("peer", "M\\A\\01 - Intro.flac", length=102),
         make_result("peer", "M\\A\\02 - Song.flac", length=100),
     ])
     matched, missing = _match_folder_to_tracks(folder, [100, 102], ["Intro", "Song"])
     assert missing == 0
-    assert matched[0].basename == "02 - Song.flac"   # "Intro" got the Song file
-    assert matched[1].basename == "01 - Intro.flac"  # and vice versa
+    assert matched[0].basename == "01 - Intro.flac"
+    assert matched[1].basename == "02 - Song.flac"
+
+
+def test_duration_still_dominates_weak_title_claims():
+    # A title hit is worth ~3s of duration edge, not unlimited: a 5s-off
+    # exact-title file loses to a spot-on duration with no title overlap.
+    folder = _folder("peer", [
+        make_result("peer", "M\\A\\Interlude.flac", length=200),
+        make_result("peer", "M\\A\\Song.flac", length=205),
+    ])
+    matched, _ = _match_folder_to_tracks(folder, [200], ["Song"])
+    assert matched[0].basename == "Interlude.flac"
+
+
+def test_folder_artist_gate():
+    """F4 (fixed): folders face the same artist gate as single tracks — a
+    folder whose path and file names never mention the artist is out,
+    however well the durations line up."""
+    unrelated = _folder("peer", [
+        make_result("peer", "Sounds\\Nature Vol 2\\01 - One.flac", length=200),
+        make_result("peer", "Sounds\\Nature Vol 2\\02 - Two.flac", length=210),
+    ], has_free_slot=True)
+    assert score_folder_results([unrelated], **ALBUM_KW) == []
 
 
 def test_title_breaks_exact_duration_ties():
