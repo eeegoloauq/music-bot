@@ -35,7 +35,12 @@ from soulseek import client as slskd
 from soulseek.client import SearchResult
 from soulseek.matcher import find_album, find_track
 from soulseek.scorer import ScoredFolder
-from soulseek.selection import flatten_candidates
+from soulseek.selection import (
+    PEER_ABANDON_K,
+    order_for_download,
+    plan_folder_phase,
+    quality_label,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -61,59 +66,6 @@ class PeerTransferError(Exception):
 
 
 # --- helpers ---------------------------------------------------------------
-
-def _modal_quality(matched_files) -> tuple[int | None, int | None]:
-    """Pick the dominant (bit_depth, sample_rate) across a folder's matched
-    files, ignoring None positions and unreported quality. Used as the
-    quality-lock target so per-track gap-fill stays uniform with the folder."""
-    counts: dict[tuple[int | None, int | None], int] = {}
-    for f in matched_files or []:
-        if f is None:
-            continue
-        key = (f.bit_depth, f.sample_rate)
-        if key == (None, None):
-            continue
-        counts[key] = counts.get(key, 0) + 1
-    if not counts:
-        return (None, None)
-    return max(counts.items(), key=lambda kv: kv[1])[0]
-
-
-def _pick_quality_locked(picks, quality_lock):
-    """From a candidate list, return the first one matching the (bd, sr) lock.
-    Falls back to the first candidate if none match — better a mismatched
-    track than a missing one. Quality-lock with None components matches
-    anything for that axis."""
-    if not picks:
-        return None
-    if not quality_lock or quality_lock == (None, None):
-        return picks[0]
-    target_bd, target_sr = quality_lock
-    for p in picks:
-        if (target_bd is None or p.bit_depth == target_bd) and \
-           (target_sr is None or p.sample_rate == target_sr):
-            return p
-    chosen = picks[0]
-    logger.warning(
-        "Quality-lock %s not satisfied; falling back to %s/%s — album may end up mixed-quality",
-        _quality_label(quality_lock),
-        f"{chosen.bit_depth}-bit" if chosen.bit_depth else "?",
-        f"{chosen.sample_rate // 1000}kHz" if chosen.sample_rate else "?",
-    )
-    return chosen
-
-
-def _quality_label(qlock) -> str:
-    if not qlock:
-        return "any quality"
-    bd, sr = qlock
-    parts = []
-    if bd:
-        parts.append(f"{bd}-bit")
-    if sr:
-        parts.append(f"{sr // 1000}kHz")
-    return "/".join(parts) if parts else "any quality"
-
 
 async def _download_cover(cover_uuid: str, album_dir: str) -> bytes | None:
     if not cover_uuid:
@@ -390,7 +342,7 @@ async def find_lossy_candidates(track: dict, album_ctx: dict) -> list[SearchResu
     auto, alternatives = await find_track(
         track, album_artist=album_ctx.get("artist"), accept_lossy=True,
     )
-    return flatten_candidates(auto, alternatives)
+    return order_for_download(auto, alternatives)
 
 
 async def download_single_track(
@@ -439,7 +391,7 @@ async def download_single_track(
         auto, alternatives = await find_track(
             track, album_artist=album_ctx.get("artist"), accept_lossy=accept_lossy,
         )
-        candidates = flatten_candidates(auto, alternatives)
+        candidates = order_for_download(auto, alternatives)
 
     if not candidates:
         lyrics_task.cancel()
@@ -551,39 +503,25 @@ async def download_album(
     track_provenance: dict[str, str] = {}
     folder_match, folder_alternatives, album_pool = await find_album(album)
 
-    # Folder-match strategy
-    #   complete coverage (missing_count == 0): prefer it whole. Frankenstein
-    #     assemblies are strictly worse than a single peer.
-    #   partial coverage (≥75%): use what the folder covers, fill gaps
-    #     per-track. The per-track searches are filtered to match the
-    #     folder's modal bit-depth/sample-rate so the album stays uniform.
-    #   below 75%: skip folder, full per-track. The fallback's job is to
-    #     pick a coherent assembly from across peers.
-    PARTIAL_COVERAGE_MIN = 0.75
-    # K consecutive failures from one peer → that peer is systemically broken
-    # (their slskd queue / share index / DB). Abandon it, retry the rest from
-    # the next-best folder candidate. K=1 over-reacts to single transient
-    # rejections; K=3+ wastes minutes per dead peer. Stall-timeouts (peer
-    # accepts then never delivers) still cost SLSKD_DOWNLOAD_TIMEOUT * K
-    # before we give up — known limitation, separate fix.
-    PEER_ABANDON_K = 2
-
+    # Folder-vs-per-track policy (coverage thresholds, quality lock) lives in
+    # selection.plan_folder_phase; this function just executes the plan.
+    # Stall-timeouts (peer accepts then never delivers) still cost
+    # SLSKD_DOWNLOAD_TIMEOUT per attempt before abandonment — known
+    # limitation, separate fix.
     n_tracks = len(album["tracks"])
-    folder_chain: list[ScoredFolder] = []
-    quality_lock: tuple[int | None, int | None] | None = None
-    if folder_match:
-        coverage = (n_tracks - folder_match.missing_count) / n_tracks if n_tracks else 0
-        if coverage >= PARTIAL_COVERAGE_MIN:
-            folder_chain = [folder_match] + list(folder_alternatives or [])
-            quality_lock = _modal_quality(folder_match.matched_files)
-            label = "Album-folder match" if folder_match.missing_count == 0 \
-                else f"Partial-folder match (gap-fill {folder_match.missing_count}/{n_tracks})"
-            alt_note = f" (+{len(folder_alternatives)} fallback peers)" \
-                if folder_alternatives else ""
-            logger.info("%s: peer=%s score=%.1f covers %d/%d tracks @ %s%s",
-                        label, folder_match.folder.username, folder_match.score,
-                        n_tracks - folder_match.missing_count, n_tracks,
-                        _quality_label(quality_lock), alt_note)
+    plan = plan_folder_phase(folder_match, folder_alternatives, n_tracks)
+    folder_chain: list[ScoredFolder] = plan.chain if plan else []
+    quality_lock: tuple[int | None, int | None] | None = \
+        plan.quality_lock if plan else None
+    if plan:
+        label = "Album-folder match" if folder_match.missing_count == 0 \
+            else f"Partial-folder match (gap-fill {folder_match.missing_count}/{n_tracks})"
+        alt_note = f" (+{len(folder_alternatives)} fallback peers)" \
+            if folder_alternatives else ""
+        logger.info("%s: peer=%s score=%.1f covers %d/%d tracks @ %s%s",
+                    label, folder_match.folder.username, folder_match.score,
+                    n_tracks - folder_match.missing_count, n_tracks,
+                    quality_label(quality_lock), alt_note)
 
     # Prefetch lyrics in parallel; the per-track download awaits its own task.
     lyrics_tasks: dict[str, asyncio.Task] = {
@@ -736,14 +674,11 @@ async def download_album(
                     track, album_artist=album["artist"], preseed=album_pool,
                     allow_search=False,
                 )
-            picks = flatten_candidates(auto, alts)
-            chosen = _pick_quality_locked(picks, quality_lock) if picks else None
-            if chosen is None:
+            candidates = order_for_download(auto, alts, quality_lock)
+            if not candidates:
                 last_error.setdefault(track["id"],
                                       search_dead or "no Soulseek match")
                 continue
-            track_alts_local = [r for r in picks if r is not chosen]
-            candidates = [chosen] + track_alts_local
             used = await _attempt(i, track, candidates)
             if used is not None and quality_lock is None:
                 quality_lock = (used.bit_depth, used.sample_rate)
