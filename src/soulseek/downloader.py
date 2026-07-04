@@ -35,6 +35,7 @@ from soulseek import client as slskd
 from soulseek.client import SearchResult
 from soulseek.matcher import find_album, find_track
 from soulseek.scorer import ScoredFolder
+from soulseek.selection import flatten_candidates
 
 logger = logging.getLogger(__name__)
 
@@ -389,11 +390,7 @@ async def find_lossy_candidates(track: dict, album_ctx: dict) -> list[SearchResu
     auto, alternatives = await find_track(
         track, album_artist=album_ctx.get("artist"), accept_lossy=True,
     )
-    out: list[SearchResult] = []
-    if auto:
-        out.append(auto.result)
-    out.extend(a.result for a in alternatives)
-    return out
+    return flatten_candidates(auto, alternatives)
 
 
 async def download_single_track(
@@ -442,10 +439,7 @@ async def download_single_track(
         auto, alternatives = await find_track(
             track, album_artist=album_ctx.get("artist"), accept_lossy=accept_lossy,
         )
-        candidates = []
-        if auto:
-            candidates.append(auto.result)
-        candidates.extend(a.result for a in alternatives)
+        candidates = flatten_candidates(auto, alternatives)
 
     if not candidates:
         lyrics_task.cancel()
@@ -742,8 +736,7 @@ async def download_album(
                     track, album_artist=album["artist"], preseed=album_pool,
                     allow_search=False,
                 )
-            picks = [auto.result] if auto else []
-            picks += [a.result for a in alts if (auto is None or a is not auto)]
+            picks = flatten_candidates(auto, alts)
             chosen = _pick_quality_locked(picks, quality_lock) if picks else None
             if chosen is None:
                 last_error.setdefault(track["id"],

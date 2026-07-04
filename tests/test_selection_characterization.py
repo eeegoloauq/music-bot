@@ -87,9 +87,10 @@ def test_quality_cap_excludes_hires():
     assert within[0].score == 90.0
 
 
-def test_f1_basename_dedupe_hides_other_peers_copies():
-    """F1: dedupe keeps only the best-scored copy of a basename — the
-    same-file-other-peer entries that transfer retries need are dropped."""
+def test_same_recording_groups_across_peers():
+    """F1 (fixed): same-basename copies group instead of deduping away —
+    ranking still shows one entry, but other peers' copies stay reachable
+    in sources for transfer retries."""
     best = make_result("fastpeer", "Music\\Artist - Album\\01 - Song.flac",
                        upload_speed=10_000_000)
     spare = make_result("slowpeer", "Stash\\Artist - Album\\01 - Song.flac",
@@ -98,6 +99,7 @@ def test_f1_basename_dedupe_hides_other_peers_copies():
                                  track_title="Song", track_duration=200)
     assert len(scored) == 1
     assert scored[0].result.username == "fastpeer"
+    assert [r.username for r in scored[0].sources] == ["fastpeer", "slowpeer"]
 
 
 def test_f3_missing_duration_caps_below_auto():
