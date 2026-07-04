@@ -11,8 +11,19 @@ permissions:
   packages: write   # push the image to GHCR
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Run tests
+        run: |
+          uv sync --frozen
+          uv run --no-sync pytest -q
+
   release:
     runs-on: ubuntu-latest
+    needs: test
     steps:
       - uses: actions/checkout@v4
 
