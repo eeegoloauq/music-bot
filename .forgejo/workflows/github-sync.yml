@@ -25,6 +25,10 @@ jobs:
           echo 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > ~/.ssh/known_hosts
           export GIT_SSH_COMMAND="ssh -i ~/.ssh/gh_push -o UserKnownHostsFile=~/.ssh/known_hosts"
           git remote add github "$GH_REMOTE"
-          git push -qf github "HEAD:refs/heads/main"
-          git push -q github --tags
+          # Push only the ref that triggered the run — a blanket --tags
+          # would ship any stray non-release tag to the public mirror.
+          case "$GITHUB_REF" in
+            refs/heads/main) git push -qf github "HEAD:refs/heads/main" ;;
+            refs/tags/*)     git push -qf github "refs/tags/${GITHUB_REF_NAME}" ;;
+          esac
           echo "synced $GITHUB_REF"
