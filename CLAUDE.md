@@ -11,8 +11,10 @@ Telegram msg (bot.py)          URL detect, auth (ALLOWED_USERS), force-mode, dis
       deezer.py, client.py       api.deezer.com; one shared aiohttp session (_get_session)
   → soulseek/                  audio via slskd (Soulseek daemon, sibling container)
       client.py                  search / enqueue / monitor — sync slskd-api wrapped in to_thread
-      scorer.py                  100-pt: coverage 50, quality 10, reliability 25, filename 15
+      scorer.py                  two-axis: match (duration+name, ×version) / fetch (reliability+quality)
+      selection.py               all policy: thresholds, folder plan, quality lock, source-groups
       matcher.py, downloader.py  album-folder-first, per-track fallback, retry across peers
+      (docs/source-selection.md = full picture)
   → library/                   files.py = path sanitise + tag-based dedup; tagger.py = FLAC/M4A/MP3
   → navidrome.py               Subsonic scan trigger after writes
 ```
