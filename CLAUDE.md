@@ -1,79 +1,63 @@
 # CLAUDE.md
 
-High-level guidance for AI assistants and humans working in this repo.
+Telegram bot: paste a music link → it downloads the audio and drops tagged files into a Navidrome library.
 
-## Read First
-
-Before non-trivial changes:
-1. This file (you're here)
-2. `README.md`
-3. The module-level CLAUDE.md for whichever subsystem you're touching:
-   - `src/metadata/CLAUDE.md` — link resolution + Deezer metadata
-   - `src/soulseek/CLAUDE.md` — slskd peer search, scoring, downloads
-   - `src/library/CLAUDE.md` — file/tag helpers (path sanitisation, FLAC/M4A taggers)
-4. `.claude/rules/*.md` — deployment, tagging, downloads invariants
-5. `docs/ROADMAP.md` — explicit "not now, maybe later" list
-
-## What this is
-
-Telegram bot that ingests music links from supported platforms (Tidal, Spotify, Apple Music, Deezer, YouTube Music, SoundCloud, Shazam, etc.), resolves them to canonical album/track metadata via **Deezer's open API**, downloads the audio from **Soulseek peers via slskd**, tags files with the canonical metadata, and drops them into a local Navidrome library.
-
-## Architecture
+## Flow
 
 ```
-Telegram message
-  ↓
-src/bot.py            — URL detection, authorization (ALLOWED_USERS), dispatch
-  ↓
-src/metadata/         — link resolver + Deezer fetcher (no auth, no token)
-  resolver.py           Tidal/Spotify/Apple URL → platform-direct or Odesli → Deezer ID
-  deezer.py             api.deezer.com → album/track JSON
-  api.py                exposed as `metadata.fetch_album / fetch_lyrics / search / ...`
-  ↓
-src/soulseek/         — audio downloader via slskd-api
-  client.py             search, parse, enqueue, monitor (asyncio.to_thread for sync slskd-api)
-  scorer.py             100-pt scoring (coverage 50, quality 10 flat, reliability 25, filename 15)
-  matcher.py            album-folder-first, per-track fallback
-  downloader.py         orchestrator with retry across candidate peers
-  ↓
-src/library/          — file + tag helpers (format-agnostic)
-  files.py              path sanitisation, _locate_existing_album (tag-based dedup), _cover_url
-  tagger.py             FLAC + M4A + MP3 tag writers; force-mode wipes peer tags + writes Deezer canonical
-  ↓
-src/navidrome.py      — triggers Subsonic-style scan after writes
+Telegram msg (bot.py)          URL detect, auth (ALLOWED_USERS), force-mode, dispatch
+  → metadata/                  any link → Deezer (type, id) → canonical album/track JSON
+      resolver.py                Tidal/Spotify/Apple scrape + iTunes; Odesli = long-tail fallback
+      deezer.py, client.py       api.deezer.com; one shared aiohttp session (_get_session)
+  → soulseek/                  audio via slskd (Soulseek daemon, sibling container)
+      client.py                  search / enqueue / monitor — sync slskd-api wrapped in to_thread
+      scorer.py                  100-pt: coverage 50, quality 10, reliability 25, filename 15
+      matcher.py, downloader.py  album-folder-first, per-track fallback, retry across peers
+  → library/                   files.py = path sanitise + tag-based dedup; tagger.py = FLAC/M4A/MP3
+  → navidrome.py               Subsonic scan trigger after writes
 ```
 
-## Sibling containers
+The audio source sits behind a small contract (`download_album` / `download_single_track`); everything
+upstream — metadata, library, tagger, navidrome — is source-agnostic. There's exactly one source
+today: `soulseek`.
 
-- `slskd` — Soulseek daemon (compose service, image `slskd/slskd:latest`)
-  - Web UI on `127.0.0.1:5030` (host-loopback only, no auth — internal network)
-  - Soulseek peer port `0.0.0.0:50300`
-  - Shares `/media/music` read-only; downloads to `/media/music/.slskd-downloads/`
-- `navidrome`, `samba` — typical deployment runs them as siblings on the same host so the bot can trigger Navidrome scans over `host.docker.internal`
+## Sibling containers (compose.yaml)
 
-## Engineering rules
+- `slskd` — Soulseek daemon. Web UI `127.0.0.1:5030` (loopback, no auth). Peer port `0.0.0.0:50300`.
+  Mounts `/media/music` read-only; downloads land in `/media/music/.slskd-downloads/`.
+- `navidrome`, `samba` — typical siblings; bot triggers scans over `host.docker.internal`.
 
-- Small, reviewable diffs.
-- User-facing behavior stable unless changing it intentionally.
-- Configuration & creds via `.env` only — never hardcode.
-- No AI co-author trailers on commits unless explicitly requested.
-- Casual commit messages (not conventional-commits style).
-- Don't push without explicit user confirmation.
+## Rules
+
+- Small reviewable diffs. User-facing behavior stable unless changing it on purpose.
+- Config & creds via `.env` only, never hardcoded. Lockfile (`uv.lock`) in git; `uv sync --frozen`.
+- Casual commit messages (not conventional-commits). No AI co-author trailers unless asked.
+- Don't push without explicit confirmation.
 
 ## Things you'll trip on
 
-- **Quality cap**: `MAX_BIT_DEPTH` and `MAX_SAMPLE_RATE_HZ` env vars filter Soulseek peers above the cap. Defaults `24` / `96000` cover all reasonable hi-res; `16` / `44100` for redbook-only deployments.
-- **slskd search lifecycle** (handled in `soulseek/client.py`): peer responses are held in memory until the search transitions to `Completed`; reading `/responses` mid-search returns empty. Each call polls for stability, then issues `searches.stop()` to force the transition (not a cancel — the response collection is preserved), then reads `/responses`. Don't run global stale-search cleanup before new queries — under concurrency it 404's siblings that just finished.
-- **Album dedup is tag-based, not name-based** (`library/files.py::_locate_existing_album`): identity comes from the `comment` tag (carrying the Deezer album URL the bot wrote) and `album` tag, not from the folder name. Folders sanitised by other tools (`:` → space vs underscore vs Unicode lookalike) are still recognised.
-- **Proxy support**: every aiohttp session uses `trust_env=True` so it respects `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` env vars (aiohttp's default is `False` — env vars get ignored without it). If a deployment's proxy gets throttled by a specific upstream (Odesli, Deezer CDN, lrclib), add that host to `NO_PROXY` so those requests go direct.
-- **Tag normalisation**: in force-mode the FLAC / M4A / mp3 taggers wipe all existing tags before writing. They preserve a small allow-list (`composer`, `lyricist`, `performer`). The peer's `comment` is *not* preserved — multi-peer assemblies would otherwise show different rip-source notes per track in Navidrome. Our canonical comment (Deezer URL + identifier) overwrites uniformly.
-- **Cover art**: stored in album dict as `cover_uuid` (historical field name) — actually holds the full Deezer CDN URL. `library.files._cover_url` and `metadata.client.cover_url` resize it for thumbnails / full-size art.
+- **Quality cap** — `MAX_BIT_DEPTH` / `MAX_SAMPLE_RATE_HZ` filter peers above the cap. Defaults
+  `24`/`96000` cover all hi-res; use `16`/`44100` for redbook-only.
+- **slskd search lifecycle** (`soulseek/client.py`) — peer responses stay in memory until a search
+  hits `Completed`; reading `/responses` mid-search returns empty. `search()` polls for stability,
+  then `searches.stop()` to force the transition (not a cancel — responses are preserved), then
+  reads. Don't run global stale-search cleanup before new queries: under concurrency it 404's
+  siblings that just finished.
+- **Album dedup is tag-based, not name-based** (`library/files.py::_locate_existing_album`) —
+  identity is the `comment` tag (the Deezer album URL the bot wrote) + `album` tag, not the folder
+  name, so folders re-sanitised by other tools still match.
+- **Proxy** — every aiohttp session uses `trust_env=True` (aiohttp ignores `HTTP(S)_PROXY` otherwise).
+  If a proxy gets throttled by one upstream, add that host to `NO_PROXY` to send it direct.
+- **Force-mode tag wipe** — the FLAC/M4A/MP3 taggers wipe existing tags before writing, preserving
+  an allow-list (`composer`, `lyricist`, `performer`). The peer's `comment` is NOT preserved — our
+  canonical Deezer comment overwrites uniformly (multi-peer assemblies would otherwise show mixed
+  rip-source notes in Navidrome).
+- **Cover art** — stored as `cover_uuid` (historical name) but actually holds the full Deezer CDN
+  URL. `library.files._cover_url` / `metadata.client.cover_url` resize it.
 
-## How to deploy
+## Deploy
 
-- `./deploy-test.sh` — hot-reload `src/*.py` via `docker cp` + restart container. Detects local-server vs SSH mode automatically. **Does NOT** rebuild image, so changes to `requirements.txt` or `Dockerfile` need `docker compose up -d --build`.
-- After `docker compose up -d music-bot` (recreate), the running container is a fresh image — any prior `docker cp` hot-reloads are lost; resync `src/` files manually or rebuild.
-
-## Next steps deferred
-
-See `docs/ROADMAP.md`. Notable items not yet done: MusicBrainz MBID enrichment, peer-side reputation memory, mp3-fallback prompt, inline-picker for borderline-confidence album-folder matches.
+- `./deploy-test.sh` — hot-reload `src/*.py` via `docker cp` + restart. Does NOT rebuild the image,
+  so `pyproject.toml` / `Dockerfile` changes need `docker compose up -d --build`.
+- After `docker compose up -d music-bot` recreates the container, prior `docker cp` hot-reloads are
+  gone — resync `src/` or rebuild.

@@ -3,45 +3,40 @@
 [![GitHub Release](https://img.shields.io/github/v/release/eeegoloauq/music-bot)](https://github.com/eeegoloauq/music-bot/releases)
 [![GHCR](https://img.shields.io/badge/ghcr.io-music--bot-blue)](https://github.com/eeegoloauq/music-bot/pkgs/container/music-bot)
 
-Telegram bot that builds and maintains a [Navidrome](https://www.navidrome.org/) music library — paste a music link from any major platform, the bot resolves it via [Deezer](https://www.deezer.com/)'s open API, downloads the audio from [Soulseek](https://www.slsknet.org/) peers via [slskd](https://github.com/slskd/slskd), tags the files with canonical metadata, and drops them into your library.
+A Telegram bot that fills your [Navidrome](https://www.navidrome.org/) library. Paste a link to an
+album or track from almost any music service and the bot figures out what it is, finds the audio on
+[Soulseek](https://www.slsknet.org/), tags it properly, and drops the files into your library. A
+minute later it's playing in Navidrome.
 
-<h2 align="center">Search to download</h2>
+It uses [Deezer](https://www.deezer.com/)'s open API for metadata (no login, no token) and downloads
+from Soulseek peers through [slskd](https://github.com/slskd/slskd).
+
 <p align="center">
   <img src=".github/screenshots/search.jpg" width="440" alt="Inline search">
-</p>
-
-<h2 align="center">Download into your library</h2>
-<p align="center">
   <img src=".github/screenshots/download.jpg" width="440" alt="Album download">
 </p>
 
-<h2 align="center">Share what you're listening to</h2>
-<p align="center">
-  <img src=".github/screenshots/share.jpg" width="440" alt="Share now playing">
-</p>
+## What it can do
 
-## Features
-
-- **Album & track downloads** — paste a Tidal, Spotify, Apple Music, Deezer, YouTube Music, SoundCloud, Amazon Music, or Shazam link, get FLAC files with full metadata into your library
-- **mp3 fallback** — when no peer offers FLAC, the bot offers mp3 ≥ 320 kbps via inline keyboard (opt-in, no silent quality downgrade)
-- **Genres from two sources** — Deezer's structured genres + Last.fm community tags merged into the GENRE field for fine-grained Navidrome facets ("witch house", "future garage", "drumless")
-- **Library re-tagger** — `/retag` walks the whole library and refreshes tags from current Deezer + Last.fm metadata in place; surgical writes preserve embedded pictures and don't rewrite audio data
-- **Inline mode** — type `@yourbotname` in any chat:
-  - `song name` — search Deezer for albums and tracks
-  - `np` — sends the currently playing track as audio
-  - `s` — share link for current track with cover art
-  - `l` — lyrics for current track
-  - `lib name` — search your Navidrome library
-  - `del name` — remove an album from your library
-- **Auto-share** — share link with cover art appended to download results
-- **Force re-download** — add `re` after the link
-- **Private** — only users listed in `ALLOWED_USERS` can interact
+- **Download albums and tracks.** Paste a link from Tidal, Spotify, Apple Music, Deezer, YouTube
+  Music, SoundCloud, Amazon Music, or Shazam. You get FLAC with full metadata in your library.
+- **mp3 fallback.** If no peer has a lossless copy, the bot offers you an mp3 (≥ 320 kbps) with a
+  tap — it never silently downgrades quality on you.
+- **Good genres.** Deezer's genres plus Last.fm community tags, so Navidrome gets useful tags like
+  "witch house" or "future garage" instead of just "Electronic".
+- **Re-tag your library.** `/retag` walks everything you already have and refreshes the tags from
+  current metadata, without touching the audio or your embedded cover art.
+- **Inline search.** Type `@yourbot` in any chat to search, share what you're playing, grab lyrics,
+  or search your own library.
+- **Private.** Only the Telegram user IDs you list can use it.
 
 ## Setup
 
-### Docker compose
+You need two containers: **slskd** (the Soulseek client) and **music-bot** itself. They talk over
+slskd's REST API. Everything you'd want to change lives in `.env` — you shouldn't need to edit the
+compose file.
 
-The bot runs alongside slskd (Soulseek daemon) which it talks to over its REST API. Drop this `compose.yaml` next to a `.env` (see [.env.example](.env.example)) and you're done — every host-specific knob lives in `.env`, the compose file itself doesn't need editing.
+### 1. `compose.yaml`
 
 ```yaml
 services:
@@ -53,8 +48,8 @@ services:
       SLSKD_SLSK_USERNAME: ${SOULSEEK_USERNAME}
       SLSKD_SLSK_PASSWORD: ${SOULSEEK_PASSWORD}
       SLSKD_SLSK_LISTEN_PORT: ${SLSKD_LISTEN_PORT:-50300}
-      # Filesystem layout is canonical here so a fresh slskd.yml without a
-      # `directories:` block can't break the staging contract with music-bot.
+      # Download paths are set here (not in slskd.yml) so the bot and slskd
+      # always agree on where files land.
       SLSKD_DOWNLOADS_DIR: /downloads
       SLSKD_INCOMPLETE_DIR: /downloads/.incomplete
       SLSKD_NO_AUTH: "true"
@@ -65,11 +60,10 @@ services:
     ports:
       - 127.0.0.1:5030:5030
       - ${SLSKD_LISTEN_PORT:-50300}:${SLSKD_LISTEN_PORT:-50300}
+    # Wait until slskd has actually logged into Soulseek before starting the
+    # bot — otherwise the first search runs against an empty peer pool.
     healthcheck:
-      test:
-        - CMD-SHELL
-        - wget -qO- http://localhost:5030/api/v0/server | grep -q
-          '"isLoggedIn":true' || exit 1
+      test: ["CMD-SHELL", "wget -qO- http://localhost:5030/api/v0/server | grep -q '\"isLoggedIn\":true'"]
       interval: 5s
       timeout: 3s
       retries: 30
@@ -83,9 +77,6 @@ services:
     environment:
       SLSKD_HOST: http://slskd:5030
       SLSKD_DOWNLOAD_DIR: /music/.slskd-downloads
-      # Quality cap. 24/96 covers reasonable hi-res; 16/44100 for redbook-only.
-      MAX_BIT_DEPTH: ${MAX_BIT_DEPTH:-24}
-      MAX_SAMPLE_RATE_HZ: ${MAX_SAMPLE_RATE_HZ:-96000}
     volumes:
       - ${MUSIC_LIBRARY_DIR:-/media/music}:/music
     extra_hosts:
@@ -95,7 +86,9 @@ services:
         condition: service_healthy
 ```
 
-The `slskd-config/slskd.yml` referenced by the bind mount only needs to declare `shares.directories`, `web.port`, and any peer filters you want — the staging-path config (`directories.downloads` / `directories.incomplete`) is supplied via the env vars above and overrides the yml. A minimal `slskd.yml`:
+### 2. `slskd-config/slskd.yml`
+
+slskd reads a small config from the bind mount. This is enough:
 
 ```yaml
 remote_configuration: false
@@ -117,123 +110,86 @@ web:
     disabled: true
 ```
 
-slskd's web UI sits on `127.0.0.1:5030` (no auth — internal docker network only). The peer port (default `50300`, set via `SLSKD_LISTEN_PORT` in `.env`) needs an inbound port forward on your router so remote peers can reach you. The `depends_on: condition: service_healthy` block waits for slskd to finish logging into the Soulseek network before the bot starts — first-message searches won't see an empty peer pool.
-
-### .env
+### 3. `.env`
 
 ```env
 TG_TOKEN=your_telegram_bot_token
+ALLOWED_USERS=123456789
+
 NAVIDROME_URL=http://host.docker.internal:4533
 NAVIDROME_USER=admin
 NAVIDROME_PASS=your_password
-ALLOWED_USERS=123456789
 
-# Host path holding the music library AND the staging dir
-# (.slskd-downloads/). Both must be on the same filesystem so the
-# post-download import is an atomic rename.
+SOULSEEK_USERNAME=your_soulseek_username
+SOULSEEK_PASSWORD=your_soulseek_password
+
+# The folder where your music library lives. The bot's download staging area
+# sits inside it, so the final move into the library is instant. Keep both on
+# the same disk.
 MUSIC_LIBRARY_DIR=/media/music
-
-SOULSEEK_USERNAME=your_slsk_username
-SOULSEEK_PASSWORD=your_slsk_password
-
-# Optional: change if 50300 is already in use or you've forwarded a
-# different port on your router for Soulseek.
-SLSKD_LISTEN_PORT=50300
 ```
 
-If Navidrome is in the same compose stack, use `NAVIDROME_URL=http://navidrome:4533`. The `.env` is loaded by Python directly — special characters like `$` work without escaping.
+Then `docker compose up -d`.
+
+A few things worth knowing:
+
+- The **Soulseek peer port** (`50300` by default, or set `SLSKD_LISTEN_PORT`) needs a port forward on
+  your router if you want incoming peer connections.
+- If Navidrome runs in the **same compose stack**, use `NAVIDROME_URL=http://navidrome:4533`.
+- slskd's web UI is on `127.0.0.1:5030` with no password — it's only reachable from inside the
+  Docker network, don't expose it.
+
+See [.env.example](.env.example) for every option, including proxy support and the quality cap.
 
 ### Without Docker
 
 ```bash
-pip install -r requirements.txt
-cp .env.example .env  # fill in values
-# also need slskd running and reachable; see https://github.com/slskd/slskd
-python src/bot.py
+uv sync --frozen
+cp .env.example .env   # fill it in
+python src/bot.py      # needs slskd running and reachable
 ```
+
+## Using it
+
+**Downloads** — just send a music link. Album or single track is auto-detected; paste several links
+and they all queue up. Add `re` after a link to re-download something you already have (your existing
+copy is kept safe until the new one finishes cleanly).
+
+**Inline mode** — type `@yourbot` followed by:
+
+| Query | What it does |
+|---|---|
+| `song name` | Search Deezer for albums and tracks |
+| `np` | Send the track you're playing right now as audio |
+| `s` | Share link for the current track, with cover art |
+| `l` | Lyrics for the current track |
+| `lib name` | Search your own Navidrome library |
+| `del name` | Remove an album from your library |
+
+**Commands** — `/help`, `/scan` (rescan Navidrome), `/stats` (library size), and `/retag` (refresh
+tags library-wide; shows a preview first, then `/retag confirm` to apply).
 
 ## Configuration
 
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `TG_TOKEN` | yes | | Telegram bot token (from @BotFather) |
-| `NAVIDROME_URL` | yes | `http://localhost:4533` | Navidrome internal URL |
-| `NAVIDROME_USER` | yes | | Navidrome username |
-| `NAVIDROME_PASS` | yes | | Navidrome password |
-| `ALLOWED_USERS` | yes | | Comma-separated Telegram user IDs |
-| `SOULSEEK_USERNAME` | yes | | Soulseek account username |
-| `SOULSEEK_PASSWORD` | yes | | Soulseek account password |
-| `MUSIC_LIBRARY_DIR` | | `/media/music` | **Host** path to the music library — used by compose to bind-mount into both containers. The library and the `.slskd-downloads/` staging dir live here on the same filesystem (atomic rename on import). |
-| `SLSKD_LISTEN_PORT` | | `50300` | Soulseek peer port. Forward this on your router for inbound peer connections. |
-| `MUSIC_DIR` | | `/music` | Container-internal mount point the bot looks for the library at. Don't override unless you also adjust the music-bot volume mapping. |
-| `STREAM_BITRATE` | | `320` | MP3 bitrate Navidrome transcodes to for the inline `np` audio (kbps) |
-| `NAVIDROME_PUBLIC_URL` | | | Public Navidrome URL for share links. Sharing disabled if not set. |
-| `LASTFM_API_KEY` | | | Last.fm API key — when set, community tags get merged into album genres. Free at https://www.last.fm/api/account/create |
-| `MAX_BIT_DEPTH` | | `24` | Soulseek peer files exceeding this bit depth are filtered out. `16` for redbook-only deployments. |
-| `MAX_SAMPLE_RATE_HZ` | | `96000` | Same idea for sample rate. `44100` pairs with `MAX_BIT_DEPTH=16` for CD-quality only. |
-| `MAX_FILE_BYTES` | | `2147483648` | Hard upper bound on a single peer file (default 2 GiB). `0` disables the cap. |
-| `SLSKD_HOST` | | `http://slskd:5030` | slskd REST API URL |
-| `SLSKD_DOWNLOAD_DIR` | | `/music/.slskd-downloads` | Where slskd writes completed downloads (mounted into both containers) |
-| `SLSKD_API_KEY` | | `anonymous` | Pass-through value when slskd has `SLSKD_NO_AUTH=true`; any non-empty string works |
+Most people only set the handful of variables in the `.env` above. Everything else has a sensible
+default:
 
-### Proxy
+| Variable | Default | What it's for |
+|---|---|---|
+| `NAVIDROME_PUBLIC_URL` | — | Public Navidrome URL, needed for share links (also set `ND_ENABLESHARING=true` in Navidrome) |
+| `LASTFM_API_KEY` | — | Adds Last.fm community tags to genres. [Free key](https://www.last.fm/api/account/create) |
+| `MAX_BIT_DEPTH` / `MAX_SAMPLE_RATE_HZ` | `24` / `96000` | Skip peer files above this quality. Use `16` / `44100` for CD-quality only |
+| `MAX_FILE_BYTES` | `2147483648` | Reject any single peer file bigger than this (2 GiB). `0` turns it off |
+| `SLSKD_LISTEN_PORT` | `50300` | Soulseek peer port (forward it on your router) |
+| `STREAM_BITRATE` | `320` | mp3 bitrate for the `np` inline audio |
+| `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` | — | Standard proxy vars are respected. If one upstream throttles your proxy IP, add its host to `NO_PROXY` to send just that one direct |
 
-Every aiohttp session uses `trust_env=True`, so `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` from the environment are respected. If a specific upstream throttles your proxy IP (Odesli, Deezer CDN, lrclib are common offenders), add the host to `NO_PROXY` so that one endpoint goes direct while everything else keeps using the proxy.
+## How files get tagged
 
-```env
-HTTP_PROXY=http://your-proxy:1080
-HTTPS_PROXY=http://your-proxy:1080
-NO_PROXY=localhost,127.0.0.1,host.docker.internal,slskd,api.deezer.com,api.song.link,lrclib.net
-```
+Every download is fully tagged from Deezer — artist, album, title, track and disc numbers, date,
+ISRC, label, genres (Deezer + Last.fm), ReplayGain, embedded cover art, and synced lyrics from
+[lrclib](https://lrclib.net). FLAC, M4A, and mp3 are all handled.
 
-### Sharing
-
-For `s` (share) and auto-share to work, set `NAVIDROME_PUBLIC_URL` and enable sharing in Navidrome (`ND_ENABLESHARING=true`). The bot reuses the share if you've already created one for the album.
-
-## Usage
-
-### Downloads
-
-Send a music link in chat. The bot resolves it through Deezer, finds matching peers on Soulseek, downloads, tags, and triggers a Navidrome rescan.
-
-- Single track or full album link — auto-detected
-- Multiple links in one message — all queued
-- `re` after a link — force re-download (existing files preserved as `.bak` in case the new download fails)
-- If no peer has FLAC, the bot offers an mp3 ≥ 320 kbps fallback as an inline keyboard prompt
-
-### Inline mode
-
-| Query | Action |
-|---|---|
-| `@bot song name` | Search Deezer for albums and tracks |
-| `@bot np` | Now playing as audio (transcoded to mp3 at `STREAM_BITRATE`) |
-| `@bot s` | Share link for current track |
-| `@bot l` | Lyrics for current track |
-| `@bot lib name` | Search your Navidrome library |
-| `@bot del name` | Delete an album from your library |
-
-### Commands
-
-- `/help` — full feature list
-- `/scan` — trigger a Navidrome library rescan
-- `/stats` — library statistics (artists, albums, tracks, total size)
-- `/retag` — refresh tags on every album in the library from current Deezer + Last.fm metadata (dry-run pass first, then `/retag confirm` to apply, or `/retag stop` to drop the pending session)
-
-## Tags
-
-Metadata is written to every downloaded file:
-
-- **FLAC** — Vorbis Comments
-- **M4A** — iTunes-style atoms with `----:com.apple.iTunes:` freeform fields for non-standard tags
-- **MP3** — ID3v2.4 frames
-
-Fields covered: artist, albumartist, album, title, track / disc number, total tracks / discs, date / year / originaldate / releasedate (the four-field quartet keeps Navidrome from splitting FLAC and M4A copies of the same album into separate entries), copyright, ISRC, UPC, label, releasetype, BPM, multi-value GENRE (Deezer + Last.fm), ReplayGain track + album gain (from Deezer's gain field), embedded cover art, and lyrics from [lrclib.net](https://lrclib.net).
-
-The download path uses force-mode tagging (peer-supplied tags get wiped and replaced with canonical Deezer-derived values) but preserves a small allow-list — `composer`, `lyricist`, `performer`, and any peer comment is appended to the bot's identifier in the comment field. Re-tagging via `/retag` is fully surgical: it only updates fields that differ from canonical, so embedded pictures and any unmanaged tag stay intact.
-
-## Deployment
-
-Source of truth lives in self-hosted Forgejo (`homelab/music-bot`). The `.50`
-host auto-deploys: a `deploy` user (non-root, read-only deploy key) pulls
-`main` from Forgejo on a systemd timer and runs `docker compose build && up`
-only when the commit changes. Push to `main` → live within a few minutes.
+On download the bot replaces whatever tags the peer's file came with, so your library stays
+consistent. `/retag` is gentler: it only changes fields that are actually wrong and leaves everything
+else — including your cover art — untouched.
