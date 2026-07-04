@@ -273,13 +273,29 @@ def score_track_results(
     return group_copies(out)
 
 
+_LEADING_NUM_RE = re.compile(r"^\s*(\d{1,3})\b")
+
+
+def _leading_number(basename: str) -> int | None:
+    """Track number a peer put at the start of the filename, if any."""
+    m = _LEADING_NUM_RE.match(basename)
+    return int(m.group(1)) if m else None
+
+
 def _match_folder_to_tracks(
     folder: PeerFolder,
     track_durations: list[int],
     track_titles: list[str],
     duration_tolerance: int = 5,
 ) -> tuple[list[SearchResult | None], int]:
-    """Match files inside a folder to the expected track list by duration.
+    """Match files inside a folder to the expected track list.
+
+    Duration stays the eligibility gate (±tolerance), but assignment is by a
+    joint pair score — duration closeness, title-word overlap, and a leading
+    track-number hint — instead of closest-duration-first. A full title match
+    is worth a few seconds of duration edge; the old greedy let a 1s-closer
+    wrong file beat an exactly-titled right one, silently pairing the wrong
+    audio with a track's tags.
 
     Returns ``(matched_files, missing_count)`` where ``matched_files`` is a
     sparse list **parallel to track_durations** — ``None`` at positions where
@@ -291,31 +307,33 @@ def _match_folder_to_tracks(
     available = [f for f in folder.files if f.is_lossless]
     if not available:
         available = list(folder.files)
-    used: set[int] = set()
-    matched: list[SearchResult | None] = []
 
+    # Score every eligible (track, file) pair, then assign globally best
+    # pairs first — so a strong title claim on one track can't be stolen by
+    # an earlier track with a marginally closer duration.
+    pairs: list[tuple[float, int, int, int]] = []
     for i, want_dur in enumerate(track_durations):
-        best_idx = -1
-        best_diff = duration_tolerance + 1
-        target_words = _word_set(track_titles[i] if i < len(track_titles) else "")
-        target_score = -1
+        title_words = _word_set(track_titles[i] if i < len(track_titles) else "")
         for j, f in enumerate(available):
-            if j in used or f.length is None:
+            if f.length is None:
                 continue
             diff = abs(f.length - want_dur)
             if diff > duration_tolerance:
                 continue
-            # Prefer file whose name overlaps the target title
-            tword_overlap = len(target_words & _word_set(f.basename)) if target_words else 0
-            if diff < best_diff or (diff == best_diff and tword_overlap > target_score):
-                best_idx = j
-                best_diff = diff
-                target_score = tword_overlap
-        if best_idx >= 0:
-            matched.append(available[best_idx])
-            used.add(best_idx)
-        else:
-            matched.append(None)
+            title_ratio = (len(title_words & _word_set(f.basename)) / len(title_words)) \
+                if title_words else 0.0
+            number_hint = 1.0 if _leading_number(f.basename) == i + 1 else 0.0
+            score = -diff + 3.0 * title_ratio + number_hint
+            pairs.append((score, diff, i, j))
+
+    pairs.sort(key=lambda p: (-p[0], p[1], p[2], p[3]))
+    matched: list[SearchResult | None] = [None] * len(track_durations)
+    used: set[int] = set()
+    for _score, _diff, i, j in pairs:
+        if matched[i] is not None or j in used:
+            continue
+        matched[i] = available[j]
+        used.add(j)
 
     missing = sum(1 for m in matched if m is None)
     return matched, missing
@@ -340,6 +358,15 @@ def score_folder_results(
     out: list[ScoredFolder] = []
 
     for folder in folders:
+        # Same anti-falsepositive gate the per-track scorer applies: a folder
+        # whose full path and file names share no significant artist word is
+        # almost never the right album, however well durations line up.
+        # Title-only fallback queries otherwise let sound-alike folders from
+        # unrelated artists into a phase that never faces the track thresholds.
+        all_basenames = " ".join(f.basename for f in folder.files)
+        if not _artist_in_path(folder.directory, all_basenames, album_artist):
+            continue
+
         matched, missing = _match_folder_to_tracks(
             folder, track_durations, track_titles,
             duration_tolerance=duration_tolerance,
