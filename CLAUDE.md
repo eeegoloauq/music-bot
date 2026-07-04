@@ -31,6 +31,7 @@ today: `soulseek`.
 
 - Small reviewable diffs. User-facing behavior stable unless changing it on purpose.
 - Config & creds via `.env` only, never hardcoded. Lockfile (`uv.lock`) in git; `uv sync --frozen`.
+- `uv run pytest` — offline suite in `tests/` (stubbed slskd, zero network). CI gates build/deploy on it.
 - Casual commit messages (not conventional-commits). No AI co-author trailers unless asked.
 - Don't push without explicit confirmation.
 
