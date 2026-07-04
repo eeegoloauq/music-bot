@@ -191,6 +191,22 @@ def _dedup_lower(items: list[str]) -> list[str]:
 
 # --- album matching ---------------------------------------------------------
 
+def _merge_folder(known: slskd.PeerFolder, new: slskd.PeerFolder) -> None:
+    """Union two sightings of the same peer folder.
+
+    Soulseek matches search terms against *full paths*, so different queries
+    legitimately surface different subsets of one folder (a title-only
+    fallback can match files whose basenames lack the artist). The first
+    sighting is rarely the complete one — union the file lists, and let the
+    newer response's queue/slot stats win (they're fresher).
+    """
+    seen = {f.filename.lower() for f in known.files}
+    known.files.extend(f for f in new.files if f.filename.lower() not in seen)
+    known.has_free_slot = new.has_free_slot
+    known.upload_speed = new.upload_speed
+    known.queue_length = new.queue_length
+
+
 async def find_album(
     album_meta: dict,
     duration_tolerance: int = 5,
@@ -217,7 +233,11 @@ async def find_album(
         responses = await slskd.search(q, timeout_secs=20, response_limit=200)
         results = slskd.parse_files(responses, lossless_only=True)
         for f in slskd.group_by_folder(results):
-            all_folders.setdefault((f.username, f.directory), f)
+            known = all_folders.get((f.username, f.directory))
+            if known is None:
+                all_folders[(f.username, f.directory)] = f
+            else:
+                _merge_folder(known, f)
 
     def _rescore() -> list[ScoredFolder]:
         if not all_folders:

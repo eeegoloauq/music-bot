@@ -245,14 +245,14 @@ def test_group_by_folder():
     assert len(by_dir["M\\Album"].files) == 2
 
 
-async def test_f2_fallback_query_files_for_known_folder_are_dropped(monkeypatch):
-    """F2: find_album keeps the *first* sighting of a folder wholesale — a
-    fallback query that surfaces more files from the same folder is ignored,
-    so a complete folder scores as partial and the pool stays thin."""
-    def peer_response(files):
+async def test_fallback_query_completes_a_known_folder(monkeypatch):
+    """F2 (fixed): a fallback query that surfaces more files from an
+    already-seen folder completes it — file lists union across the query
+    ladder, and the newer response's peer stats win."""
+    def peer_response(files, queue_length=0):
         return [{
             "username": "onepeer", "hasFreeUploadSlot": True,
-            "uploadSpeed": 2_000_000, "queueLength": 0,
+            "uploadSpeed": 2_000_000, "queueLength": queue_length,
             "files": [{"filename": f"M\\Artist - Album\\{name}",
                        "size": 30_000_000, "length": length,
                        "bitDepth": 16, "sampleRate": 44100}
@@ -263,7 +263,8 @@ async def test_f2_fallback_query_files_for_known_folder_are_dropped(monkeypatch)
     # whole folder (Soulseek matches terms against full paths).
     responses = {
         0: peer_response([("01 - One.flac", 200)]),
-        1: peer_response([("01 - One.flac", 200), ("02 - Two.flac", 210)]),
+        1: peer_response([("01 - One.flac", 200), ("02 - Two.flac", 210)],
+                         queue_length=3),
     }
     calls = install_fake_client(monkeypatch, lambda i: responses[i])
     album = {"artist": "Artist", "title": "Album",
@@ -273,5 +274,6 @@ async def test_f2_fallback_query_files_for_known_folder_are_dropped(monkeypatch)
     best, alts, pool = await matcher.find_album(album)
 
     assert calls["n"] == 2  # incomplete result did escalate the ladder
-    assert best.missing_count == 1  # fallback's fuller file-list was discarded
-    assert len(pool) == 1
+    assert best.missing_count == 0  # the merged folder is complete
+    assert len(pool) == 2
+    assert best.folder.queue_length == 3  # freshest peer stats won
