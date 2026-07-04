@@ -1,11 +1,10 @@
-# 1:1 mirror to GitHub: real commits, real messages — the history IS
-# public, write it accordingly. Forgejo stays the source of truth;
-# main is force-pushed, so GitHub never diverges.
+# Mirror main and release tags to the public GitHub repo.
 name: Sync to GitHub
 
 on:
   push:
     branches: [main]
+    tags: ["v*"]
 
 env:
   GH_REMOTE: ssh://git@github.com/eeegoloauq/music-bot.git
@@ -27,4 +26,5 @@ jobs:
           export GIT_SSH_COMMAND="ssh -i ~/.ssh/gh_push -o UserKnownHostsFile=~/.ssh/known_hosts"
           git remote add github "$GH_REMOTE"
           git push -qf github "HEAD:refs/heads/main"
+          git push -q github --tags
           echo "synced $GITHUB_REF"
