@@ -24,13 +24,9 @@ from soulseek.scorer import (
     score_track_results,
     score_folder_results,
 )
+from soulseek.selection import MATCH_FLOOR, search_satisfied
 
 logger = logging.getLogger(__name__)
-
-
-# Score thresholds for auto-pick vs picker vs reject.
-TRACK_AUTO_THRESHOLD = 70.0   # ≥ 70 — download without asking
-TRACK_PICK_THRESHOLD = 45.0   # 45..70 — show picker; <45 — give up
 
 # Mp3-fallback gates. Triggered only when accept_lossy=True (after a FLAC
 # search came up empty). Lower bound on mp3 quality keeps us from saving
@@ -297,8 +293,9 @@ async def find_track(
 ) -> tuple[ScoredTrack | None, list[ScoredTrack]]:
     """Search and score for a single track. Returns ``(auto_pick, alternatives)``.
 
-    ``auto_pick`` is filled in when score >= TRACK_AUTO_THRESHOLD; otherwise the
-    caller can use the ``alternatives`` list (still already filtered & sorted).
+    ``auto_pick`` is filled in when the top candidate satisfies the search
+    (see ``selection.search_satisfied``); otherwise the caller can use the
+    ``alternatives`` list (already filtered to the identity floor & sorted).
 
     ``accept_lossy`` (mp3-fallback path): instead of FLAC-only, search for
     mp3≥256kbps + m4a, score them with a flat 5pt quality reward. Used after
@@ -351,7 +348,7 @@ async def find_track(
     if preseed:
         _absorb(preseed)
         scored = _scored()
-        if scored and scored[0].score >= TRACK_AUTO_THRESHOLD:
+        if scored and search_satisfied(scored[0]):
             return scored[0], scored[1:5]
 
     if allow_search:
@@ -363,7 +360,7 @@ async def find_track(
                 raise  # nothing to fall back on — let the caller see the reason
             fallbacks = []  # don't hammer a struggling server with more queries
         scored = _scored()
-        if scored and scored[0].score >= TRACK_AUTO_THRESHOLD:
+        if scored and search_satisfied(scored[0]):
             return scored[0], scored[1:5]
 
         # Tier 2 — fallbacks (title-only, ASCII-fold) sequentially with early exit.
@@ -375,7 +372,7 @@ async def find_track(
             if len(pooled) >= 60:
                 break  # diminishing returns
             scored = _scored()
-            if scored and scored[0].score >= TRACK_AUTO_THRESHOLD:
+            if scored and search_satisfied(scored[0]):
                 break
 
     scored = _scored()
@@ -383,9 +380,8 @@ async def find_track(
         return None, []
 
     best = scored[0]
-    alternatives = scored[1:5]
-    if best.score >= TRACK_AUTO_THRESHOLD:
-        return best, alternatives
-    if best.score >= TRACK_PICK_THRESHOLD:
-        return None, [best] + alternatives
+    if search_satisfied(best):
+        return best, scored[1:5]
+    if best.match_score >= MATCH_FLOOR:
+        return None, scored[:5]
     return None, []
