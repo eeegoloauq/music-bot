@@ -678,7 +678,7 @@ async def _trigger_scan(*, slskd_mode: str = "none") -> str:
 
 
 async def _resolve_and_download(update: Update, url: str, force: bool = False):
-    status_msg = await update.message.reply_text("🔗 Resolving link…")
+    status_msg = await update.message.reply_text("Resolving link…")
     try:
         result = await metadata.resolve_link(url)
     except Exception as e:
@@ -754,9 +754,9 @@ async def _run_album(io: ChatIO, album_id: str, force: bool = False,
     try:
         if _download_semaphore.locked():
             status_msg = await io.reply_text(
-                "⏳ Queued — will start after the current download finishes")
+                "Queued — will start after the current download finishes")
         else:
-            status_msg = await io.reply_text("⏳ Fetching album info…")
+            status_msg = await io.reply_text("Fetching album info…")
         entry = resume_entry or journal.PendingDownload(
             kind="album", id=album_id, chat_id=io.chat_id, force=force)
         entry.status_message_id = status_msg.message_id
@@ -861,7 +861,7 @@ async def _do_download_album(io: ChatIO, status_msg, album_id: str, force: bool 
             got = result["downloaded"]
             miss = len(result["failed"])
             await status_msg.edit_text(
-                f"♻️ Kept existing: {album['artist']} — {album['title']}\n"
+                f"Kept existing: {album['artist']} — {album['title']}\n"
                 f"Re-download was incomplete ({got} ok, {miss} unavailable), "
                 f"so the original copy was restored."
             )
@@ -877,7 +877,7 @@ async def _do_download_album(io: ChatIO, status_msg, album_id: str, force: bool 
 
         if result["downloaded"] == 0 and not result["failed"]:
             done_text = (
-                f"📚 <b>{reporting.esc(album['artist'])} — "
+                f"<b>{reporting.esc(album['artist'])} — "
                 f"{reporting.esc(album['title'])}</b>\nAlready in library."
             )
             if share_url:
@@ -908,9 +908,9 @@ async def _run_track(io: ChatIO, track_id: str, force: bool = False,
     try:
         if _download_semaphore.locked():
             status_msg = await io.reply_text(
-                "⏳ Queued — will start after the current download finishes")
+                "Queued — will start after the current download finishes")
         else:
-            status_msg = await io.reply_text("⏳ Fetching track info…")
+            status_msg = await io.reply_text("Fetching track info…")
         entry = resume_entry or journal.PendingDownload(
             kind="track", id=track_id, chat_id=io.chat_id, force=force)
         entry.status_message_id = status_msg.message_id
@@ -990,7 +990,7 @@ async def _do_download_track(io: ChatIO, status_msg, track_id: str, force: bool 
             )
         else:
             done_text = (
-                f"📚 <b>{reporting.esc(track['artist'])} — "
+                f"<b>{reporting.esc(track['artist'])} — "
                 f"{reporting.esc(track['title'])}</b>\nAlready in library."
             )
             if share_url:
@@ -1047,8 +1047,8 @@ async def _offer_mp3_fallback(
     ])
     try:
         await status_msg.edit_text(
-            f"🔍 FLAC not found for {track['artist']} — {track['title']}\n\n"
-            f"💿 Lossy fallback available: {summary}",
+            f"FLAC not found for {track['artist']} — {track['title']}\n\n"
+            f"Lossy fallback available: {summary}",
             reply_markup=keyboard,
         )
     except TelegramError as e:
@@ -1088,7 +1088,7 @@ async def _handle_lossy_callback(update: Update, context: ContextTypes.DEFAULT_T
     if action == "skip":
         with contextlib.suppress(TelegramError):
             await query.edit_message_text(
-                f"⏭ Skipped — FLAC not available for {track['artist']} — {track['title']}"
+                f"Skipped — FLAC not available for {track['artist']} — {track['title']}"
             )
         return
 
@@ -1098,7 +1098,7 @@ async def _handle_lossy_callback(update: Update, context: ContextTypes.DEFAULT_T
     summary = _format_lossy_summary(candidates)
     with contextlib.suppress(TelegramError):
         await query.edit_message_text(
-            f"⬇️ Downloading: {track['artist']} — {track['title']} ({summary})"
+            f"Downloading: {track['artist']} — {track['title']} ({summary})"
         )
 
     in_flight_key = f"track:{entry['track_id']}:lossy"

@@ -189,7 +189,7 @@ class AlbumProgress:
             lines.append(f"  {prefix}«{esc(q)}» — {status}")
         wait = (self.wait_until or 0) - time.monotonic()
         if wait > 1:
-            lines.append(f"  ⏸ Soulseek pacing — next search in ~{int(wait)}s")
+            lines.append(f"  pacing — next search in ~{int(wait)}s")
         return lines
 
     def _counts(self) -> tuple[int, int, int]:
@@ -231,32 +231,32 @@ class AlbumProgress:
         header = f"<b>{esc(self.artist)} — {esc(self.title)}</b>"
 
         if self.phase == "search":
-            out = [f"🔎 {header} · {self.n_tracks} tracks",
+            out = [f"{header} · {self.n_tracks} tracks",
                    "Searching Soulseek…"]
             out += self._search_lines()
             return "\n".join(out)[:MESSAGE_LIMIT]
 
-        out = [f"⬇️ {header}"]
+        out = [header]
         if self.folder:
             f = self.folder
             out.append(
-                f"📀 {esc(f.get('peer', '?'))} · {f.get('covered')}/{f.get('total')}"
+                f"peer {esc(f.get('peer', '?'))} · {f.get('covered')}/{f.get('total')}"
                 f" tracks · {esc(f.get('quality', ''))}"
                 f" · score {f.get('score', 0):.0f}"
             )
         elif self.fallback_remaining is not None:
-            out.append("🧩 no full-album peer — matching track by track")
+            out.append("no full-album peer — matching track by track")
         if self.skipped:
-            out.append(f"⏭ {self.skipped} already in library")
+            out.append(f"{self.skipped} already in library")
 
         # An in-flight fallback search (per-track phase) shows as activity.
         if self.searches and not self.searches[-1]["done"]:
             rec = self.searches[-1]
             who = f" for {esc(_trunc(rec['track'], 30))}" if rec.get("track") else ""
-            out.append(f"🔎 searching{who}…")
+            out.append(f"searching{who}…")
         wait = (self.wait_until or 0) - time.monotonic()
         if wait > 1:
-            out.append(f"⏸ Soulseek pacing — ~{int(wait)}s")
+            out.append(f"pacing — next search in ~{int(wait)}s")
 
         out.append("")
         if self.total_dl <= CHECKLIST_MAX:
@@ -327,7 +327,7 @@ class TrackProgress:
     def render(self) -> str:
         header = f"<b>{esc(self.artist)} — {esc(self.title)}</b>"
         if self.match is None:
-            out = [f"🔎 {header}", "Searching Soulseek…"]
+            out = [header, "Searching Soulseek…"]
             for rec in self.searches:
                 status = (f"{rec['files']} files / {rec['peers']} peers"
                           if rec["done"] and rec["peers"] else
@@ -335,12 +335,12 @@ class TrackProgress:
                 out.append(f"  «{esc(_trunc(rec['query'], 40))}» — {status}")
             wait = (self.wait_until or 0) - time.monotonic()
             if wait > 1:
-                out.append(f"  ⏸ Soulseek pacing — next search in ~{int(wait)}s")
+                out.append(f"  pacing — next search in ~{int(wait)}s")
             return "\n".join(out)[:MESSAGE_LIMIT]
 
         m = self.match
-        out = [f"⬇️ {header}"]
-        line = f"🎯 {esc(m.get('peer', '?'))} · {esc(m.get('quality', ''))}"
+        out = [header]
+        line = f"peer {esc(m.get('peer', '?'))} · {esc(m.get('quality', ''))}"
         if m.get("score") is not None:
             line += f" · match {m['score']:.0f}"
         if (m.get("copies") or 0) > 1:
