@@ -15,6 +15,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Tag matches pyproject version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          grep -qx "version = \"$tag\"" pyproject.toml \
+            || { echo "tag v$tag != pyproject.toml version — bump it before tagging"; exit 1; }
       - uses: astral-sh/setup-uv@v6
       - name: Run tests
         run: |
