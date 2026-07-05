@@ -48,6 +48,14 @@ services:
       MAX_SAMPLE_RATE_HZ: ${MAX_SAMPLE_RATE_HZ:-96000}
     volumes:
       - ${MUSIC_LIBRARY_DIR:-/media/music}:/music
+      # Crash ledger for in-flight downloads (journal.py) — must outlive
+      # container recreates. Pre-create it owned by the deploy user
+      # (`install -d -o 1000 -g 1000 bot-data`) — docker would otherwise
+      # auto-create it root-owned on first up. Files inside land 0666.
+      - ./bot-data:/data
+    # Give a nearly-finished track a chance to import + tag before SIGKILL;
+    # anything longer is the resume journal's job.
+    stop_grace_period: 30s
     extra_hosts:
       - host.docker.internal:host-gateway
     depends_on:

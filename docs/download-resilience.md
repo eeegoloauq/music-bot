@@ -3,7 +3,9 @@
 What happens to in-flight downloads when the bot restarts — deploys recreate
 the container, but crashes, OOM kills, and host reboots hit the same path.
 This note describes the failure, weighs a deploy gate against a persistent
-journal, and proposes the journal. Nothing below is implemented yet.
+journal, and documents the journal as implemented (`src/journal.py`, the
+runner bracket and `_resume_pending` in `bot.py`, attach-first enqueue in
+`soulseek/downloader.py`).
 
 ## What breaks today
 
@@ -46,7 +48,7 @@ Rejected because it treats one restart cause, not the failure:
 - **Wrong owner.** The gate logic would live in the host's deploy script,
   outside this repo and its CI; the bot can't test or version it.
 
-## Option B — persistent journal + resume (proposed)
+## Option B — persistent journal + resume (implemented)
 
 Persist the *intent*, not the transfer state — slskd already owns transfer
 state, and the library's tag-based dedup already makes re-runs idempotent.
@@ -98,20 +100,29 @@ On startup, after `post_init`:
 - **No general task queue.** The journal is a crash ledger, not a
   scheduling system; the in-memory semaphore still serializes downloads.
 
-### Implementation sketch
+### Implementation notes (as landed)
 
-- `src/journal.py` (~80 lines): load/add/remove/bump with atomic writes —
-  pure, unit-testable.
-- `bot.py`: the album/track entry points currently take a PTB `Update`;
-  resume has none. Extract the small context they actually use (chat id +
-  status message handle) so both a fresh Update and a journal entry can
-  drive the same flow. This refactor is most of the diff.
-- `compose.yaml`: add `- ./bot-data:/data` to the bot service — the repo
-  dir on the host persists across recreates. (`config.py` already treats
-  `/data` as the config home; task (2)'s log persistence can use the same
-  mount later.)
-- Optional garnish: `stop_grace_period: 30s` so graceful deploys let a
-  nearly-finished track import before SIGKILL.
+- `src/journal.py`: load/add/remove/bump with atomic rewrites; strictly
+  fail-open — persistence is best-effort, the download is the job.
+- `bot.py`: the download flows run behind a small `ChatIO` seam (send text
+  / photo into a chat) instead of the PTB `Update`, so a journal entry
+  drives the same code path as a pasted link. The runners share one
+  bracket: accept → `journal.add` → download → report → `journal.remove`.
+- **Convergent re-enqueue.** After a restart slskd is often still
+  downloading the very file the resumed request picks again, and slskd
+  rejects duplicate enqueues. `_ensure_enqueued` attaches to a live
+  (non-terminal) transfer row instead of enqueueing, and a refused enqueue
+  re-checks for a live row before declaring the peer broken — so the
+  duplicate rejection converges to an attach even when it races the first
+  check. `wait_for_files` keys on (username, filename), so attached
+  transfers report progress like fresh ones.
+- **Force is not resumed.** A resumed force re-run would re-stage the
+  half-written fresh copy over the original's backup in
+  `.redownload-backup`; a plain resume just fills what's missing.
+- `compose.yaml`: `- ./bot-data:/data` (pre-create the dir owned by the
+  deploy user — docker auto-creates missing bind-mount dirs as root) and
+  `stop_grace_period: 30s` so a nearly-finished track can import before
+  SIGKILL. Task (2)'s log persistence can reuse the same mount.
 
 ### Verification
 

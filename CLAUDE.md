@@ -63,6 +63,10 @@ today: `soulseek`.
   rip-source notes in Navidrome).
 - **Cover art** — stored as `cover_uuid` (historical name) but actually holds the full Deezer CDN
   URL. `library.files._cover_url` / `metadata.client.cover_url` resize it.
+- **Resume journal** — accepted downloads persist in `/data/pending-downloads.json` (host:
+  `./bot-data/`, gitignored — don't "clean up") until their outcome reaches the user; startup
+  re-issues leftovers (2-attempt cap, force not resumed). Enqueue is attach-first so resumed
+  requests converge on transfers slskd kept running. See docs/download-resilience.md.
 
 ## Deploy
 
