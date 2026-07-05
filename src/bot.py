@@ -1187,6 +1187,18 @@ async def _error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> 
     logger.exception("Unhandled exception", exc_info=context.error)
 
 
+# asyncio keeps only weak references to tasks — a long-running startup task
+# (the resume driver in particular) must be strongly held or it can be
+# garbage-collected mid-execution.
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _spawn_background(coro) -> None:
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+
 async def _resume_pending(app: Application) -> None:
     """Re-issue downloads whose outcome the user never saw — the bot was
     restarted (deploy, crash, reboot) mid-download. Tag-based dedup skips
@@ -1242,10 +1254,10 @@ async def _post_init(app: Application) -> None:
     # Reclaim space from prior failed sessions — partial files left in
     # the slskd staging dir would otherwise pile up forever. Async so the
     # bot is responsive even on a slow fs scan.
-    asyncio.create_task(soulseek.cleanup_orphan_staging())
+    _spawn_background(soulseek.cleanup_orphan_staging())
     # Pick up downloads a restart orphaned. Best-effort and serialized on
     # the download semaphore like any other request.
-    asyncio.create_task(_resume_pending(app))
+    _spawn_background(_resume_pending(app))
 
 
 async def _shutdown(app: Application) -> None:
