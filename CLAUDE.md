@@ -17,6 +17,8 @@ Telegram msg (bot.py)          URL detect, auth (ALLOWED_USERS), force-mode, dis
       (docs/source-selection.md = full picture)
   → library/                   files.py = path sanitise + tag-based dedup; tagger.py = FLAC/M4A/MP3
   → navidrome.py               Subsonic scan trigger after writes
+  ⇢ reporting.py               downloader/matcher emit progress events (on_event dicts) →
+                               live-edited status message + honest final summary (bot.LiveStatus)
 ```
 
 The audio source sits behind a small contract (`download_album` / `download_single_track`); everything

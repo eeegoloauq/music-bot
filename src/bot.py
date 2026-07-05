@@ -31,6 +31,7 @@ from telegram.request import HTTPXRequest
 from config import TG_TOKEN, ALLOWED_USERS, MUSIC_DIR, NAVI_LOGIN, NAVI_PASS, NAVI_PUBLIC_URL
 import journal
 import metadata
+import reporting
 import soulseek
 import navidrome
 import retagger
@@ -117,6 +118,36 @@ def _short(e: BaseException, limit: int = 120) -> str:
     """
     s = re.sub(r"https?://\S+", "<url>", str(e))
     return s if len(s) <= limit else s[: limit - 3] + "..."
+
+
+class LiveStatus:
+    """One live-updating status message. Renders the current progress model
+    and edits the message in place — throttled so phase changes land fast
+    (≥1s apart) while high-frequency transfer updates coalesce (≥3s)."""
+
+    PHASE_INTERVAL = 1.0
+    PROGRESS_INTERVAL = 3.0
+
+    def __init__(self, edit_fn, render_fn):
+        self._edit = edit_fn        # async (html_text) -> None
+        self._render = render_fn    # () -> html_text
+        self._last_edit = 0.0
+        self._last_text = ""
+
+    async def refresh(self, force: bool = False):
+        now = time.monotonic()
+        interval = self.PHASE_INTERVAL if force else self.PROGRESS_INTERVAL
+        if now - self._last_edit < interval:
+            return
+        text = self._render()
+        if text == self._last_text:
+            return
+        self._last_edit = now
+        self._last_text = text
+        try:
+            await self._edit(text)
+        except TelegramError:
+            pass
 
 
 def authorized(func):
@@ -647,16 +678,16 @@ async def _trigger_scan(*, slskd_mode: str = "none") -> str:
 
 
 async def _resolve_and_download(update: Update, url: str, force: bool = False):
-    status_msg = await update.message.reply_text("Resolving link...")
+    status_msg = await update.message.reply_text("🔗 Resolving link…")
     try:
         result = await metadata.resolve_link(url)
     except Exception as e:
         logger.error("Odesli resolve failed for %s: %s", url, e)
-        await status_msg.edit_text(f"Failed to resolve link: {_short(e)}")
+        await status_msg.edit_text(f"❌ Failed to resolve link: {_short(e)}")
         return
 
     if result is None:
-        await status_msg.edit_text("Could not resolve link.")
+        await status_msg.edit_text("❌ Could not resolve link.")
         return
 
     link_type, album_or_track_id = result
@@ -685,11 +716,12 @@ class ChatIO:
         return await self.bot.send_message(self.chat_id, text)
 
     async def reply_photo(self, photo, caption: str):
-        return await self.bot.send_photo(self.chat_id, photo=photo, caption=caption)
+        return await self.bot.send_photo(self.chat_id, photo=photo, caption=caption,
+                                         parse_mode="HTML")
 
 
 async def _send_result(io: ChatIO, status_msg, text: str, album_dir: str) -> None:
-    """Send download result with cover art if available, otherwise plain text."""
+    """Send download result (HTML) with cover art if available, else plain text."""
     cover_path = os.path.join(album_dir, "cover.jpg")
     if os.path.isfile(cover_path):
         try:
@@ -700,7 +732,7 @@ async def _send_result(io: ChatIO, status_msg, text: str, album_dir: str) -> Non
         except (TelegramError, OSError):
             pass
     try:
-        await status_msg.edit_text(text)
+        await status_msg.edit_text(text, parse_mode="HTML")
     except TelegramError:
         pass
 
@@ -721,9 +753,10 @@ async def _run_album(io: ChatIO, album_id: str, force: bool = False,
     _in_flight.add(key)
     try:
         if _download_semaphore.locked():
-            status_msg = await io.reply_text("Queued, waiting for current download...")
+            status_msg = await io.reply_text(
+                "⏳ Queued — will start after the current download finishes")
         else:
-            status_msg = await io.reply_text("Fetching album info...")
+            status_msg = await io.reply_text("⏳ Fetching album info…")
         entry = resume_entry or journal.PendingDownload(
             kind="album", id=album_id, chat_id=io.chat_id, force=force)
         entry.status_message_id = status_msg.message_id
@@ -760,7 +793,7 @@ async def _do_download_album(io: ChatIO, status_msg, album_id: str, force: bool 
             await metadata.enrich_genres(album)
         except Exception as e:
             logger.error("Failed to fetch album %s: %s", album_id, e)
-            await status_msg.edit_text(f"Failed to fetch album info: {_short(e)}")
+            await status_msg.edit_text(f"❌ Failed to fetch album info: {_short(e)}")
             return
 
         # Force re-download: move the existing album OUT of the artist tree
@@ -784,66 +817,25 @@ async def _do_download_album(io: ChatIO, status_msg, album_id: str, force: bool 
                 os.rename(existing_dir, backup_dir)
                 logger.info("Force re-download: staged backup %s -> %s", existing_dir, backup_dir)
 
-        try:
-            await status_msg.edit_text(
-                f"Downloading: {album['artist']} — {album['title']}\n"
-                f"Tracks: {len(album['tracks'])}"
-            )
-        except TelegramError:
-            pass
+        prog = reporting.AlbumProgress(
+            album["artist"], album["title"], len(album["tracks"]))
+        live = LiveStatus(
+            edit_fn=lambda text: status_msg.edit_text(text, parse_mode="HTML"),
+            render_fn=prog.render,
+        )
+        await live.refresh(force=True)
 
-        _progress_start = time.monotonic()
-        _last_edit = [0.0]
-
-        async def progress(current, total, download_current, download_total, track_title,
-                            transfer=None):
-            # Throttle mid-album edits so Telegram doesn't rate-limit; always
-            # emit the first and last so the user sees start and completion.
-            now = time.monotonic()
-            is_track_edge = current in (1, total) and transfer is None
-            if not is_track_edge and (now - _last_edit[0]) < 3.0:
-                return
-            _last_edit[0] = now
-            done = download_current - 1
-            elapsed = now - _progress_start
-            # Track speed/pct as live indicator. ETA is always album-level so
-            # the user sees one consistent "time remaining" — no flicker
-            # between per-track and whole-album estimates.
-            track_extras = ""
-            if transfer:
-                speed_bps = transfer.get("speed_bps", 0) or 0
-                pct = transfer.get("pct", 0) or 0
-                if speed_bps > 0:
-                    if speed_bps >= 1_048_576:
-                        speed_s = f"{speed_bps / 1_048_576:.1f} MB/s"
-                    else:
-                        speed_s = f"{speed_bps / 1024:.0f} KB/s"
-                    track_extras = f" · {pct:.0f}% · {speed_s}"
-            album_eta = ""
-            if done > 0:
-                eta_sec = int((elapsed / done) * (download_total - done))
-                if eta_sec >= 60:
-                    album_eta = f" · ~{eta_sec // 60}m {eta_sec % 60}s left"
-                elif eta_sec > 0:
-                    album_eta = f" · ~{eta_sec}s left"
-            try:
-                text = (
-                    f"Downloading: {album['artist']} — {album['title']}\n"
-                    f"[{current}/{total}] {track_title}"
-                    f"{track_extras}{album_eta}"
-                )
-                await status_msg.edit_text(text)
-            except TelegramError:
-                pass
+        async def on_event(ev: dict):
+            await live.refresh(force=prog.handle(ev))
 
         try:
             result = await soulseek.download_album(
-                album_id, MUSIC_DIR, progress=progress, album=album,
+                album_id, MUSIC_DIR, album=album, on_event=on_event,
             )
         except Exception as e:
             logger.error("Album download failed (%s — %s): %s", album["artist"], album["title"], e)
             await _restore_backup(backup_dir, restore_target)
-            await status_msg.edit_text(f"Download failed: {_short(e)}")
+            await status_msg.edit_text(f"❌ Download failed: {_short(e)}")
             return
 
         # Only drop the backup once the fresh copy is a clean, complete success.
@@ -869,40 +861,32 @@ async def _do_download_album(io: ChatIO, status_msg, album_id: str, force: bool 
             got = result["downloaded"]
             miss = len(result["failed"])
             await status_msg.edit_text(
-                f"Kept existing: {album['artist']} — {album['title']}\n"
+                f"♻️ Kept existing: {album['artist']} — {album['title']}\n"
                 f"Re-download was incomplete ({got} ok, {miss} unavailable), "
                 f"so the original copy was restored."
             )
             return
 
-        if result["downloaded"] == 0 and not result["failed"]:
-            done_text = f"Already in library: {album['artist']} — {album['title']}"
-        else:
-            parts = []
-            if result["downloaded"]:
-                saved = f"{result['downloaded']} saved"
-                if result.get("format"):
-                    saved += f" · {result['format']}"
-                if result.get("with_lyrics"):
-                    saved += f" · lyrics {result['with_lyrics']}/{result['downloaded']}"
-                parts.append(saved)
-            if result["skipped"]:
-                parts.append(f"{result['skipped']} skipped")
-            if result["failed"]:
-                shown = result["failed"][:3]
-                details = ", ".join(f"{t} ({r})" for t, r in shown)
-                if len(result["failed"]) > 3:
-                    details += f" +{len(result['failed']) - 3} more"
-                parts.append(f"{len(result['failed'])} failed: {details}")
-            done_text = f"Done! {album['artist']} — {album['title']}\n" + ", ".join(parts) + "."
-
+        scan_note = ""
         if result["downloaded"] > 0:
-            done_text += "\n" + await _trigger_scan()
+            scan_note = await _trigger_scan()
 
         # Share link works even for "already in library" — useful when re-pasting old albums.
-        share_url = await _try_share_album(album["artist"], album["title"], skip_delay=result["downloaded"] == 0)
-        if share_url:
-            done_text += f"\n\n{share_url}"
+        share_url = await _try_share_album(
+            album["artist"], album["title"], skip_delay=result["downloaded"] == 0)
+
+        if result["downloaded"] == 0 and not result["failed"]:
+            done_text = (
+                f"📚 <b>{reporting.esc(album['artist'])} — "
+                f"{reporting.esc(album['title'])}</b>\nAlready in library."
+            )
+            if share_url:
+                done_text += f"\n\n{share_url}"
+        else:
+            done_text = reporting.render_album_final(
+                album["artist"], album["title"], result,
+                scan_note=scan_note, share_url=share_url,
+            )
 
         await _send_result(io, status_msg, done_text, result["album_dir"])
 
@@ -923,9 +907,10 @@ async def _run_track(io: ChatIO, track_id: str, force: bool = False,
     _in_flight.add(key)
     try:
         if _download_semaphore.locked():
-            status_msg = await io.reply_text("Queued, waiting for current download...")
+            status_msg = await io.reply_text(
+                "⏳ Queued — will start after the current download finishes")
         else:
-            status_msg = await io.reply_text("Fetching track info...")
+            status_msg = await io.reply_text("⏳ Fetching track info…")
         entry = resume_entry or journal.PendingDownload(
             kind="track", id=track_id, chat_id=io.chat_id, force=force)
         entry.status_message_id = status_msg.message_id
@@ -946,7 +931,7 @@ async def _do_download_track(io: ChatIO, status_msg, track_id: str, force: bool 
                 await metadata.enrich_genres(album_ctx)
         except Exception as e:
             logger.error("Failed to fetch track %s: %s", track_id, e)
-            await status_msg.edit_text(f"Failed to fetch track info: {_short(e)}")
+            await status_msg.edit_text(f"❌ Failed to fetch track info: {_short(e)}")
             return
 
         if force:
@@ -956,45 +941,60 @@ async def _do_download_track(io: ChatIO, status_msg, track_id: str, force: bool 
                 os.remove(existing)
                 logger.info("Force re-download: removed %s", existing)
 
-        try:
-            await status_msg.edit_text(f"Downloading: {track['artist']} — {track['title']}")
-        except TelegramError:
-            pass
+        prog = reporting.TrackProgress(track["artist"], track["title"])
+        live = LiveStatus(
+            edit_fn=lambda text: status_msg.edit_text(text, parse_mode="HTML"),
+            render_fn=prog.render,
+        )
+        await live.refresh(force=True)
+
+        async def on_event(ev: dict):
+            await live.refresh(force=prog.handle(ev))
 
         try:
             path, was_downloaded, fmt = await soulseek.download_single_track(
-                track, album_ctx, MUSIC_DIR,
+                track, album_ctx, MUSIC_DIR, on_event=on_event,
             )
         except RuntimeError as e:
             if "No FLAC found" in str(e):
                 if await _offer_mp3_fallback(status_msg, track_id, track, album_ctx):
                     return
                 await status_msg.edit_text(
-                    f"No FLAC or mp3 fallback found for {track['artist']} — {track['title']}"
+                    f"❌ No FLAC or acceptable lossy fallback for "
+                    f"{track['artist']} — {track['title']}"
                 )
                 return
             logger.error("Track download failed (%s — %s): %s", track["artist"], track["title"], e)
-            await status_msg.edit_text(f"Download failed: {_short(e)}")
+            await status_msg.edit_text(f"❌ Download failed: {_short(e)}")
             return
         except Exception as e:
             logger.error("Track download failed (%s — %s): %s", track["artist"], track["title"], e)
-            await status_msg.edit_text(f"Download failed: {_short(e)}")
+            await status_msg.edit_text(f"❌ Download failed: {_short(e)}")
             return
 
+        scan_note = ""
         if was_downloaded:
             scan_note = await _trigger_scan()
-            fmt_str = f" · {fmt}" if fmt else ""
-            done_text = f"Done! {track['artist']} — {track['title']}{fmt_str}\n{scan_note}"
-        else:
-            done_text = f"Already in library: {track['artist']} — {track['title']}"
 
         share_url = await _try_share_album(
             album_ctx.get("artist", track["artist"]),
             album_ctx.get("title", ""),
             skip_delay=not was_downloaded,
         )
-        if share_url:
-            done_text += f"\n\n{share_url}"
+
+        if was_downloaded:
+            done_text = reporting.render_track_final(
+                track["artist"], track["title"], fmt, prog.peer,
+                time.monotonic() - prog.started,
+                scan_note=scan_note, share_url=share_url,
+            )
+        else:
+            done_text = (
+                f"📚 <b>{reporting.esc(track['artist'])} — "
+                f"{reporting.esc(track['title'])}</b>\nAlready in library."
+            )
+            if share_url:
+                done_text += f"\n\n{share_url}"
 
         await _send_result(io, status_msg, done_text, os.path.dirname(path))
 
@@ -1047,8 +1047,8 @@ async def _offer_mp3_fallback(
     ])
     try:
         await status_msg.edit_text(
-            f"FLAC not found for {track['artist']} — {track['title']}\n\n"
-            f"Lossy fallback available: {summary}",
+            f"🔍 FLAC not found for {track['artist']} — {track['title']}\n\n"
+            f"💿 Lossy fallback available: {summary}",
             reply_markup=keyboard,
         )
     except TelegramError as e:
@@ -1088,7 +1088,7 @@ async def _handle_lossy_callback(update: Update, context: ContextTypes.DEFAULT_T
     if action == "skip":
         with contextlib.suppress(TelegramError):
             await query.edit_message_text(
-                f"Skipped — FLAC not available for {track['artist']} — {track['title']}"
+                f"⏭ Skipped — FLAC not available for {track['artist']} — {track['title']}"
             )
         return
 
@@ -1098,7 +1098,7 @@ async def _handle_lossy_callback(update: Update, context: ContextTypes.DEFAULT_T
     summary = _format_lossy_summary(candidates)
     with contextlib.suppress(TelegramError):
         await query.edit_message_text(
-            f"Downloading: {track['artist']} — {track['title']} ({summary})"
+            f"⬇️ Downloading: {track['artist']} — {track['title']} ({summary})"
         )
 
     in_flight_key = f"track:{entry['track_id']}:lossy"
@@ -1109,11 +1109,21 @@ async def _handle_lossy_callback(update: Update, context: ContextTypes.DEFAULT_T
     _in_flight.add(in_flight_key)
     try:
         async with _download_semaphore:
+            prog = reporting.TrackProgress(track["artist"], track["title"])
+            live = LiveStatus(
+                edit_fn=lambda text: query.edit_message_text(text, parse_mode="HTML"),
+                render_fn=prog.render,
+            )
+
+            async def on_event(ev: dict):
+                await live.refresh(force=prog.handle(ev))
+
             try:
                 path, _was, fmt = await soulseek.download_single_track(
                     track, album_ctx, MUSIC_DIR,
                     accept_lossy=True,
                     precomputed_candidates=candidates,
+                    on_event=on_event,
                 )
             except Exception as e:
                 logger.error(
@@ -1121,23 +1131,22 @@ async def _handle_lossy_callback(update: Update, context: ContextTypes.DEFAULT_T
                     track["artist"], track["title"], e,
                 )
                 with contextlib.suppress(TelegramError):
-                    await query.edit_message_text(f"Lossy download failed: {_short(e)}")
+                    await query.edit_message_text(f"❌ Lossy download failed: {_short(e)}")
                 return
 
             scan_note = await _trigger_scan()
-            fmt_str = f" · {fmt}" if fmt else ""
-            done_text = (
-                f"Done! {track['artist']} — {track['title']}{fmt_str}\n{scan_note}"
-            )
             share_url = await _try_share_album(
                 album_ctx.get("artist", track["artist"]),
                 album_ctx.get("title", ""),
                 skip_delay=False,
             )
-            if share_url:
-                done_text += f"\n\n{share_url}"
+            done_text = reporting.render_track_final(
+                track["artist"], track["title"], fmt, prog.peer,
+                time.monotonic() - prog.started,
+                scan_note=scan_note, share_url=share_url,
+            )
             with contextlib.suppress(TelegramError):
-                await query.edit_message_text(done_text)
+                await query.edit_message_text(done_text, parse_mode="HTML")
     finally:
         _in_flight.discard(in_flight_key)
 
@@ -1229,7 +1238,7 @@ async def _resume_pending(app: Application) -> None:
         if entry.status_message_id:
             with contextlib.suppress(TelegramError):
                 await app.bot.edit_message_text(
-                    "Bot restarted — resuming this download…",
+                    "🔁 Bot restarted — resuming this download…",
                     chat_id=entry.chat_id, message_id=entry.status_message_id,
                 )
         io = ChatIO(app.bot, entry.chat_id)
