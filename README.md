@@ -1,5 +1,6 @@
 # Music Bot
 
+[![Tests](https://github.com/eeegoloauq/music-bot/actions/workflows/tests.yml/badge.svg)](https://github.com/eeegoloauq/music-bot/actions/workflows/tests.yml)
 [![GitHub Release](https://img.shields.io/github/v/release/eeegoloauq/music-bot)](https://github.com/eeegoloauq/music-bot/releases)
 [![GHCR](https://img.shields.io/badge/ghcr.io-music--bot-blue)](https://github.com/eeegoloauq/music-bot/pkgs/container/music-bot)
 [![License](https://img.shields.io/github/license/eeegoloauq/music-bot)](LICENSE)
@@ -12,10 +13,28 @@ minute later it's playing in Navidrome.
 It uses [Deezer](https://www.deezer.com/)'s open API for metadata (no login, no token) and downloads
 from Soulseek peers through [slskd](https://github.com/slskd/slskd).
 
+<h2 align="center">Paste a link, get the album</h2>
+<p align="center">
+  <img src=".github/screenshots/download-progress.jpg" width="390" alt="Album download in progress">
+  <img src=".github/screenshots/download-done.jpg" width="390" alt="Finished download with summary">
+</p>
+<p align="center"><sub>One status message, edited live: the chosen peer with its quality and match score,
+per-track progress with speed and ETA, then a final summary — format, quality, how long it took, who it
+came from.</sub></p>
+
+<h2 align="center">Search from any chat</h2>
 <p align="center">
   <img src=".github/screenshots/search.jpg" width="440" alt="Inline search">
-  <img src=".github/screenshots/download.jpg" width="440" alt="Album download">
 </p>
+<p align="center"><sub>Type <code>@yourbot</code> and a name — albums and tracks with covers. Tap one to
+send the link, and the download kicks off.</sub></p>
+
+<h2 align="center">Share what you're playing</h2>
+<p align="center">
+  <img src=".github/screenshots/share.jpg" width="440" alt="Now playing share">
+</p>
+<p align="center"><sub><code>np</code> sends the track you're playing right now as audio, <code>s</code> a
+share link with cover art, <code>l</code> the lyrics.</sub></p>
 
 ## What it can do
 
@@ -23,6 +42,9 @@ from Soulseek peers through [slskd](https://github.com/slskd/slskd).
   Music, SoundCloud, Amazon Music, or Shazam. You get FLAC with full metadata in your library.
 - **mp3 fallback.** If no peer has a lossless copy, the bot offers you an mp3 (≥ 320 kbps) with a
   tap — it never silently downgrades quality on you.
+- **Picky about sources.** Every candidate file is duration-checked against Deezer track by track and
+  scored on match confidence and peer reliability before anything is queued. The full policy is
+  written up in [docs/source-selection.md](docs/source-selection.md).
 - **Good genres.** Deezer's genres plus Last.fm community tags, so Navidrome gets useful tags like
   "witch house" or "future garage" instead of just "Electronic".
 - **Re-tag your library.** `/retag` walks everything you already have and refreshes the tags from
@@ -134,6 +156,7 @@ Then `docker compose up -d`.
 
 A few things worth knowing:
 
+- The image is multi-arch (amd64 + arm64), so a Raspberry Pi or an ARM VPS works fine.
 - The **Soulseek peer port** (`50300` by default, or set `SLSKD_LISTEN_PORT`) needs a port forward on
   your router if you want incoming peer connections.
 - If Navidrome runs in the **same compose stack**, use `NAVIDROME_URL=http://navidrome:4533`.
