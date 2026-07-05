@@ -212,10 +212,10 @@ else — including your cover art — untouched.
 
 ## Contributing
 
-Issues and PRs are welcome. The test suite runs fully offline (slskd and all network calls are
-stubbed), so `uv run pytest` needs no credentials and no containers — if it's green, CI will agree.
-Keep changes small and focused; for anything bigger than a fix, open an issue first so we can talk
-it over.
+Issues and PRs are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for the dev setup and
+guidelines. The test suite runs fully offline (slskd and all network calls are stubbed), so
+`uv run pytest` needs no credentials and no containers — if it's green, CI will agree. Keep changes
+small and focused; for anything bigger than a fix, open an issue first so we can talk it over.
 
 ## Legal
 
