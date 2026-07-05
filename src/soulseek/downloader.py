@@ -705,6 +705,13 @@ async def download_album(
                 "Folder fallback #%d: peer=%s score=%.1f covers %d remaining track(s)",
                 folder_rank, folder.folder.username, folder.score, len(folder_chosen),
             )
+            # Keep the status UI on the peer actually being used — without
+            # this, a folder switch after abandonment kept showing the
+            # abandoned peer's name and score.
+            await emit(t="folder", peer=folder.folder.username,
+                       covered=n_tracks - folder.missing_count, total=n_tracks,
+                       quality=quality_label(quality_lock), score=folder.score,
+                       alts=len(folder_chain) - folder_rank - 1)
         failures_in_a_row = 0
         for i, track in to_download:
             if track["id"] not in folder_chosen:
