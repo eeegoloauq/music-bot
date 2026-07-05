@@ -17,7 +17,6 @@ import logging
 import os
 import shutil
 import time
-from typing import Awaitable, Callable
 
 import aiohttp
 
@@ -44,8 +43,6 @@ from soulseek.selection import (
 
 logger = logging.getLogger(__name__)
 
-ProgressCallback = Callable[[int, int, int, int, str], Awaitable[None]] | None
-
 # Where slskd dumps completed downloads (mounted into both slskd and music-bot
 # containers). Override via env if your compose deviates.
 SLSKD_DOWNLOAD_DIR = os.environ.get("SLSKD_DOWNLOAD_DIR", "/music/.slskd-downloads")
@@ -66,6 +63,33 @@ class PeerTransferError(Exception):
 
 
 # --- helpers ---------------------------------------------------------------
+
+def _make_emit(on_event):
+    """Wrap the optional async event callback (see reporting.py for the
+    vocabulary) so a UI hiccup can never break a download."""
+    async def _emit(**ev):
+        if on_event is None:
+            return
+        try:
+            await on_event(ev)
+        except Exception:
+            logger.debug("progress event dropped", exc_info=True)
+    return _emit
+
+
+def _no_match_reason(diag: dict) -> str:
+    """Honest user-facing reason for an empty candidate list, from the
+    find_track diagnostics: distinguish 'Soulseek has nothing at all' from
+    'peers only have lossy rips' from 'files exist but none credibly match'."""
+    if diag.get("usable_seen"):
+        return "files found but none matched this track"
+    if diag.get("lossy_dropped"):
+        label = diag.get("best_lossy_label") or "lossy"
+        return f"only lossy copies found ({label})"
+    if diag.get("files_seen"):
+        return "files found but none matched this track"
+    return "nothing found on Soulseek"
+
 
 async def _download_cover(cover_uuid: str, album_dir: str) -> bytes | None:
     if not cover_uuid:
@@ -370,6 +394,7 @@ async def download_single_track(
     dest_dir: str,
     accept_lossy: bool = False,
     precomputed_candidates: list[SearchResult] | None = None,
+    on_event=None,
 ) -> tuple[str, bool, str]:
     """Download one track. Returns ``(filepath, was_downloaded, format_label)``.
     If the file already exists in the library, patch missing tags and return
@@ -378,7 +403,11 @@ async def download_single_track(
     ``accept_lossy=True`` tells the matcher to look for mp3≥256kbps + m4a
     instead of FLAC. ``precomputed_candidates`` skips the slskd search step
     when the caller already ran ``find_lossy_candidates`` (mp3-fallback path).
+
+    ``on_event`` (optional async callback) receives progress events for the
+    live status UI — see reporting.py.
     """
+    emit = _make_emit(on_event)
     existing_album_dir = _locate_existing_album(dest_dir, album_ctx)
     if existing_album_dir is not None:
         album_dir = existing_album_dir
@@ -404,32 +433,59 @@ async def download_single_track(
         track.get("duration", 0),
     ))
 
+    best_score: float | None = None
     if precomputed_candidates is not None:
         candidates = list(precomputed_candidates)
     else:
+        diag: dict = {}
         auto, alternatives = await find_track(
             track, album_artist=album_ctx.get("artist"), accept_lossy=accept_lossy,
+            on_event=on_event, diag=diag,
         )
+        top = auto or (alternatives[0] if alternatives else None)
+        if top is not None:
+            best_score = top.match_score
         candidates = order_for_download(auto, alternatives)
+
+        if not candidates:
+            lyrics_task.cancel()
+            reason = _no_match_reason(diag)
+            if accept_lossy:
+                raise RuntimeError(
+                    f"No mp3/m4a fallback either for {track['artist']} — "
+                    f"{track['title']} ({reason})"
+                )
+            raise RuntimeError(
+                f"No FLAC found on Soulseek for {track['artist']} — "
+                f"{track['title']} ({reason})"
+            )
 
     if not candidates:
         lyrics_task.cancel()
-        if accept_lossy:
-            raise RuntimeError(
-                f"No mp3/m4a fallback either for {track['artist']} — {track['title']}"
-            )
         raise RuntimeError(
-            f"No FLAC found on Soulseek for {track['artist']} — {track['title']}"
+            f"No candidates for {track['artist']} — {track['title']}"
         )
+
+    await emit(t="match", peer=candidates[0].username,
+               quality=_format_label_from_result(candidates[0]),
+               score=best_score, copies=len(candidates))
+    await emit(t="track", i=1, state="start", title=track["title"])
+
+    async def _on_track_progress(pct: float, speed_bps: int, eta_sec: int):
+        await emit(t="track_progress", i=1, pct=pct, speed_bps=speed_bps,
+                   eta=eta_sec)
 
     t0 = time.monotonic()
     res = await _try_candidates(
         candidates, track, album_ctx, album_dir, cover_data, lyrics_task,
+        on_progress=_on_track_progress,
     )
     if not res:
         raise RuntimeError("All candidate peers failed.")
     filepath, size, fmt, chosen = res
     elapsed = time.monotonic() - t0
+    await emit(t="track", i=1, state="done", title=track["title"],
+               fmt=fmt, peer=chosen.username)
     speed = (size / (1024 * 1024)) / elapsed if elapsed > 0 else 0
     logger.info(
         "Track: %s — %s | %.1fMB in %.1fs (%.1f MB/s) [%s] from %s",
@@ -442,12 +498,17 @@ async def download_single_track(
 async def download_album(
     album_id: str,
     dest_dir: str,
-    progress: ProgressCallback = None,
     album: dict | None = None,
+    on_event=None,
 ) -> dict:
     """Download an album. Returns
-    ``{album_dir, downloaded, skipped, failed, total, format, with_lyrics}``.
+    ``{album_dir, downloaded, skipped, failed, total, format, with_lyrics,
+    elapsed_secs, source_counts}``.
+
+    ``on_event`` (optional async callback) receives progress events for the
+    live status UI — see reporting.py for the vocabulary.
     """
+    emit = _make_emit(on_event)
     # Clear terminal rows from prior sessions/albums before enqueueing. slskd
     # never prunes history on its own; a stale 'Completed, Errored' row with the
     # same filename would otherwise resolve this album's wait_for_files instantly
@@ -514,13 +575,22 @@ async def download_album(
         return _result_dict(album_dir, downloaded, skipped, failed, total,
                             format_label, with_lyrics)
 
+    # Stable per-track indices for the progress UI, shared with the events
+    # below — same value across retries from different peers.
+    progress_idx_by_id = {t["id"]: idx for idx, (_, t) in enumerate(to_download, 1)}
+    await emit(t="plan",
+               tracks=[{"i": idx, "title": t["title"]}
+                       for idx, (_, t) in enumerate(to_download, 1)],
+               total=total, skipped=skipped)
+
     # Folder-match wins outright when one peer has every track of the album:
     # single queue slot, no cross-version mixes, fewer flaky connections.
     # When the chosen peer rejects K tracks in a row we abandon it for the
     # next folder-rank alternative (a single peer with bad share/queue state
     # otherwise eats the whole album).
     track_provenance: dict[str, str] = {}
-    folder_match, folder_alternatives, album_pool = await find_album(album)
+    folder_match, folder_alternatives, album_pool = await find_album(
+        album, on_event=on_event)
 
     # Folder-vs-per-track policy (coverage thresholds, quality lock) lives in
     # selection.plan_folder_phase; this function just executes the plan.
@@ -541,6 +611,10 @@ async def download_album(
                     label, folder_match.folder.username, folder_match.score,
                     n_tracks - folder_match.missing_count, n_tracks,
                     quality_label(quality_lock), alt_note)
+        await emit(t="folder", peer=folder_match.folder.username,
+                   covered=n_tracks - folder_match.missing_count,
+                   total=n_tracks, quality=quality_label(quality_lock),
+                   score=folder_match.score, alts=len(folder_alternatives))
 
     # Prefetch lyrics in parallel; the per-track download awaits its own task.
     lyrics_tasks: dict[str, asyncio.Task] = {
@@ -550,10 +624,6 @@ async def download_album(
         for _, t in to_download
     }
 
-    # Stable per-track index for the bot's progress UI — same value across
-    # retries from different peers.
-    download_total = len(to_download)
-    progress_idx_by_id = {t["id"]: idx for idx, (_, t) in enumerate(to_download, 1)}
     remaining_track_ids: set[str] = {t["id"] for _, t in to_download}
     last_error: dict[str, str] = {}
     # (username, filename) pairs that already failed a transfer this album —
@@ -569,21 +639,13 @@ async def download_album(
         nonlocal album_bytes, downloaded, format_label, with_lyrics
         progress_idx = progress_idx_by_id[track["id"]]
 
-        async def _on_track_progress(pct: float, speed_bps: int, eta_sec: int,
-                                      _i=i, _title=track["title"]):
-            if progress:
-                with contextlib.suppress(Exception):
-                    await progress(
-                        _i, total, progress_idx, download_total, _title,
-                        {"pct": pct, "speed_bps": speed_bps, "eta_sec": eta_sec},
-                    )
+        async def _on_track_progress(pct: float, speed_bps: int, eta_sec: int):
+            await emit(t="track_progress", i=progress_idx, pct=pct,
+                       speed_bps=speed_bps, eta=eta_sec)
 
-        # Initial heartbeat — slskd may stall a few seconds before the first
-        # transfer-progress event fires, so the user sees movement immediately.
-        if progress:
-            with contextlib.suppress(Exception):
-                await progress(i, total, progress_idx, download_total,
-                               track["title"], None)
+        # Immediate heartbeat — slskd may stall a few seconds before the first
+        # transfer-progress event fires, so the user sees movement right away.
+        await emit(t="track", i=progress_idx, state="start", title=track["title"])
 
         try:
             t0 = time.monotonic()
@@ -614,11 +676,15 @@ async def download_album(
             with contextlib.suppress(Exception):
                 if lyrics_tasks[track["id"]].done() and lyrics_tasks[track["id"]].result():
                     with_lyrics += 1
+            await emit(t="track", i=progress_idx, state="done",
+                       title=track["title"], fmt=fmt, peer=chosen.username)
             return chosen
         except PeerTransferError as e:
             last_error[track["id"]] = str(e)
             logger.warning("  [%d/%d] track %s — failed: %s",
                            i, total, track["title"], e)
+            await emit(t="track", i=progress_idx, state="fail",
+                       title=track["title"], reason=str(e))
             return None
 
     # === Folder-chain phase ===
@@ -669,8 +735,15 @@ async def download_album(
         logger.info("Per-track matching for %d remaining track(s)%s",
                     len(needs_per_track),
                     f", reusing {len(album_pool)} pooled result(s)" if album_pool else "")
+        await emit(t="fallback", remaining=len(needs_per_track))
         search_dead: str | None = None  # searching stopped being useful — why
         for i, track in needs_per_track:
+
+            async def _track_search_event(ev, _title=track["title"]):
+                ev.setdefault("track", _title)
+                await emit(**ev)
+
+            diag: dict = {}
             try:
                 # Once searching has proven throttled/broken, keep matching
                 # the remaining tracks against the pool only — a pool hit
@@ -678,6 +751,7 @@ async def download_album(
                 auto, alts = await find_track(
                     track, album_artist=album["artist"], preseed=album_pool,
                     allow_search=search_dead is None,
+                    on_event=_track_search_event, diag=diag,
                 )
             except slskd.SearchError as e:
                 # Not a miss — stop searching so we don't dig the throttle
@@ -689,14 +763,18 @@ async def download_album(
                                "from here on", track["title"], e)
                 # Give this track its pool shot too — its own search raising
                 # shouldn't cost it a match the pool already holds.
+                diag = {}
                 auto, alts = await find_track(
                     track, album_artist=album["artist"], preseed=album_pool,
-                    allow_search=False,
+                    allow_search=False, diag=diag,
                 )
             candidates = order_for_download(auto, alts, quality_lock)
             if not candidates:
-                last_error.setdefault(track["id"],
-                                      search_dead or "no Soulseek match")
+                reason = search_dead or _no_match_reason(diag)
+                last_error.setdefault(track["id"], reason)
+                await emit(t="track", i=progress_idx_by_id[track["id"]],
+                           state="fail", title=track["title"],
+                           reason=last_error[track["id"]])
                 continue
             used = await _attempt(i, track, candidates)
             if used is not None and quality_lock is None:
@@ -712,7 +790,7 @@ async def download_album(
     for _, track in to_download:
         if track["id"] in remaining_track_ids:
             failed.append((track["title"],
-                           last_error.get(track["id"], "no Soulseek match")))
+                           last_error.get(track["id"], "nothing found on Soulseek")))
 
     elapsed = time.monotonic() - album_t0
     mb = album_bytes / (1024 * 1024)
@@ -725,8 +803,13 @@ async def download_album(
     if track_provenance:
         logger.info("Sources: %s", _provenance_summary(track_provenance))
 
+    source_counts: dict[str, int] = {}
+    for peer in track_provenance.values():
+        source_counts[peer] = source_counts.get(peer, 0) + 1
+
     return _result_dict(album_dir, downloaded, skipped, failed, total,
-                        format_label, with_lyrics)
+                        format_label, with_lyrics,
+                        elapsed_secs=elapsed, source_counts=source_counts)
 
 
 def _provenance_summary(track_provenance: dict[str, str]) -> str:
@@ -739,7 +822,9 @@ def _provenance_summary(track_provenance: dict[str, str]) -> str:
     return " + ".join(parts)
 
 
-def _result_dict(album_dir, downloaded, skipped, failed, total, fmt, with_lyrics) -> dict:
+def _result_dict(album_dir, downloaded, skipped, failed, total, fmt, with_lyrics,
+                 elapsed_secs: float = 0.0,
+                 source_counts: dict[str, int] | None = None) -> dict:
     return {
         "album_dir": album_dir,
         "downloaded": downloaded,
@@ -748,4 +833,6 @@ def _result_dict(album_dir, downloaded, skipped, failed, total, fmt, with_lyrics
         "total": total,
         "format": fmt,
         "with_lyrics": with_lyrics,
+        "elapsed_secs": elapsed_secs,
+        "source_counts": source_counts or {},
     }

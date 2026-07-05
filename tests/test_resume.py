@@ -99,7 +99,7 @@ async def test_resume_bumps_edits_and_reruns(monkeypatch):
 
     # bumped before the run; force deliberately not resumed
     assert calls == [("1", False, 1)]
-    assert fake.edited == [(42, 7, "Bot restarted — resuming this download…")]
+    assert fake.edited == [(42, 7, "🔁 Bot restarted — resuming this download…")]
     assert journal.load() == []
 
 

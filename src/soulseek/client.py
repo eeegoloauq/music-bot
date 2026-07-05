@@ -315,12 +315,19 @@ def _defer_search(delay_secs: float) -> None:
 
 
 async def _start_search(client, query: str, timeout_secs: int,
-                        response_limit: int) -> dict:
+                        response_limit: int, on_wait=None) -> dict:
     """Start a search on slskd, retrying 429s through the backoff ladder.
-    Must be called with ``_search_lock`` held."""
+    Must be called with ``_search_lock`` held.
+
+    ``on_wait`` (optional async ``cb(secs)``) fires before any noticeable
+    pacing/backoff sleep so a UI can explain the silence to the user.
+    """
     for attempt, next_backoff in enumerate((*_HTTP_429_BACKOFFS_SECS, None)):
         wait = _next_search_start - time.monotonic()
         if wait > 0:
+            if on_wait is not None and wait > 2:
+                with contextlib.suppress(Exception):
+                    await on_wait(wait)
             await asyncio.sleep(wait)
         try:
             state = await asyncio.to_thread(
@@ -350,7 +357,7 @@ async def _start_search(client, query: str, timeout_secs: int,
 
 
 async def search(query: str, timeout_secs: int = 20, response_limit: int = 200,
-                 _throttle_probe: bool = False) -> list[dict]:
+                 _throttle_probe: bool = False, on_wait=None) -> list[dict]:
     """Run a slskd search and return the raw peer responses.
 
     Contract: an empty list means the search *ran* and nobody had a match.
@@ -359,10 +366,12 @@ async def search(query: str, timeout_secs: int = 20, response_limit: int = 200,
     searches comes back empty, the Soulseek server is probably silently
     dropping our queries — cool down and re-run the query once before
     believing the emptiness (``_throttle_probe`` marks that internal retry).
+
+    ``on_wait`` (optional async ``cb(secs)``) reports pacing/backoff sleeps.
     """
     global _zero_streak, _zero_verified_until
 
-    responses = await _search_once(query, timeout_secs, response_limit)
+    responses = await _search_once(query, timeout_secs, response_limit, on_wait)
     if responses:
         _zero_streak = 0
         return responses
@@ -378,7 +387,8 @@ async def search(query: str, timeout_secs: int = 20, response_limit: int = 200,
         _zero_streak, _ZERO_BURST_COOLDOWN_SECS, query,
     )
     _defer_search(_ZERO_BURST_COOLDOWN_SECS)
-    retry = await search(query, timeout_secs, response_limit, _throttle_probe=True)
+    retry = await search(query, timeout_secs, response_limit,
+                         _throttle_probe=True, on_wait=on_wait)
     if retry:
         logger.warning("Throttling confirmed: %r found %d peer(s) after the "
                        "cooldown", query, len(retry))
@@ -389,7 +399,8 @@ async def search(query: str, timeout_secs: int = 20, response_limit: int = 200,
     return retry
 
 
-async def _search_once(query: str, timeout_secs: int, response_limit: int) -> list[dict]:
+async def _search_once(query: str, timeout_secs: int, response_limit: int,
+                       on_wait=None) -> list[dict]:
     """One serialized, paced search. Holds the global search lock from the
     pacing wait through the response read, so searches never overlap and
     never start closer than ``SEARCH_MIN_INTERVAL_SECS`` apart.
@@ -415,7 +426,8 @@ async def _search_once(query: str, timeout_secs: int, response_limit: int) -> li
     client = _get_client()
 
     async with _search_lock:
-        state = await _start_search(client, query, timeout_secs, response_limit)
+        state = await _start_search(client, query, timeout_secs, response_limit,
+                                    on_wait=on_wait)
 
         search_id = state["id"]
         logger.info("Search started: id=%s query=%r", search_id, query)

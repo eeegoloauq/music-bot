@@ -29,6 +29,19 @@ from soulseek.selection import MATCH_FLOOR, is_acceptable_lossy, search_satisfie
 logger = logging.getLogger(__name__)
 
 
+def _make_emit(on_event):
+    """Wrap an optional async event callback so UI failures can never break
+    a search/match flow. See reporting.py for the event vocabulary."""
+    async def _emit(**ev):
+        if on_event is None:
+            return
+        try:
+            await on_event(ev)
+        except Exception:
+            logger.debug("progress event dropped", exc_info=True)
+    return _emit
+
+
 def _ascii_fold(s: str) -> str:
     """Strip combining marks. Used to build fallback queries for peers who
     name files without diacritics. Slskd's text search is *case-insensitive
@@ -191,6 +204,7 @@ def _merge_folder(known: slskd.PeerFolder, new: slskd.PeerFolder) -> None:
 async def find_album(
     album_meta: dict,
     duration_tolerance: int = 5,
+    on_event=None,
 ) -> tuple[ScoredFolder | None, list[ScoredFolder], list[SearchResult]]:
     """Search for a peer-folder that holds the whole album. Returns
     ``(best, alternatives, pool)`` — best is the highest-scored folder
@@ -208,11 +222,20 @@ async def find_album(
     if not primary:
         return None, [], []
 
+    emit = _make_emit(on_event)
+
+    async def _on_wait(secs: float) -> None:
+        await emit(t="search_wait", secs=secs)
+
     all_folders: dict[tuple[str, str], slskd.PeerFolder] = {}
 
     async def _run_query(q: str) -> None:
-        responses = await slskd.search(q, timeout_secs=20, response_limit=200)
+        await emit(t="search", query=q)
+        responses = await slskd.search(q, timeout_secs=20, response_limit=200,
+                                       on_wait=_on_wait)
         results = slskd.parse_files(responses, lossless_only=True)
+        await emit(t="search_done", query=q, files=len(results),
+                   peers=len(responses))
         for f in slskd.group_by_folder(results):
             known = all_folders.get((f.username, f.directory))
             if known is None:
@@ -273,6 +296,8 @@ async def find_track(
     accept_lossy: bool = False,
     preseed: list[SearchResult] | None = None,
     allow_search: bool = True,
+    on_event=None,
+    diag: dict | None = None,
 ) -> tuple[ScoredTrack | None, list[ScoredTrack]]:
     """Search and score for a single track. Returns ``(auto_pick, alternatives)``.
 
@@ -291,6 +316,12 @@ async def find_track(
     ``allow_search=False`` matches against ``preseed`` only — used once
     searching has proven throttled/broken, so remaining tracks can still be
     filled from the pool without touching the network.
+
+    ``diag`` (optional caller-owned dict) collects what the searches actually
+    surfaced — ``files_seen`` / ``usable_seen`` / ``lossy_dropped`` /
+    ``best_lossy_label`` — so an empty return can be reported honestly
+    ("only lossy copies found (mp3 320 kbps)") instead of a blanket
+    "no match".
     """
     artist = track_meta.get("artist", "") or album_artist or ""
     title = track_meta.get("title", "")
@@ -300,22 +331,55 @@ async def find_track(
     if not primary:
         return None, []
 
+    emit = _make_emit(on_event)
+
+    async def _on_wait(secs: float) -> None:
+        await emit(t="search_wait", secs=secs)
+
+    if diag is None:
+        diag = {}
+    diag.setdefault("files_seen", 0)
+    diag.setdefault("usable_seen", 0)
+    diag.setdefault("lossy_dropped", 0)
+    diag.setdefault("_best_lossy_kbps", 0)
+    diag.setdefault("best_lossy_label", None)
+
+    def _note_dropped_lossy(r: SearchResult) -> None:
+        diag["lossy_dropped"] += 1
+        if r.extension == "mp3":
+            kbps = r.bit_rate or 0
+            if kbps >= diag["_best_lossy_kbps"]:
+                diag["_best_lossy_kbps"] = kbps
+                diag["best_lossy_label"] = f"mp3 {kbps} kbps" if kbps else "mp3"
+        elif not diag["best_lossy_label"]:
+            diag["best_lossy_label"] = r.extension
+
     seen_files: set[tuple[str, str]] = set()
     pooled: list[SearchResult] = []
 
     def _absorb(results: list[SearchResult]) -> None:
         for r in results:
-            if accept_lossy and not is_acceptable_lossy(r):
+            diag["files_seen"] += 1
+            usable = is_acceptable_lossy(r) if accept_lossy else r.is_lossless
+            if not usable:
+                if not r.is_lossless:
+                    _note_dropped_lossy(r)
                 continue
             key = (r.username, r.filename.lower())
             if key in seen_files:
                 continue
             seen_files.add(key)
             pooled.append(r)
+            diag["usable_seen"] += 1
 
     async def _run(q: str) -> None:
-        responses = await slskd.search(q, timeout_secs=18, response_limit=180)
-        _absorb(slskd.parse_files(responses, lossless_only=not accept_lossy))
+        await emit(t="search", query=q)
+        responses = await slskd.search(q, timeout_secs=18, response_limit=180,
+                                       on_wait=_on_wait)
+        files = slskd.parse_files(responses, lossless_only=False)
+        await emit(t="search_done", query=q, files=len(files),
+                   peers=len(responses))
+        _absorb(files)
 
     def _scored() -> list[ScoredTrack]:
         return score_track_results(
