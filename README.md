@@ -34,7 +34,7 @@ send the link, and the download kicks off.</sub></p>
   <img src=".github/screenshots/share.jpg" width="440" alt="Now playing share">
 </p>
 <p align="center"><sub><code>np</code> sends the track you're playing right now as audio, <code>s</code> a
-share link with cover art, <code>l</code> the lyrics.</sub></p>
+public share link served by your Navidrome, <code>l</code> the lyrics.</sub></p>
 
 ## What it can do
 
@@ -58,6 +58,17 @@ share link with cover art, <code>l</code> the lyrics.</sub></p>
 You need two containers: **slskd** (the Soulseek client) and **music-bot** itself. They talk over
 slskd's REST API. Everything you'd want to change lives in `.env` — you shouldn't need to edit the
 compose file.
+
+```mermaid
+flowchart LR
+    tg([Telegram]) --> bot[music-bot]
+    bot <-->|metadata| dz[Deezer API]
+    bot <-->|REST| slskd[slskd]
+    peers((Soulseek peers)) <-->|P2P| slskd
+    bot -->|tagged files| lib[(music library)]
+    bot -->|scan| nd[Navidrome]
+    nd -.reads.-> lib
+```
 
 ### 1. `compose.yaml`
 
@@ -185,7 +196,7 @@ copy is kept safe until the new one finishes cleanly).
 |---|---|
 | `song name` | Search Deezer for albums and tracks |
 | `np` | Send the track you're playing right now as audio |
-| `s` | Share link for the current track, with cover art |
+| `s` | Share link for the current track |
 | `l` | Lyrics for the current track |
 | `lib name` | Search your own Navidrome library |
 | `del name` | Remove an album from your library |
