@@ -29,6 +29,7 @@ from telegram.error import NetworkError, TelegramError
 from telegram.request import HTTPXRequest
 
 from config import TG_TOKEN, ALLOWED_USERS, MUSIC_DIR, NAVI_LOGIN, NAVI_PASS, NAVI_PUBLIC_URL
+import journal
 import metadata
 import soulseek
 import navidrome
@@ -667,13 +668,33 @@ async def _resolve_and_download(update: Update, url: str, force: bool = False):
         await _download_track(update, album_or_track_id, force=force)
 
 
-async def _send_result(update: Update, status_msg, text: str, album_dir: str) -> None:
+class ChatIO:
+    """The chat a download reports into. Wraps the only Telegram sends the
+    download flows need, so a journal resume — which has no ``Update`` —
+    drives the exact same code path as a freshly pasted link."""
+
+    def __init__(self, bot, chat_id: int):
+        self.bot = bot
+        self.chat_id = chat_id
+
+    @classmethod
+    def from_update(cls, update: Update) -> "ChatIO":
+        return cls(update.get_bot(), update.effective_chat.id)
+
+    async def reply_text(self, text: str):
+        return await self.bot.send_message(self.chat_id, text)
+
+    async def reply_photo(self, photo, caption: str):
+        return await self.bot.send_photo(self.chat_id, photo=photo, caption=caption)
+
+
+async def _send_result(io: ChatIO, status_msg, text: str, album_dir: str) -> None:
     """Send download result with cover art if available, otherwise plain text."""
     cover_path = os.path.join(album_dir, "cover.jpg")
     if os.path.isfile(cover_path):
         try:
             with open(cover_path, "rb") as cover_f:
-                await update.message.reply_photo(photo=cover_f, caption=text)
+                await io.reply_photo(cover_f, caption=text)
             await status_msg.delete()
             return
         except (TelegramError, OSError):
@@ -685,13 +706,34 @@ async def _send_result(update: Update, status_msg, text: str, album_dir: str) ->
 
 
 async def _download_album(update: Update, album_id: str, force: bool = False):
+    if not await _run_album(ChatIO.from_update(update), album_id, force=force):
+        await update.message.reply_text("Already queued.")
+
+
+async def _run_album(io: ChatIO, album_id: str, force: bool = False,
+                     resume_entry: journal.PendingDownload | None = None) -> bool:
+    """Accept → journal → download → report → clear. Shared by fresh
+    requests and journal resumes. Returns False when the album is already
+    in flight (caller decides whether to tell the user)."""
     key = f"album:{album_id}"
     if key in _in_flight:
-        await update.message.reply_text("Already queued.")
-        return
+        return False
     _in_flight.add(key)
     try:
-        await _do_download_album(update, album_id, force=force)
+        if _download_semaphore.locked():
+            status_msg = await io.reply_text("Queued, waiting for current download...")
+        else:
+            status_msg = await io.reply_text("Fetching album info...")
+        entry = resume_entry or journal.PendingDownload(
+            kind="album", id=album_id, chat_id=io.chat_id, force=force)
+        entry.status_message_id = status_msg.message_id
+        journal.add(entry)
+        await _do_download_album(io, status_msg, album_id, force=force)
+        # _do_download_album reports every outcome — success and failure
+        # alike — before returning, so the request leaves the crash ledger.
+        # An escaped exception keeps the entry for the next startup's resume.
+        journal.remove("album", album_id, io.chat_id)
+        return True
     finally:
         _in_flight.discard(key)
 
@@ -711,12 +753,7 @@ async def _restore_backup(backup_dir: str | None, restore_target: str | None) ->
         logger.error("Failed to restore backup %s -> %s: %s", backup_dir, restore_target, e)
 
 
-async def _do_download_album(update: Update, album_id: str, force: bool = False):
-    if _download_semaphore.locked():
-        status_msg = await update.message.reply_text("Queued, waiting for current download...")
-    else:
-        status_msg = await update.message.reply_text("Fetching album info...")
-
+async def _do_download_album(io: ChatIO, status_msg, album_id: str, force: bool = False):
     async with _download_semaphore:
         try:
             album = await metadata.fetch_album(album_id)
@@ -867,26 +904,40 @@ async def _do_download_album(update: Update, album_id: str, force: bool = False)
         if share_url:
             done_text += f"\n\n{share_url}"
 
-        await _send_result(update, status_msg, done_text, result["album_dir"])
+        await _send_result(io, status_msg, done_text, result["album_dir"])
 
 
 async def _download_track(update: Update, track_id: str, force: bool = False):
+    if not await _run_track(ChatIO.from_update(update), track_id, force=force):
+        await update.message.reply_text("Already queued.")
+
+
+async def _run_track(io: ChatIO, track_id: str, force: bool = False,
+                     resume_entry: journal.PendingDownload | None = None) -> bool:
+    """Track twin of _run_album — same accept → journal → report → clear
+    bracket. A pending lossy-fallback prompt counts as a reported outcome:
+    prompts don't survive restarts by design."""
     key = f"track:{track_id}"
     if key in _in_flight:
-        await update.message.reply_text("Already queued.")
-        return
+        return False
     _in_flight.add(key)
     try:
-        await _do_download_track(update, track_id, force=force)
+        if _download_semaphore.locked():
+            status_msg = await io.reply_text("Queued, waiting for current download...")
+        else:
+            status_msg = await io.reply_text("Fetching track info...")
+        entry = resume_entry or journal.PendingDownload(
+            kind="track", id=track_id, chat_id=io.chat_id, force=force)
+        entry.status_message_id = status_msg.message_id
+        journal.add(entry)
+        await _do_download_track(io, status_msg, track_id, force=force)
+        journal.remove("track", track_id, io.chat_id)
+        return True
     finally:
         _in_flight.discard(key)
 
 
-async def _do_download_track(update: Update, track_id: str, force: bool = False):
-    if _download_semaphore.locked():
-        status_msg = await update.message.reply_text("Queued, waiting for current download...")
-    else:
-        status_msg = await update.message.reply_text("Fetching track info...")
+async def _do_download_track(io: ChatIO, status_msg, track_id: str, force: bool = False):
 
     async with _download_semaphore:
         try:
@@ -916,7 +967,7 @@ async def _do_download_track(update: Update, track_id: str, force: bool = False)
             )
         except RuntimeError as e:
             if "No FLAC found" in str(e):
-                if await _offer_mp3_fallback(update, status_msg, track_id, track, album_ctx):
+                if await _offer_mp3_fallback(status_msg, track_id, track, album_ctx):
                     return
                 await status_msg.edit_text(
                     f"No FLAC or mp3 fallback found for {track['artist']} — {track['title']}"
@@ -945,11 +996,11 @@ async def _do_download_track(update: Update, track_id: str, force: bool = False)
         if share_url:
             done_text += f"\n\n{share_url}"
 
-        await _send_result(update, status_msg, done_text, os.path.dirname(path))
+        await _send_result(io, status_msg, done_text, os.path.dirname(path))
 
 
 async def _offer_mp3_fallback(
-    update: Update, status_msg, track_id: str, track: dict, album_ctx: dict,
+    status_msg, track_id: str, track: dict, album_ctx: dict,
 ) -> bool:
     """Probe Soulseek for mp3/m4a candidates after a FLAC search came up empty.
     If any are available, send an inline-keyboard prompt and stash the
@@ -1136,6 +1187,50 @@ async def _error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> 
     logger.exception("Unhandled exception", exc_info=context.error)
 
 
+async def _resume_pending(app: Application) -> None:
+    """Re-issue downloads whose outcome the user never saw — the bot was
+    restarted (deploy, crash, reboot) mid-download. Tag-based dedup skips
+    tracks that already landed; the attach-first enqueue converges on
+    transfers slskd kept running through the restart.
+
+    ``force`` is deliberately NOT resumed: a force re-run would re-stage the
+    half-written fresh copy over the original's backup in
+    ``.redownload-backup`` — a plain resume just fills in what's missing.
+    """
+    entries = journal.load()
+    if not entries:
+        return
+    logger.info("Journal: %d pending download(s) to resume", len(entries))
+    for entry in sorted(entries, key=lambda e: e.requested_at):
+        if entry.resume_attempts >= journal.MAX_RESUME_ATTEMPTS:
+            journal.remove(entry.kind, entry.id, entry.chat_id)
+            logger.warning("Journal: giving up on %s %s after %d resume attempts",
+                           entry.kind, entry.id, entry.resume_attempts)
+            with contextlib.suppress(TelegramError):
+                await app.bot.send_message(
+                    entry.chat_id,
+                    "A download kept dying across bot restarts — giving up on it. "
+                    "Re-send the link to try again.",
+                )
+            continue
+        journal.bump_attempts(entry)
+        if entry.status_message_id:
+            with contextlib.suppress(TelegramError):
+                await app.bot.edit_message_text(
+                    "Bot restarted — resuming this download…",
+                    chat_id=entry.chat_id, message_id=entry.status_message_id,
+                )
+        io = ChatIO(app.bot, entry.chat_id)
+        run = _run_album if entry.kind == "album" else _run_track
+        try:
+            await run(io, entry.id, resume_entry=entry)
+        except Exception as e:
+            # Entry stays in the journal (bumped) — next restart retries
+            # until the cap; the failure itself is already logged/reported
+            # by the flow where possible.
+            logger.error("Resume of %s %s failed: %s", entry.kind, entry.id, e)
+
+
 async def _post_init(app: Application) -> None:
     await app.bot.set_my_commands([
         BotCommand("help", "Show all features"),
@@ -1148,6 +1243,9 @@ async def _post_init(app: Application) -> None:
     # the slskd staging dir would otherwise pile up forever. Async so the
     # bot is responsive even on a slow fs scan.
     asyncio.create_task(soulseek.cleanup_orphan_staging())
+    # Pick up downloads a restart orphaned. Best-effort and serialized on
+    # the download semaphore like any other request.
+    asyncio.create_task(_resume_pending(app))
 
 
 async def _shutdown(app: Application) -> None:
