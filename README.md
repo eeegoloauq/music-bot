@@ -2,6 +2,7 @@
 
 [![GitHub Release](https://img.shields.io/github/v/release/eeegoloauq/music-bot)](https://github.com/eeegoloauq/music-bot/releases)
 [![GHCR](https://img.shields.io/badge/ghcr.io-music--bot-blue)](https://github.com/eeegoloauq/music-bot/pkgs/container/music-bot)
+[![License](https://img.shields.io/github/license/eeegoloauq/music-bot)](LICENSE)
 
 A Telegram bot that fills your [Navidrome](https://www.navidrome.org/) library. Paste a link to an
 album or track from almost any music service and the bot figures out what it is, finds the audio on
@@ -193,3 +194,22 @@ ISRC, label, genres (Deezer + Last.fm), ReplayGain, embedded cover art, and sync
 On download the bot replaces whatever tags the peer's file came with, so your library stays
 consistent. `/retag` is gentler: it only changes fields that are actually wrong and leaves everything
 else — including your cover art — untouched.
+
+## Contributing
+
+Issues and PRs are welcome. The test suite runs fully offline (slskd and all network calls are
+stubbed), so `uv run pytest` needs no credentials and no containers — if it's green, CI will agree.
+Keep changes small and focused; for anything bigger than a fix, open an issue first so we can talk
+it over.
+
+## Legal
+
+Soulseek is a peer-to-peer network, and much of what people share on it is copyrighted. Whether
+downloading any given file is legal depends on the file and on where you live — in most places,
+downloading music you haven't bought isn't. This bot only automates [slskd](https://github.com/slskd/slskd);
+what you fetch with it is your responsibility. Use it to preview music before buying, to fill gaps
+in albums you own, or wherever your local law allows — and support the artists you listen to.
+
+## License
+
+[MIT](LICENSE).
