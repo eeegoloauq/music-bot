@@ -1,0 +1,42 @@
+name: Wrong match / bad tags
+description: The bot downloaded the wrong thing, or the result was tagged badly
+labels: ["matching"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Source selection is scored, not guessed — the policy is documented in
+        [docs/source-selection.md](../../docs/source-selection.md). Reports like this
+        are how it gets better, so thanks.
+  - type: input
+    id: link
+    attributes:
+      label: Link you pasted
+      placeholder: https://open.spotify.com/album/…
+    validations:
+      required: true
+  - type: dropdown
+    id: problem
+    attributes:
+      label: What went wrong
+      options:
+        - Wrong release (different album/edition/remaster)
+        - Wrong or missing tracks
+        - Bad audio (corrupt, truncated, transcode)
+        - Wrong tags or genres
+        - Unwanted mp3 fallback / quality issue
+        - Other (explain below)
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: What you got vs. what you expected
+      description: The bot's final status message (peer, files, summary) plus what should have happened. For tag problems, the actual vs. expected tag values.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      placeholder: v2.3.0

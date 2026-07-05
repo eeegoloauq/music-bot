@@ -1,0 +1,55 @@
+name: Bug report
+description: Something crashed, hung, or didn't work at all
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report! If the bot *worked* but picked the wrong release or
+        produced bad tags, please use the **Wrong match / bad tags** form instead.
+  - type: input
+    id: link
+    attributes:
+      label: Link you pasted
+      description: The album/track link that triggered the problem, if any.
+      placeholder: https://tidal.com/album/…
+  - type: dropdown
+    id: source
+    attributes:
+      label: Source service
+      options:
+        - Tidal
+        - Spotify
+        - Apple Music
+        - Deezer
+        - YouTube Music
+        - SoundCloud
+        - Amazon Music
+        - Shazam
+        - Inline search (@bot)
+        - Not link-related
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you do, what did the bot say, and what did you expect instead? The bot's final status message is usually the most useful part.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: |
+        Output of `docker compose logs music-bot` around the failure.
+        **Strip your bot token, Telegram user IDs, and Navidrome URL before posting.**
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Release tag or image tag you're running.
+      placeholder: v2.3.0
+    validations:
+      required: true
