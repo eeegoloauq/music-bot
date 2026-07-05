@@ -92,15 +92,18 @@ def _purge_stale_lossy() -> None:
 
 
 def _format_lossy_summary(candidates: list) -> str:
-    """One-liner like 'mp3 320 from 5 peers' for the prompt UI."""
+    """One-liner like 'mp3 320kbps from 5 peers' for the prompt UI."""
     mp3 = [c for c in candidates if c.extension == "mp3"]
     m4a = [c for c in candidates if c.extension == "m4a"]
     parts = []
     if mp3:
-        best_kbps = max((c.bit_rate or 0) for c in mp3) // 1000
-        parts.append(f"mp3 {best_kbps}kbps from {len(mp3)} peer{'s' if len(mp3) != 1 else ''}")
+        # slskd's bitRate is already kbps (protocol units)
+        best_kbps = max((c.bit_rate or 0) for c in mp3)
+        peers = len({c.username for c in mp3})
+        parts.append(f"mp3 {best_kbps}kbps from {peers} peer{'s' if peers != 1 else ''}")
     if m4a:
-        parts.append(f"m4a from {len(m4a)} peer{'s' if len(m4a) != 1 else ''}")
+        peers = len({c.username for c in m4a})
+        parts.append(f"m4a from {peers} peer{'s' if peers != 1 else ''}")
     return " · ".join(parts) if parts else f"{len(candidates)} lossy peers"
 
 

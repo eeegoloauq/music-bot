@@ -52,6 +52,24 @@ def test_flatten_handles_missing_auto_and_dedups():
     assert flatten_candidates(None, []) == []
 
 
+def test_group_copies_splits_incompatible_lengths():
+    # Same basename, clearly different length = a different edit, not a
+    # retry copy; unknown length never piggybacks on a known-length group.
+    album = ScoredTrack(result=make_result("a", "M\\X\\Artist - Song.flac",
+                                           length=200), score=90.0)
+    near = ScoredTrack(result=make_result("b", "N\\Y\\Artist - Song.flac",
+                                          length=208), score=70.0)
+    radio = ScoredTrack(result=make_result("c", "O\\Z\\Artist - Song.flac",
+                                           length=180), score=40.0)
+    unknown = ScoredTrack(result=make_result("d", "P\\W\\Artist - Song.flac",
+                                             length=None), score=47.0)
+    grouped = group_copies([album, near, radio, unknown])
+    assert [g.result.username for g in grouped] == ["a", "c", "d"]
+    assert [r.username for r in grouped[0].sources] == ["a", "b"]  # 208 joins 200
+    assert len(grouped[1].sources) == 1  # 180 is its own recording
+    assert len(grouped[2].sources) == 1  # unknown length stands alone
+
+
 def test_flatten_falls_back_to_result_when_ungrouped():
     # ScoredTracks that never went through group_copies have empty sources.
     st = _scored("a", "M\\X\\01.flac", 60.0)
