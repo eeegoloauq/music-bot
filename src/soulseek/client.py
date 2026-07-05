@@ -584,6 +584,23 @@ def _state_is_failed(state: str) -> bool:
     return any(k in s for k in ("errored", "rejected", "timedout", "cancelled", "failed"))
 
 
+def _state_is_terminal(state: str) -> bool:
+    return _state_is_complete(state) or _state_is_failed(state)
+
+
+async def get_active_download_state(username: str, filename: str) -> str | None:
+    """State of a live (queued or in-progress) download of this exact remote
+    file, or None. Lets callers attach to transfers that survived a bot
+    restart instead of re-enqueueing them — slskd rejects duplicate enqueues
+    of an active transfer. Terminal history rows are ignored.
+    """
+    for row in await get_downloads(username):
+        state = row.get("state", "") or ""
+        if row.get("filename") == filename and not _state_is_terminal(state):
+            return state or "Queued"
+    return None
+
+
 async def wait_for_files(
     username: str,
     target_filenames: list[str],
