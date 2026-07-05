@@ -220,6 +220,27 @@ def _write_tags_force(filepath: str, track: dict, album: dict,
 
 # --- download a single chosen result --------------------------------------
 
+async def _ensure_enqueued(chosen: SearchResult) -> None:
+    """Idempotent enqueue. After a bot restart slskd is often still
+    downloading the very file a resumed request picks again — and slskd
+    rejects duplicate enqueues of an active transfer. Attach to a live
+    transfer when one exists; otherwise enqueue; and when the enqueue is
+    refused, re-check for a live row before declaring the peer broken (the
+    refusal may *be* the duplicate rejection racing our first check)."""
+    active = await slskd.get_active_download_state(chosen.username, chosen.filename)
+    if active is not None:
+        logger.info("Attaching to existing slskd transfer for %s (state: %s)",
+                    chosen.basename, active)
+        return
+    if await slskd.enqueue(chosen.username, [chosen]):
+        return
+    active = await slskd.get_active_download_state(chosen.username, chosen.filename)
+    if active is None:
+        raise PeerTransferError(f"slskd refused enqueue from {chosen.username}")
+    logger.info("Enqueue refused but transfer is live (state: %s) — attaching "
+                "to it for %s", active, chosen.basename)
+
+
 async def _download_chosen(
     chosen: SearchResult,
     track: dict,
@@ -238,9 +259,7 @@ async def _download_chosen(
     ``PeerTransferError`` for per-peer issues (caller retries another peer);
     other exceptions (OSError on move, mutagen on tag) propagate as-is.
     """
-    ok = await slskd.enqueue(chosen.username, [chosen])
-    if not ok:
-        raise PeerTransferError(f"slskd refused enqueue from {chosen.username}")
+    await _ensure_enqueued(chosen)
 
     state = await _await_one_file(
         chosen.username, chosen.filename, on_progress=on_progress,
