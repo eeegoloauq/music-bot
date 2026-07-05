@@ -1,0 +1,19 @@
+# The offline suite — slskd and all network calls are stubbed, so this needs
+# no credentials and no containers. Same invocation the release workflow gates on.
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Run pytest
+        run: |
+          uv sync --frozen
+          uv run --no-sync pytest -q
