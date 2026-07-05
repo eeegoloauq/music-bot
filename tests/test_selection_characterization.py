@@ -221,6 +221,23 @@ def test_folder_artist_gate():
     assert score_folder_results([unrelated], **ALBUM_KW) == []
 
 
+def test_placeholder_album_artist_never_gates():
+    """'Various Artists' / 'Unknown Artist' are metadata placeholders, not
+    identity signals — peers name compilation folders 'VA - ...', so gating
+    on the placeholder words would drop everything."""
+    va_folder = _folder("peer", [
+        make_result("peer", "VA - Best Hits 2020\\01 - One.flac", length=200),
+        make_result("peer", "VA - Best Hits 2020\\02 - Two.flac", length=210),
+    ], has_free_slot=True)
+    kw = dict(ALBUM_KW, album_artist="Various Artists")
+    scored = score_folder_results([va_folder], **kw)
+    assert scored and scored[0].missing_count == 0
+
+    track = [make_result("peer", "Mixes\\01 - Barnacle.flac")]
+    assert score_track_results(track, track_artist="Unknown Artist",
+                               track_title="Barnacle", track_duration=200) != []
+
+
 def test_title_breaks_exact_duration_ties():
     folder = _folder("peer", [
         make_result("peer", "M\\A\\01 - One.flac", length=205),

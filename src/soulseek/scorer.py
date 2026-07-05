@@ -117,15 +117,25 @@ def _path_relevance(directory: str, basename: str, artist: str, title: str) -> f
     return artist_match * 7.5 + title_match * 7.5
 
 
+# Placeholder names the metadata layer produces ("Various Artists" on
+# compilations, "Unknown Artist" when Deezer has nothing). They carry no
+# identity signal — peers name folders "VA - ..." or after the release, so
+# gating on these words would drop nearly everything.
+_PLACEHOLDER_ARTISTS = frozenset({"various artists", "unknown artist"})
+
+
 def _artist_in_path(directory: str, basename: str, artist: str) -> bool:
     """True if *any* meaningful artist word shows up in the path.
 
     Anti-falsepositive gate: a peer file with zero artist overlap is almost
     always the wrong recording (e.g. 'Barnacle' from a bird-sounds album
     matching a track called 'Barnacle' by an unrelated artist). When the
-    artist's name has no word ≥3 chars (single letters, '21', etc.) we don't
-    apply the gate — it would over-filter.
+    artist's name has no word ≥3 chars (single letters, '21', etc.) or is a
+    placeholder like 'Various Artists', we don't apply the gate — it would
+    over-filter.
     """
+    if (artist or "").strip().lower() in _PLACEHOLDER_ARTISTS:
+        return True
     artist_words = _word_set(artist)
     significant = {w for w in artist_words if len(w) >= 3}
     if not significant:

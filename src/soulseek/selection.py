@@ -176,22 +176,38 @@ def order_for_download(auto, alternatives, quality_lock=None) -> list[SearchResu
     return [chosen] + [r for r in picks if r is not chosen]
 
 
+# Same basename but a clearly different reported length is a different edit
+# (radio cut vs album version among loose 'Artist - Song.flac' files), not a
+# retry-equivalent copy — downloading it under the ranked pick's identity
+# would tag the wrong audio. VBR length estimates jitter a few seconds;
+# real edits differ by 15s+.
+SAME_RECORDING_MAX_LENGTH_DIFF_SECS = 10
+
+
+def _same_recording(a: SearchResult, b: SearchResult) -> bool:
+    if a.length is None or b.length is None:
+        return a.length is None and b.length is None
+    return abs(a.length - b.length) <= SAME_RECORDING_MAX_LENGTH_DIFF_SECS
+
+
 def group_copies(scored: list) -> list:
     """Collapse a best-first ScoredTrack list to one entry per recording.
 
-    Identity is the basename — the same key the old dedupe used, so ranking
-    is unchanged. The surviving entry is the best-scored copy; every copy
-    (including the survivor) lands in its ``sources``, preserving score
-    order, for transfer retries.
+    Identity is the basename plus a compatible reported length (see
+    ``_same_recording``). The surviving entry is the best-scored copy; every
+    compatible copy (including the survivor) lands in its ``sources``,
+    preserving score order, for transfer retries. Incompatible same-name
+    files stay separate ranking entries and stand on their own scores.
     """
-    groups: dict[str, object] = {}
+    groups: dict[str, list] = {}
     out: list = []
     for st in scored:
         key = st.result.basename.lower()
-        kept = groups.get(key)
+        kept = next((g for g in groups.setdefault(key, [])
+                     if _same_recording(g.result, st.result)), None)
         if kept is None:
             st.sources = [st.result]
-            groups[key] = st
+            groups[key].append(st)
             out.append(st)
         else:
             kept.sources.append(st.result)
