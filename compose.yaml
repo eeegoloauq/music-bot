@@ -9,9 +9,10 @@ services:
       # Peer-listen port. Override SLSKD_LISTEN_PORT in .env if 50300 is taken
       # or you've forwarded a different port on your router.
       SLSKD_SLSK_LISTEN_PORT: ${SLSKD_LISTEN_PORT:-50300}
-      # Filesystem layout is canonical here so a fresh slskd-config/slskd.yml
-      # (which may not include `directories:`) doesn't break the staging
-      # contract with music-bot. Env overrides yml.
+      # Filesystem layout is canonical here so the staging contract with
+      # music-bot can't drift. Works because the auto-generated slskd.yml
+      # keeps `directories:` commented out — in slskd, yml beats env, not
+      # the other way around.
       SLSKD_DOWNLOADS_DIR: /downloads
       SLSKD_INCOMPLETE_DIR: /downloads/.incomplete
       SLSKD_NO_AUTH: "true"

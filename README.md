@@ -18,23 +18,22 @@ from Soulseek peers through [slskd](https://github.com/slskd/slskd).
   <img src=".github/screenshots/download-progress.jpg" width="390" alt="Album download in progress">
   <img src=".github/screenshots/download-done.jpg" width="390" alt="Finished download with summary">
 </p>
-<p align="center"><sub>One status message, edited live: the chosen peer with its quality and match score,
-per-track progress with speed and ETA, then a final summary — format, quality, how long it took, who it
-came from.</sub></p>
+<p align="center"><sub>The bot edits one status message the whole way: which peer it picked, each track
+as it lands, and what you actually got in the end.</sub></p>
 
 <h2 align="center">Search from any chat</h2>
 <p align="center">
   <img src=".github/screenshots/search.jpg" width="440" alt="Inline search">
 </p>
-<p align="center"><sub>Type <code>@yourbot</code> and a name — albums and tracks with covers. Tap one to
-send the link, and the download kicks off.</sub></p>
+<p align="center"><sub>Type <code>@yourbot</code> and a name in any chat, tap a result — the download
+starts.</sub></p>
 
 <h2 align="center">Share what you're playing</h2>
 <p align="center">
   <img src=".github/screenshots/share.jpg" width="440" alt="Now playing share">
 </p>
-<p align="center"><sub><code>np</code> sends the track you're playing right now as audio, <code>s</code> a
-public share link served by your Navidrome, <code>l</code> the lyrics.</sub></p>
+<p align="center"><sub><code>np</code> sends the track you're playing as audio, <code>s</code> a share link
+from your Navidrome, <code>l</code> the lyrics.</sub></p>
 
 ## What it can do
 
@@ -56,8 +55,8 @@ public share link served by your Navidrome, <code>l</code> the lyrics.</sub></p>
 ## Setup
 
 You need two containers: **slskd** (the Soulseek client) and **music-bot** itself. They talk over
-slskd's REST API. Everything you'd want to change lives in `.env` — you shouldn't need to edit the
-compose file.
+slskd's REST API. Two files is the whole setup — `compose.yaml` and `.env` — so it also works fine
+in Dockge or Portainer. Everything you'd want to change lives in `.env`.
 
 ```mermaid
 flowchart LR
@@ -87,7 +86,13 @@ services:
       SLSKD_DOWNLOADS_DIR: /downloads
       SLSKD_INCOMPLETE_DIR: /downloads/.incomplete
       SLSKD_NO_AUTH: "true"
+      # Soulseek etiquette: share your library back, read-only. Remove this
+      # line if you'd rather not share anything.
+      SLSKD_SHARED_DIR: "/shared;!/shared/.slskd-downloads;!/shared/lost+found"
+      SLSKD_SLSK_DESCRIPTION: "music collector"
     volumes:
+      # slskd state — it drops an auto-generated slskd.yml here on first run,
+      # you don't need to create or edit anything in it.
       - ./slskd-config:/app
       - ${MUSIC_LIBRARY_DIR:-/media/music}/.slskd-downloads:/downloads
       - ${MUSIC_LIBRARY_DIR:-/media/music}:/shared:ro
@@ -120,31 +125,7 @@ services:
         condition: service_healthy
 ```
 
-### 2. `slskd-config/slskd.yml`
-
-slskd reads a small config from the bind mount. This is enough:
-
-```yaml
-remote_configuration: false
-
-soulseek:
-  description: "music collector"
-
-shares:
-  directories:
-    - "/shared"
-    - "!/shared/.slskd-downloads"
-    - "!/shared/lost+found"
-
-web:
-  authentication:
-    disabled: true
-  port: 5030
-  https:
-    disabled: true
-```
-
-### 3. `.env`
+### 2. `.env`
 
 ```env
 TG_TOKEN=your_telegram_bot_token
