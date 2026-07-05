@@ -12,5 +12,4 @@ node_modules/
 package.json
 package-lock.json
 slskd-config/*
-!slskd-config/slskd.yml
 !slskd-config/.gitkeep
