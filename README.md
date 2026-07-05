@@ -64,7 +64,7 @@ flowchart LR
     tg([Telegram]) --> bot[music-bot]
     bot <-->|metadata| dz[Deezer API]
     bot <-->|REST| slskd[slskd]
-    peers((Soulseek peers)) <-->|P2P| slskd
+    slskd <-->|P2P| peers((Soulseek peers))
     bot -->|tagged files| lib[(music library)]
     bot -->|scan| nd[Navidrome]
     nd -.reads.-> lib
