@@ -35,6 +35,7 @@ import reporting
 import soulseek
 import navidrome
 import retagger
+import uploads
 from inline import handle_inline_query, _DELETE_PREFIX
 from library.files import _sanitize, _find_existing_track, _locate_existing_album
 
@@ -1267,6 +1268,16 @@ async def _post_init(app: Application) -> None:
     # Pick up downloads a restart orphaned. Best-effort and serialized on
     # the download semaphore like any other request.
     _spawn_background(_resume_pending(app))
+    # Local-upload intake: watch /data/uploads for dropped zips/folders and
+    # report each one to the owner (first ALLOWED_USERS id).
+    if ALLOWED_USERS:
+        owner_id = ALLOWED_USERS[0]
+
+        async def _notify_owner(text: str) -> None:
+            with contextlib.suppress(TelegramError):
+                await app.bot.send_message(owner_id, text)
+
+        _spawn_background(uploads.watch_loop(_notify_owner))
 
 
 async def _shutdown(app: Application) -> None:

@@ -1,7 +1,8 @@
 # Local upload — design & handoff
 
-> Status: **planned, not implemented.** This doc is a self-contained brief so a
-> fresh conversation can pick the work up cold. Written on branch `dev`.
+> Status: **phase 1 (intake core) implemented** — `src/uploads.py` +
+> `tests/test_uploads.py`. Phases 2–3 planned. This doc is a self-contained
+> brief so a fresh conversation can pick the work up cold. Written on branch `dev`.
 
 ## Why this exists
 
@@ -73,10 +74,13 @@ would make chat upload work. Rejected as overkill for this feature:
 
 ## Scope split
 
-### Phase 1 — intake core (do first)
+### Phase 1 — intake core (done — `src/uploads.py`)
 
 Just get files from the intake folder in safely and report. **No tagging, no
-library placement yet.**
+library placement yet.** Deviations from the sketch below that were made
+during implementation: loose audio files dropped into the folder are also
+accepted (staged as a folder-of-one); anything unstageable is parked in
+`/data/uploads/.rejected/` instead of being re-scanned forever.
 
 - Config: `UPLOAD_DIR = os.getenv("UPLOAD_DIR", "/data/uploads")` in `src/config.py`.
 - Ensure `/data/uploads` exists on startup (like the journal's `/data` usage).
