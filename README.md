@@ -151,6 +151,10 @@ SOULSEEK_PASSWORD=your_soulseek_password
 # sits inside it, so the final move into the library is instant. Keep both on
 # the same disk.
 MUSIC_LIBRARY_DIR=/media/music
+
+# Local-upload page (optional, see "Local uploads") — also uncomment the
+# ports: lines in compose.yaml.
+#UPLOAD_HTTP_PORT=8080
 ```
 
 Then `docker compose up -d`.
@@ -195,6 +199,10 @@ copy is kept safe until the new one finishes cleanly).
 tags library-wide; shows a preview first, then `/retag confirm` to apply).
 
 ## Local uploads
+
+<p align="center">
+  <img src=".github/screenshots/upload-page.png" width="440" alt="Upload page">
+</p>
 
 Music you already have can go in through the same tagging/dedup pipeline: drop a `.zip` (or a
 folder of tracks) either on the upload page — set `UPLOAD_HTTP_PORT` in `.env` and uncomment the
