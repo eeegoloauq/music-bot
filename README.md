@@ -48,6 +48,8 @@ from your Navidrome, <code>l</code> the lyrics.</sub></p>
   "witch house" or "future garage" instead of just "Electronic".
 - **Re-tag your library.** `/retag` walks everything you already have and refreshes the tags from
   current metadata, without touching the audio or your embedded cover art.
+- **Bring your own files.** Drop a zip on the built-in upload page or into a watched folder —
+  identified, tagged, and filed like any download. See [Local uploads](#local-uploads).
 - **Inline search.** Type `@yourbot` in any chat to search, share what you're playing, grab lyrics,
   or search your own library.
 - **Private.** Only the Telegram user IDs you list can use it.
@@ -118,6 +120,13 @@ services:
       SLSKD_DOWNLOAD_DIR: /music/.slskd-downloads
     volumes:
       - ${MUSIC_LIBRARY_DIR:-/media/music}:/music
+      # Bot state: download resume journal + local-upload staging. Create the
+      # folder first so it isn't root-owned: install -d -o 1000 -g 1000 bot-data
+      - ./bot-data:/data
+    # Local-upload page (optional, see "Local uploads"): set UPLOAD_HTTP_PORT
+    # in .env and uncomment. The page has no auth — LAN at most, never public.
+    #ports:
+    #  - 127.0.0.1:${UPLOAD_HTTP_PORT:-8080}:${UPLOAD_HTTP_PORT:-8080}
     extra_hosts:
       - host.docker.internal:host-gateway
     depends_on:
@@ -185,6 +194,18 @@ copy is kept safe until the new one finishes cleanly).
 **Commands** — `/help`, `/scan` (rescan Navidrome), `/stats` (library size), and `/retag` (refresh
 tags library-wide; shows a preview first, then `/retag confirm` to apply).
 
+## Local uploads
+
+Music you already have can go in through the same tagging/dedup pipeline: drop a `.zip` (or a
+folder of tracks) either on the upload page — set `UPLOAD_HTTP_PORT` in `.env` and uncomment the
+`ports:` lines in `compose.yaml` — or straight into `./bot-data/uploads/` (Samba/SFTP works fine).
+The release is identified from the files' own tags (embedded streaming URL, ISRC/UPC,
+artist+album) or the zip name; if nothing matches, the bot says so and files nothing. Results
+report to Telegram like any download.
+
+The upload page has no auth — keep it LAN-only, or put a VPN / authenticated reverse proxy in
+front.
+
 ## Configuration
 
 Most people only set the handful of variables in the `.env` above. Everything else has a sensible
@@ -197,6 +218,8 @@ default:
 | `MAX_BIT_DEPTH` / `MAX_SAMPLE_RATE_HZ` | `24` / `96000` | Skip peer files above this quality. Use `16` / `44100` for CD-quality only |
 | `MAX_FILE_BYTES` | `2147483648` | Reject any single peer file bigger than this (2 GiB). `0` turns it off |
 | `SLSKD_LISTEN_PORT` | `50300` | Soulseek peer port (forward it on your router) |
+| `UPLOAD_HTTP_PORT` | — | Enables the local-upload page on this port (off when unset) |
+| `UPLOAD_MAX_TOTAL_BYTES` | `10737418240` | Cap on one upload after extraction (10 GiB) |
 | `STREAM_BITRATE` | `320` | mp3 bitrate for the `np` inline audio |
 | `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` | — | Standard proxy vars are respected. If one upstream throttles your proxy IP, add its host to `NO_PROXY` to send just that one direct |
 
