@@ -160,10 +160,10 @@ Current wiring (source of truth = Forgejo `homelab/music-bot` at `origin`):
   the sync workflow — pushing `dev` cannot leak.
 - `.forgejo/workflows/github-sync.yml` — mirrors **main + `v*` tags only** to
   GitHub `eeegoloauq/music-bot`. Verified — no change needed.
-- `.forgejo/workflows/deploy.yml` — on push to **main**: test → build image →
-  deploy to VM. **Change when phase 1 starts: also trigger on `dev`**, but keep
-  `:latest` reserved for main — tag dev builds `:dev` + `:sha` only, otherwise a
-  dev push would stamp over the image tag main deploys from.
+- `.forgejo/workflows/deploy.yml` — on push to **main or dev**: test → build
+  image → deploy to VM. **Done.** `:latest` stays reserved for main; dev builds
+  are tagged `:dev` + `:sha` only, so a test push can't stamp over the image
+  tag main deploys from (the deploy step itself is sha-based either way).
 
 So: same VM serves both branches — develop on `dev`, deploy `dev` to the VM to
 test, then merge `dev` → `main` to promote + publish to GitHub.
