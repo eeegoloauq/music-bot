@@ -28,3 +28,9 @@ MAX_SAMPLE_RATE_HZ = int(os.getenv("MAX_SAMPLE_RATE_HZ", "96000"))
 # Hard upper bound on a single peer file (bytes). Keeps a misconfigured /
 # malicious peer from offering a 50 GB "track". 0 disables the cap.
 MAX_FILE_BYTES = int(os.getenv("MAX_FILE_BYTES", str(2 * 1024 * 1024 * 1024)))
+
+# Local-upload intake (docs/local-upload-plan.md). The watched folder is
+# always on (it costs one stat loop); the total-bytes cap bounds a single
+# dropped zip/folder after extraction. Per-file cap reuses MAX_FILE_BYTES.
+UPLOAD_DIR = os.getenv("UPLOAD_DIR", "/data/uploads")
+UPLOAD_MAX_TOTAL_BYTES = int(os.getenv("UPLOAD_MAX_TOTAL_BYTES", str(10 * 1024**3)))
