@@ -1,8 +1,12 @@
 name: Build & Deploy
 
+# main and dev both deploy to the same VM — dev to test on the live bot,
+# merge dev → main to promote (docs/local-upload-plan.md). Only main may
+# stamp :latest; dev builds get :dev so a test push can't hijack the tag
+# main deploys from.
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   workflow_dispatch:
 
 jobs:
@@ -52,9 +56,10 @@ jobs:
 
       - name: Build & push
         run: |
-          docker build -t "$IMAGE:${{ github.sha }}" -t "$IMAGE:latest" .
+          branch_tag=$([ "${{ github.ref_name }}" = "main" ] && echo latest || echo dev)
+          docker build -t "$IMAGE:${{ github.sha }}" -t "$IMAGE:$branch_tag" .
           docker push "$IMAGE:${{ github.sha }}"
-          docker push "$IMAGE:latest"
+          docker push "$IMAGE:$branch_tag"
 
   deploy:
     runs-on: docker
