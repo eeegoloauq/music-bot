@@ -87,6 +87,16 @@ async def get_track(track_id: str) -> dict:
     return await _get(f"/track/{track_id}")
 
 
+async def get_track_by_isrc(isrc: str) -> dict:
+    """Direct track lookup by ISRC (used by the local-upload identify ladder)."""
+    return await _get(f"/track/isrc:{isrc}")
+
+
+async def get_album_by_upc(upc: str) -> dict:
+    """Direct album lookup by UPC/barcode."""
+    return await _get(f"/album/upc:{upc}")
+
+
 # --- search ---------------------------------------------------------------
 
 async def search_albums(query: str, limit: int = 5) -> list[dict]:

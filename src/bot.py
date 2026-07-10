@@ -39,6 +39,7 @@ import soulseek
 import navidrome
 import retagger
 import uploads
+import upload_import
 import upload_web
 from inline import handle_inline_query, _DELETE_PREFIX
 from library.files import _sanitize, _find_existing_track, _locate_existing_album
@@ -896,6 +897,69 @@ async def _do_download_album(io: ChatIO, status_msg, album_id: str, force: bool 
         await _send_result(io, status_msg, done_text, result["album_dir"])
 
 
+async def _handle_upload(io: ChatIO, report: uploads.IntakeReport) -> None:
+    """Drive a staged local upload through the same metadata → tag → file →
+    scan → report path a Soulseek download takes (docs/local-upload-plan.md)."""
+    if report.error:
+        await io.reply_text(uploads.format_rejection(report))
+        return
+
+    status_msg = await io.reply_text(
+        f"📦 {report.name}: {len(report.audio)} audio file(s) received. "
+        "Identifying release…")
+    album_id = None
+    try:
+        album_id = await upload_import.identify_album(report.staging_dir, report.name)
+    except Exception as e:
+        logger.error("Upload identify failed for %s: %s", report.name, e)
+    if not album_id:
+        await status_msg.edit_text(
+            f"❓ {report.name}: couldn't match this to a release — no usable "
+            "URL/ISRC/UPC/artist tags, and the name didn't search. Files are "
+            "kept in uploads staging; nothing was filed.")
+        return
+
+    async with _download_semaphore:
+        try:
+            album = await metadata.fetch_album(album_id)
+            await metadata.enrich_genres(album)
+            await status_msg.edit_text(
+                f"📦 Importing upload: {album['artist']} — {album['title']}…")
+            result = await upload_import.import_staged_album(
+                album, report.staging_dir, MUSIC_DIR)
+        except Exception as e:
+            logger.exception("Upload import failed for %s", report.name)
+            await status_msg.edit_text(
+                f"❌ Upload import failed: {_short(e)}. Files kept in staging.")
+            return
+
+    scan_note = ""
+    if result["downloaded"]:
+        scan_note = await _trigger_scan()
+    share_url = await _try_share_album(
+        album["artist"], album["title"], skip_delay=result["downloaded"] == 0)
+
+    if result["downloaded"] == 0 and not result["failed"]:
+        done_text = (
+            f"<b>{reporting.esc(album['artist'])} — "
+            f"{reporting.esc(album['title'])}</b>\nAlready in library — "
+            "the uploaded copy was dropped as a duplicate."
+        )
+        if share_url:
+            done_text += f"\n\n{share_url}"
+    else:
+        done_text = reporting.render_album_final(
+            album["artist"], album["title"], result,
+            scan_note=scan_note, share_url=share_url,
+        )
+    leftovers = result.get("leftover_files") or []
+    if leftovers:
+        shown = ", ".join(reporting.esc(os.path.basename(f)) for f in leftovers[:3])
+        more = f" +{len(leftovers) - 3} more" if len(leftovers) > 3 else ""
+        done_text += f"\n\n⚠️ Didn't match any track, left in staging: {shown}{more}"
+    await _send_result(io, status_msg, done_text, result["album_dir"])
+
+
 async def _download_track(update: Update, track_id: str, force: bool = False):
     if not await _run_track(ChatIO.from_update(update), track_id, force=force):
         await update.message.reply_text("Already queued.")
@@ -1272,16 +1336,17 @@ async def _post_init(app: Application) -> None:
     # Pick up downloads a restart orphaned. Best-effort and serialized on
     # the download semaphore like any other request.
     _spawn_background(_resume_pending(app))
-    # Local-upload intake: watch /data/uploads for dropped zips/folders and
-    # report each one to the owner (first ALLOWED_USERS id).
+    # Local-upload intake: watch /data/uploads for dropped zips/folders,
+    # then identify/tag/file each one like a normal download, reporting to
+    # the owner (first ALLOWED_USERS id).
     if ALLOWED_USERS:
-        owner_id = ALLOWED_USERS[0]
+        owner_io = ChatIO(app.bot, ALLOWED_USERS[0])
 
-        async def _notify_owner(text: str) -> None:
+        async def _on_upload(report: uploads.IntakeReport) -> None:
             with contextlib.suppress(TelegramError):
-                await app.bot.send_message(owner_id, text)
+                await _handle_upload(owner_io, report)
 
-        _spawn_background(uploads.watch_loop(_notify_owner))
+        _spawn_background(uploads.watch_loop(_on_upload))
     # One-page upload site feeding the same watched folder (off unless
     # UPLOAD_HTTP_PORT is set).
     if UPLOAD_HTTP_PORT:

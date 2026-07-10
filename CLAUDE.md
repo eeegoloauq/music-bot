@@ -22,8 +22,12 @@ Telegram msg (bot.py)          URL detect, auth (ALLOWED_USERS), force-mode, dis
 ```
 
 The audio source sits behind a small contract (`download_album` / `download_single_track`); everything
-upstream — metadata, library, tagger, navidrome — is source-agnostic. There's exactly one source
-today: `soulseek`.
+upstream — metadata, library, tagger, navidrome — is source-agnostic. There's exactly one search
+source today: `soulseek`. A second entry point skips the search: **local upload** — `uploads.py`
+watches `/data/uploads` (fed by drops or the one-page site `upload_web.py`, off unless
+`UPLOAD_HTTP_PORT` set), `upload_import.py` identifies the release from the files' own tags
+(URL → ISRC/UPC → artist+album → name ladder) and files it through the same tagger/dedup/library
+path; driver `bot._handle_upload`. See docs/local-upload-plan.md.
 
 ## Sibling containers (compose.yaml)
 

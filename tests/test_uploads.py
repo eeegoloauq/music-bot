@@ -11,7 +11,7 @@ import zipfile
 import pytest
 
 import uploads
-from uploads import IntakeReport, _process_entry, _scan_stable, format_report
+from uploads import IntakeReport, _process_entry, _scan_stable, format_rejection
 
 
 def make_zip(path, members):
@@ -172,11 +172,6 @@ def test_scan_folder_size_recursive(tmp_path):
     assert ready == [] and sizes2["album"] == 20
 
 
-def test_format_report_success_and_error(tmp_path):
-    ok = IntakeReport(name="x.zip", staging_dir=str(tmp_path / "abc123"),
-                      audio=["a.flac", "b.mp3"], art=["cover.jpg"], skipped=["n.txt"])
-    text = format_report(ok)
-    assert "2 audio file(s) (flac, mp3)" in text and "n.txt" in text and "abc123" in text
-
+def test_format_rejection():
     bad = IntakeReport(name="y.zip", error="size cap exceeded at a.flac")
-    assert "rejected" in format_report(bad) and "size cap" in format_report(bad)
+    assert "rejected" in format_rejection(bad) and "size cap" in format_rejection(bad)
