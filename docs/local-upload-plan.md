@@ -1,9 +1,9 @@
 # Local upload — design & handoff
 
-> Status: **phases 1–2 implemented** — intake core in `src/uploads.py`, web
-> upload page in `src/upload_web.py` (+ tests for both). Phase 3 (tag & file)
-> planned. This doc is a self-contained brief so a fresh conversation can pick
-> the work up cold. Written on branch `dev`.
+> Status: **fully implemented** (phases 1–3) — intake core in `src/uploads.py`,
+> web upload page in `src/upload_web.py`, identify/tag/file in
+> `src/upload_import.py`, driver `bot._handle_upload` (+ tests for each).
+> This doc remains as the design record.
 
 ## Why this exists
 
@@ -115,7 +115,7 @@ The aiohttp server described above. Separate diff from phase 1 so intake logic
 reviews cleanly on its own. Tests: handler-level (aiohttp test utils are part of
 aiohttp), streaming write, size-limit rejection, rename-on-complete.
 
-### Phase 3 — tag & file (later, separate task)
+### Phase 3 — tag & file (done — `src/upload_import.py`)
 
 Turn a staged upload into a proper library album:
 - Identify the release — a fallback ladder, checked against a real sample zip
@@ -139,10 +139,13 @@ Turn a staged upload into a proper library album:
 - This slots in behind the same source contract as `download_album` /
   `download_single_track` — keep metadata/library/tagger source-agnostic.
 
-Open question for phase 3: when tags/foldername don't cleanly resolve to one
-Deezer release, ask the owner in Telegram (inline-button pick among the top
-candidates) rather than silently best-guessing — wrong album identity poisons
-the tag-based dedup.
+When no rung of the ladder resolves, the import refuses (files stay in
+staging, owner gets told) rather than best-guessing — wrong album identity
+would poison the tag-based dedup. Possible future upgrade: inline-button pick
+among top Deezer candidates for the ambiguous case.
+
+Uploads deliberately don't use the resume journal: the staged files persist
+on disk, so a crash mid-import just means re-dropping the zip.
 
 ### Docs (with phase 2)
 

@@ -198,26 +198,15 @@ def _scan_stable(upload_dir: str, prev: dict[str, int]) -> tuple[list[str], dict
     return ready, sizes
 
 
-def format_report(r: IntakeReport) -> str:
-    if r.error:
-        return (f"📦 Local upload rejected: {r.name}\n"
-                f"Reason: {r.error}\nMoved to {_REJECTED}/ — fix and re-drop.")
-    exts = sorted({os.path.splitext(a)[1].lstrip('.').lower() for a in r.audio})
-    lines = [f"📦 Local upload staged: {r.name}",
-             f"{len(r.audio)} audio file(s) ({', '.join(exts)})"
-             + (f" + {len(r.art)} cover image(s)" if r.art else "")]
-    if r.skipped:
-        shown = ", ".join(os.path.basename(s) for s in r.skipped[:5])
-        more = f" (+{len(r.skipped) - 5} more)" if len(r.skipped) > 5 else ""
-        lines.append(f"Skipped non-audio: {shown}{more}")
-    lines.append("Tagging & library filing lands in a later phase — "
-                 f"files wait in {_EXTRACTED}/{os.path.basename(r.staging_dir)}.")
-    return "\n".join(lines)
+def format_rejection(r: IntakeReport) -> str:
+    return (f"❌ Upload rejected: {r.name}\n"
+            f"Reason: {r.error}\nMoved to {_REJECTED}/ — fix and re-drop.")
 
 
-async def watch_loop(notify) -> None:
-    """Poll ``UPLOAD_DIR`` forever; ``notify`` is an async ``(text) -> None``
-    used to tell the owner what happened to each drop."""
+async def watch_loop(handle) -> None:
+    """Poll ``UPLOAD_DIR`` forever; ``handle`` is an async
+    ``(IntakeReport) -> None`` that owns everything after staging —
+    identify/tag/file (upload_import) and telling the owner."""
     os.makedirs(UPLOAD_DIR, exist_ok=True)
     logger.info("Watching %s for local uploads", UPLOAD_DIR)
     prev: dict[str, int] = {}
@@ -234,7 +223,7 @@ async def watch_loop(notify) -> None:
                     stuck.add(os.path.basename(path))
                 logger.info("Upload intake %s: %s", report.name,
                             report.error or f"{len(report.audio)} audio staged")
-                await notify(format_report(report))
+                await handle(report)
         except asyncio.CancelledError:
             raise
         except Exception:
