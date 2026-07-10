@@ -34,3 +34,5 @@ MAX_FILE_BYTES = int(os.getenv("MAX_FILE_BYTES", str(2 * 1024 * 1024 * 1024)))
 # dropped zip/folder after extraction. Per-file cap reuses MAX_FILE_BYTES.
 UPLOAD_DIR = os.getenv("UPLOAD_DIR", "/data/uploads")
 UPLOAD_MAX_TOTAL_BYTES = int(os.getenv("UPLOAD_MAX_TOTAL_BYTES", str(10 * 1024**3)))
+# Port for the one-page upload site (upload_web.py). Unset/0 = server off.
+UPLOAD_HTTP_PORT = int(os.getenv("UPLOAD_HTTP_PORT", "0"))
