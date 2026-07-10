@@ -1,6 +1,6 @@
 [project]
 name = "music-bot"
-version = "2.3.0"
+version = "2.4.0"
 description = "Telegram bot for Soulseek music downloads via slskd"
 license = "MIT"
 license-files = ["LICENSE"]
