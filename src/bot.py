@@ -28,7 +28,10 @@ from telegram.ext import (
 from telegram.error import NetworkError, TelegramError
 from telegram.request import HTTPXRequest
 
-from config import TG_TOKEN, ALLOWED_USERS, MUSIC_DIR, NAVI_LOGIN, NAVI_PASS, NAVI_PUBLIC_URL
+from config import (
+    TG_TOKEN, ALLOWED_USERS, MUSIC_DIR, NAVI_LOGIN, NAVI_PASS, NAVI_PUBLIC_URL,
+    UPLOAD_HTTP_PORT,
+)
 import journal
 import metadata
 import reporting
@@ -36,6 +39,7 @@ import soulseek
 import navidrome
 import retagger
 import uploads
+import upload_web
 from inline import handle_inline_query, _DELETE_PREFIX
 from library.files import _sanitize, _find_existing_track, _locate_existing_album
 
@@ -1278,12 +1282,17 @@ async def _post_init(app: Application) -> None:
                 await app.bot.send_message(owner_id, text)
 
         _spawn_background(uploads.watch_loop(_notify_owner))
+    # One-page upload site feeding the same watched folder (off unless
+    # UPLOAD_HTTP_PORT is set).
+    if UPLOAD_HTTP_PORT:
+        await upload_web.start(UPLOAD_HTTP_PORT)
 
 
 async def _shutdown(app: Application) -> None:
     await metadata.close()
     await soulseek.close()
     await navidrome.close()
+    await upload_web.stop()
 
 
 def _build_app() -> Application:

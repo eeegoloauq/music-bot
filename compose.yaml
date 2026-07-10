@@ -54,6 +54,11 @@ services:
       # (`install -d -o 1000 -g 1000 bot-data`) — docker would otherwise
       # auto-create it root-owned on first up. Files inside land 0666.
       - ./bot-data:/data
+    # Local-upload web page (optional): set UPLOAD_HTTP_PORT in .env and
+    # uncomment. 0.0.0.0 exposes it to your LAN — the page has no auth, so
+    # never publish it wider without a reverse proxy in front.
+    #ports:
+    #  - 0.0.0.0:${UPLOAD_HTTP_PORT:-8080}:${UPLOAD_HTTP_PORT:-8080}
     # Give a nearly-finished track a chance to import + tag before SIGKILL;
     # anything longer is the resume journal's job.
     stop_grace_period: 30s

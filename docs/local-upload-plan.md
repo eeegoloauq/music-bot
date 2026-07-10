@@ -1,8 +1,9 @@
 # Local upload — design & handoff
 
-> Status: **phase 1 (intake core) implemented** — `src/uploads.py` +
-> `tests/test_uploads.py`. Phases 2–3 planned. This doc is a self-contained
-> brief so a fresh conversation can pick the work up cold. Written on branch `dev`.
+> Status: **phases 1–2 implemented** — intake core in `src/uploads.py`, web
+> upload page in `src/upload_web.py` (+ tests for both). Phase 3 (tag & file)
+> planned. This doc is a self-contained brief so a fresh conversation can pick
+> the work up cold. Written on branch `dev`.
 
 ## Why this exists
 
@@ -108,7 +109,7 @@ Keep it a small, reviewable diff. Add offline tests in `tests/` (stub the
 filesystem; zero network) covering: happy unpack, zip-slip rejection, size-cap
 rejection, non-audio filtering, plain-folder passthrough.
 
-### Phase 2 — web upload endpoint
+### Phase 2 — web upload endpoint (done — `src/upload_web.py`)
 
 The aiohttp server described above. Separate diff from phase 1 so intake logic
 reviews cleanly on its own. Tests: handler-level (aiohttp test utils are part of
