@@ -13,3 +13,5 @@ package.json
 package-lock.json
 slskd-config/*
 !slskd-config/.gitkeep
+*.zip
+.playwright-mcp/
