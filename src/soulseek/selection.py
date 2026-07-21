@@ -214,6 +214,143 @@ def group_copies(scored: list) -> list:
     return out
 
 
+# --- slow-source recovery (docs/slow-source-recovery.md §A) -----------------
+# Advertised peer metrics are search-time claims; measured delivery is the
+# truth. A peer that completes every track at 0.1 MB/s never trips the
+# transfer timeout — this policy notices it between tracks and decides
+# whether a switch to a chain fallback is *earned* (same quality lock, full
+# remaining coverage). If staying is the best available option, staying is
+# the correct outcome, not a failure.
+
+# A completed track is a qualifying speed sample only above this size —
+# smaller files finish inside TCP slow-start and the average is noise.
+SLOW_TRACK_MIN_BYTES = 5 * 1024 * 1024
+
+# Consecutive qualifying tracks below the floor before a peer counts as
+# persistently slow. A fast qualifying track resets the streak; failures and
+# sub-minimum tracks neither count nor reset.
+SLOW_STREAK_K = 2
+
+# Hard safety bound on switches per album — not a preference knob: together
+# with the measured-average rule it guarantees the walk settles on the
+# better of two slow peers instead of thrashing between them.
+MAX_SLOW_SWITCHES = 2
+
+
+class SlowSourceMonitor:
+    """Per-album, in-memory measured-speed bookkeeping: qualifying samples,
+    per-peer streaks and running averages, the switch budget, and the
+    settled flag. A floor of 0 disables the whole mechanism."""
+
+    def __init__(self, floor_mbps: float):
+        self.floor_mbps = floor_mbps
+        self.switches_used = 0
+        self.settled = False              # a "stay" verdict ends evaluation
+        self._sums: dict[str, tuple[float, int]] = {}   # peer -> (Σ MB/s, n)
+        self._streak: dict[str, int] = {}
+        self._flagged: set[str] = set()   # peers ever verdicted slow (sticky)
+
+    @property
+    def enabled(self) -> bool:
+        return self.floor_mbps > 0
+
+    def record(self, peer: str, size_bytes: int, elapsed_secs: float) -> None:
+        """Feed one *completed* transfer (enqueue-to-done). Failures never
+        come here — the failure logic owns those."""
+        if not self.enabled or size_bytes < SLOW_TRACK_MIN_BYTES or elapsed_secs <= 0:
+            return
+        mbps = (size_bytes / (1024 * 1024)) / elapsed_secs
+        total, n = self._sums.get(peer, (0.0, 0))
+        self._sums[peer] = (total + mbps, n + 1)
+        if mbps < self.floor_mbps:
+            self._streak[peer] = self._streak.get(peer, 0) + 1
+            if self._streak[peer] >= SLOW_STREAK_K:
+                self._flagged.add(peer)
+        else:
+            self._streak[peer] = 0
+
+    def sample_count(self, peer: str) -> int:
+        return self._sums.get(peer, (0.0, 0))[1]
+
+    def avg_mbps(self, peer: str) -> float | None:
+        total, n = self._sums.get(peer, (0.0, 0))
+        return total / n if n else None
+
+    def is_measured_slow(self, peer: str) -> bool:
+        """Ever hit a persistently-slow verdict this album. Sticky — a later
+        fast track resets the streak but not the gap-fill demotion."""
+        return peer in self._flagged
+
+    def wants_switch(self, peer: str) -> bool:
+        """Should the downloader evaluate a switch away from ``peer`` now?"""
+        return (self.enabled and not self.settled
+                and self.switches_used < MAX_SLOW_SWITCHES
+                and self._streak.get(peer, 0) >= SLOW_STREAK_K)
+
+    def note_switch(self) -> None:
+        self.switches_used += 1
+
+    def settle(self) -> None:
+        """A "stay" verdict: the chain can't improve mid-album, so don't
+        re-evaluate (or re-log) on every further slow track."""
+        self.settled = True
+
+
+def _quality_lock_matches(candidate_quality, quality_lock) -> bool:
+    """Same wildcard semantics as ``pick_quality_locked``: a None lock
+    component matches anything on that axis; never trade the lock for speed."""
+    if not quality_lock or quality_lock == (None, None):
+        return True
+    cand_bd, cand_sr = candidate_quality
+    bd, sr = quality_lock
+    return (bd is None or cand_bd == bd) and (sr is None or cand_sr == sr)
+
+
+def find_slow_source_switch(monitor: SlowSourceMonitor, current_peer: str,
+                            chain, album_tracks, remaining_track_ids,
+                            quality_lock, abandoned_peers=frozenset(),
+                            ):
+    """First chain entry (rank order) that's an *earned* switch target away
+    from ``current_peer``: same quality lock, covers every remaining track,
+    not failure-abandoned this album, and not measured slower-or-equal to
+    the current peer. Whole-folder replacement only — per-track scatter is
+    the fallback of last resort, not a speed remedy.
+
+    Returns ``(chain_rank, folder)`` or ``None`` (= staying is correct).
+    """
+    current_avg = monitor.avg_mbps(current_peer)
+    for rank, cand in enumerate(chain):
+        peer = cand.folder.username
+        if peer == current_peer or peer in abandoned_peers:
+            continue
+        if not _quality_lock_matches(modal_quality(cand.matched_files),
+                                     quality_lock):
+            continue
+        covered = {t["id"] for t, f in zip(album_tracks, cand.matched_files)
+                   if f is not None}
+        if not remaining_track_ids <= covered:
+            continue
+        cand_avg = monitor.avg_mbps(peer)
+        if cand_avg is not None and current_avg is not None \
+                and cand_avg <= current_avg:
+            continue  # anti-thrash: only switch to a measured-faster peer
+        return rank, cand
+    return None
+
+
+def demote_measured_slow(candidates: list[SearchResult],
+                         monitor: SlowSourceMonitor) -> list[SearchResult]:
+    """Stable reorder of a per-track candidate list: files from peers this
+    album measured slow move to the back — still eligible (better a slow
+    track than a missing one), but gap-fill shouldn't immediately reward the
+    peer the folder walk just left."""
+    slow = [c for c in candidates if monitor.is_measured_slow(c.username)]
+    if not slow:
+        return candidates
+    return [c for c in candidates
+            if not monitor.is_measured_slow(c.username)] + slow
+
+
 def flatten_candidates(auto, alternatives) -> list[SearchResult]:
     """Ranked download order for a track: every copy of the best recording,
     then the next recording's copies, deduped by (peer, path).
