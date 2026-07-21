@@ -61,6 +61,20 @@ jobs:
           docker push "$IMAGE:${{ github.sha }}"
           docker push "$IMAGE:$branch_tag"
 
+      # The runner disk is 10G and every push leaves ~320MB of SHA-tagged
+      # images behind; without cleanup they pile up until docker build dies
+      # with ENOSPC (bit the lala repo 2026-07-05). Keep only the just-built
+      # image — it doubles as layer cache for the next build; older tags
+      # live in the registry anyway.
+      - name: Drop superseded local images
+        if: always()
+        run: |
+          docker images --format '{{.Repository}}:{{.Tag}}' \
+            | { grep -E "^$REGISTRY/homelab/music-bot:" || true; } \
+            | grep -v "${{ github.sha }}" \
+            | xargs -r docker rmi || true
+          docker image prune -f
+
   deploy:
     runs-on: docker
     container:
