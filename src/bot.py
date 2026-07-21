@@ -25,7 +25,7 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
-from telegram.error import NetworkError, TelegramError
+from telegram.error import BadRequest, NetworkError, RetryAfter, TelegramError
 from telegram.request import HTTPXRequest
 
 from config import (
@@ -154,6 +154,80 @@ class LiveStatus:
             await self._edit(text)
         except TelegramError:
             pass
+
+
+# Status messages are cosmetic: a Telegram hiccup on one must never abort
+# filing/download work (docs/slow-source-recovery.md §B — a ~30s network blip
+# on the "Importing upload…" edit once killed an import before any file was
+# filed). Transient errors retry with backoff sized to outlive such a blip;
+# final outcome messages retry harder and log at ERROR when lost, because
+# losing one costs the user the report — the files are already safe on disk.
+_EDIT_BACKOFF = (2, 5, 10)
+_FINAL_BACKOFF = (2, 5, 10, 20, 30)
+
+
+async def _tg_call(coro_fn, what: str, final: bool = False):
+    """Run a Telegram send/edit, absorbing failures. Returns the call's
+    result, or None once every attempt failed — never raises."""
+    backoff = _FINAL_BACKOFF if final else _EDIT_BACKOFF
+    honored_flood = False
+    last_err: TelegramError | None = None
+    for delay in (*backoff, None):
+        try:
+            return await coro_fn()
+        except RetryAfter as e:
+            # Honor Telegram's flood-control wait once; a second one means
+            # we're being told to go away for real.
+            last_err = e
+            if honored_flood or delay is None:
+                break
+            honored_flood = True
+            await asyncio.sleep(e.retry_after)
+        except BadRequest as e:
+            # Subclasses NetworkError but isn't transient — retrying won't
+            # change the answer.
+            last_err = e
+            break
+        except NetworkError as e:  # includes TimedOut
+            last_err = e
+            if delay is None:
+                break
+            await asyncio.sleep(delay)
+        except TelegramError as e:
+            last_err = e
+            break
+    logger.log(logging.ERROR if final else logging.WARNING,
+               "%s dropped after Telegram errors: %s", what, last_err)
+    return None
+
+
+class _NullMessage:
+    """Stand-in when even the initial status send failed: edits/deletes
+    no-op, so the flow runs UI-less instead of dying over messaging."""
+    message_id = None
+
+    async def edit_text(self, *args, **kwargs):
+        return None
+
+    async def delete(self, *args, **kwargs):
+        return None
+
+
+async def safe_edit(status_msg, text: str, final: bool = False, **kwargs) -> bool:
+    """Best-effort status edit; True when the edit landed."""
+    if status_msg is None:
+        return False
+    res = await _tg_call(lambda: status_msg.edit_text(text, **kwargs),
+                         "status edit", final=final)
+    return res is not None
+
+
+async def safe_send(sender, text: str):
+    """Best-effort initial status send. ``sender`` is anything with
+    ``reply_text`` (ChatIO, telegram Message). On total failure returns a
+    _NullMessage — the download/import is the job, the UI is best-effort."""
+    msg = await _tg_call(lambda: sender.reply_text(text), "status send")
+    return msg if msg is not None else _NullMessage()
 
 
 def authorized(func):
@@ -471,7 +545,7 @@ async def cmd_retag(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Re-tag already running.")
         return
 
-    status_msg = await update.message.reply_text("Scanning library…")
+    status_msg = await safe_send(update.message, "Scanning library…")
     last_edit = [time.monotonic()]
     started = time.monotonic()
     tally = {"changed": 0, "lastfm": 0, "skipped": 0}
@@ -502,7 +576,7 @@ async def cmd_retag(update: Update, context: ContextTypes.DEFAULT_TYPE):
             plans, summary = await retagger.run_dry_run(MUSIC_DIR, progress=progress)
         except Exception as e:
             logger.exception("Re-tag dry-run failed")
-            await status_msg.edit_text(f"Re-tag failed: {_short(e)}")
+            await safe_edit(status_msg, f"Re-tag failed: {_short(e)}", final=True)
             return
     finally:
         _retag_in_progress = False
@@ -514,16 +588,15 @@ async def cmd_retag(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "expire_at": time.monotonic() + _RETAG_SESSION_TTL,
     }
     text = _format_retag_summary(plans, summary, elapsed)
-    try:
-        await status_msg.edit_text(text, parse_mode="HTML")
-    except TelegramError:
-        await update.message.reply_text(text, parse_mode="HTML")
+    if not await safe_edit(status_msg, text, final=True, parse_mode="HTML"):
+        await _tg_call(lambda: update.message.reply_text(text, parse_mode="HTML"),
+                       "re-tag summary", final=True)
 
 
 async def _do_retag_apply(update: Update, plans: list):
     global _retag_session, _retag_in_progress
     _retag_in_progress = True
-    status_msg = await update.message.reply_text("Applying re-tag…")
+    status_msg = await safe_send(update.message, "Applying re-tag…")
     last_edit = [time.monotonic()]
     started = time.monotonic()
     written_total = [0]
@@ -551,7 +624,7 @@ async def _do_retag_apply(update: Update, plans: list):
             stats = await retagger.run_apply(plans, progress=progress)
         except Exception as e:
             logger.exception("Re-tag apply failed")
-            await status_msg.edit_text(f"Apply failed: {_short(e)}")
+            await safe_edit(status_msg, f"Apply failed: {_short(e)}", final=True)
             return
     finally:
         _retag_in_progress = False
@@ -578,10 +651,10 @@ async def _do_retag_apply(update: Update, plans: list):
 
     out.append("")
     out.append(await _trigger_scan(slskd_mode="scheduled"))
-    try:
-        await status_msg.edit_text("\n".join(out), parse_mode="HTML")
-    except TelegramError:
-        await update.message.reply_text("\n".join(out), parse_mode="HTML")
+    text = "\n".join(out)
+    if not await safe_edit(status_msg, text, final=True, parse_mode="HTML"):
+        await _tg_call(lambda: update.message.reply_text(text, parse_mode="HTML"),
+                       "re-tag apply summary", final=True)
 
 
 @authorized
@@ -737,10 +810,7 @@ async def _send_result(io: ChatIO, status_msg, text: str, album_dir: str) -> Non
             return
         except (TelegramError, OSError):
             pass
-    try:
-        await status_msg.edit_text(text, parse_mode="HTML")
-    except TelegramError:
-        pass
+    await safe_edit(status_msg, text, final=True, parse_mode="HTML")
 
 
 async def _download_album(update: Update, album_id: str, force: bool = False):
@@ -759,10 +829,10 @@ async def _run_album(io: ChatIO, album_id: str, force: bool = False,
     _in_flight.add(key)
     try:
         if _download_semaphore.locked():
-            status_msg = await io.reply_text(
-                "Queued — will start after the current download finishes")
+            status_msg = await safe_send(
+                io, "Queued — will start after the current download finishes")
         else:
-            status_msg = await io.reply_text("Fetching album info…")
+            status_msg = await safe_send(io, "Fetching album info…")
         entry = resume_entry or journal.PendingDownload(
             kind="album", id=album_id, chat_id=io.chat_id, force=force)
         entry.status_message_id = status_msg.message_id
@@ -799,7 +869,8 @@ async def _do_download_album(io: ChatIO, status_msg, album_id: str, force: bool 
             await metadata.enrich_genres(album)
         except Exception as e:
             logger.error("Failed to fetch album %s: %s", album_id, e)
-            await status_msg.edit_text(f"❌ Failed to fetch album info: {_short(e)}")
+            await safe_edit(status_msg, f"❌ Failed to fetch album info: {_short(e)}",
+                            final=True)
             return
 
         # Force re-download: move the existing album OUT of the artist tree
@@ -841,7 +912,7 @@ async def _do_download_album(io: ChatIO, status_msg, album_id: str, force: bool 
         except Exception as e:
             logger.error("Album download failed (%s — %s): %s", album["artist"], album["title"], e)
             await _restore_backup(backup_dir, restore_target)
-            await status_msg.edit_text(f"❌ Download failed: {_short(e)}")
+            await safe_edit(status_msg, f"❌ Download failed: {_short(e)}", final=True)
             return
 
         # Only drop the backup once the fresh copy is a clean, complete success.
@@ -866,10 +937,12 @@ async def _do_download_album(io: ChatIO, status_msg, album_id: str, force: bool 
             # rather than the (now untrue) per-track download tally.
             got = result["downloaded"]
             miss = len(result["failed"])
-            await status_msg.edit_text(
+            await safe_edit(
+                status_msg,
                 f"Kept existing: {album['artist']} — {album['title']}\n"
                 f"Re-download was incomplete ({got} ok, {miss} unavailable), "
-                f"so the original copy was restored."
+                f"so the original copy was restored.",
+                final=True,
             )
             return
 
@@ -904,8 +977,8 @@ async def _handle_upload(io: ChatIO, report: uploads.IntakeReport) -> None:
         await io.reply_text(uploads.format_rejection(report))
         return
 
-    status_msg = await io.reply_text(
-        f"📦 {report.name}: {len(report.audio)} audio file(s) received. "
+    status_msg = await safe_send(
+        io, f"📦 {report.name}: {len(report.audio)} audio file(s) received. "
         "Identifying release…")
     album_id = None
     try:
@@ -913,24 +986,31 @@ async def _handle_upload(io: ChatIO, report: uploads.IntakeReport) -> None:
     except Exception as e:
         logger.error("Upload identify failed for %s: %s", report.name, e)
     if not album_id:
-        await status_msg.edit_text(
+        await safe_edit(
+            status_msg,
             f"❓ {report.name}: couldn't match this to a release — no usable "
             "URL/ISRC/UPC/artist tags, and the name didn't search. Files are "
-            "kept in uploads staging; nothing was filed.")
+            "kept in uploads staging; nothing was filed.", final=True)
         return
 
     async with _download_semaphore:
         try:
             album = await metadata.fetch_album(album_id)
             await metadata.enrich_genres(album)
-            await status_msg.edit_text(
+            # Cosmetic edit inside the critical path — safe_edit, never a
+            # bare edit_text: a network blip here once aborted the whole
+            # import before a single file was filed.
+            await safe_edit(
+                status_msg,
                 f"📦 Importing upload: {album['artist']} — {album['title']}…")
             result = await upload_import.import_staged_album(
                 album, report.staging_dir, MUSIC_DIR)
         except Exception as e:
             logger.exception("Upload import failed for %s", report.name)
-            await status_msg.edit_text(
-                f"❌ Upload import failed: {_short(e)}. Files kept in staging.")
+            await safe_edit(
+                status_msg,
+                f"❌ Upload import failed: {_short(e)}. Files kept in staging.",
+                final=True)
             return
 
     scan_note = ""
@@ -976,10 +1056,10 @@ async def _run_track(io: ChatIO, track_id: str, force: bool = False,
     _in_flight.add(key)
     try:
         if _download_semaphore.locked():
-            status_msg = await io.reply_text(
-                "Queued — will start after the current download finishes")
+            status_msg = await safe_send(
+                io, "Queued — will start after the current download finishes")
         else:
-            status_msg = await io.reply_text("Fetching track info…")
+            status_msg = await safe_send(io, "Fetching track info…")
         entry = resume_entry or journal.PendingDownload(
             kind="track", id=track_id, chat_id=io.chat_id, force=force)
         entry.status_message_id = status_msg.message_id
@@ -1000,7 +1080,8 @@ async def _do_download_track(io: ChatIO, status_msg, track_id: str, force: bool 
                 await metadata.enrich_genres(album_ctx)
         except Exception as e:
             logger.error("Failed to fetch track %s: %s", track_id, e)
-            await status_msg.edit_text(f"❌ Failed to fetch track info: {_short(e)}")
+            await safe_edit(status_msg, f"❌ Failed to fetch track info: {_short(e)}",
+                            final=True)
             return
 
         if force:
@@ -1028,17 +1109,19 @@ async def _do_download_track(io: ChatIO, status_msg, track_id: str, force: bool 
             if "No FLAC found" in str(e):
                 if await _offer_mp3_fallback(status_msg, track_id, track, album_ctx):
                     return
-                await status_msg.edit_text(
+                await safe_edit(
+                    status_msg,
                     f"❌ No FLAC or acceptable lossy fallback for "
-                    f"{track['artist']} — {track['title']}"
+                    f"{track['artist']} — {track['title']}",
+                    final=True,
                 )
                 return
             logger.error("Track download failed (%s — %s): %s", track["artist"], track["title"], e)
-            await status_msg.edit_text(f"❌ Download failed: {_short(e)}")
+            await safe_edit(status_msg, f"❌ Download failed: {_short(e)}", final=True)
             return
         except Exception as e:
             logger.error("Track download failed (%s — %s): %s", track["artist"], track["title"], e)
-            await status_msg.edit_text(f"❌ Download failed: {_short(e)}")
+            await safe_edit(status_msg, f"❌ Download failed: {_short(e)}", final=True)
             return
 
         scan_note = ""

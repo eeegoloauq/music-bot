@@ -242,12 +242,13 @@ class FakeUploadIO:
         raise AssertionError("not used in these tests")
 
 
-async def test_network_error_on_cosmetic_edit_aborts_upload(monkeypatch, tmp_path):
-    """Pins the incident bug: a transient NetworkError raised by the cosmetic
-    "Importing upload…" edit inside the critical try aborts _handle_upload
-    before import_staged_album ever runs, orphaning the staged files.
-
-    Flips with the safe-edit commit (docs/slow-source-recovery.md §B).
+async def test_network_error_on_cosmetic_edit_no_longer_aborts_upload(
+        monkeypatch, tmp_path):
+    """Flipped by the safe-edit commit (docs/slow-source-recovery.md §B):
+    this used to pin the incident bug, where a transient NetworkError from
+    the cosmetic "Importing upload…" edit aborted _handle_upload before
+    import_staged_album ever ran. Now every status edit is best-effort — the
+    import files the album even when the chat is unreachable throughout.
     """
     imported = []
 
@@ -265,16 +266,26 @@ async def test_network_error_on_cosmetic_edit_aborts_upload(monkeypatch, tmp_pat
         return {"album_dir": str(tmp_path), "downloaded": 1, "skipped": 0,
                 "failed": [], "total": 1, "format": "FLAC", "with_lyrics": 0}
 
+    async def fake_scan():
+        return "scanned"
+
+    async def fake_share(artist, title, skip_delay=False):
+        return None
+
     monkeypatch.setattr(bot.upload_import, "identify_album", fake_identify)
     monkeypatch.setattr(bot.upload_import, "import_staged_album", fake_import)
     monkeypatch.setattr(bot.metadata, "fetch_album", fake_fetch)
     monkeypatch.setattr(bot.metadata, "enrich_genres", fake_enrich)
+    monkeypatch.setattr(bot, "_trigger_scan", fake_scan)
+    monkeypatch.setattr(bot, "_try_share_album", fake_share)
+    monkeypatch.setattr(bot, "_EDIT_BACKOFF", (0,))
+    monkeypatch.setattr(bot, "_FINAL_BACKOFF", (0,))
 
     report = uploads.IntakeReport(name="drop.zip", staging_dir=str(tmp_path),
                                   audio=["01 - Track 1.flac"])
     msg = RaisingMessage()
 
-    with pytest.raises(NetworkError):
-        await bot._handle_upload(FakeUploadIO(msg), report)
+    await bot._handle_upload(FakeUploadIO(msg), report)  # must not raise
 
-    assert imported == []  # filing work never ran — the messaging blip won
+    assert len(imported) == 1        # filing work ran despite the dead chat
+    assert msg.edit_calls >= 2       # the edits were attempted (and retried)
