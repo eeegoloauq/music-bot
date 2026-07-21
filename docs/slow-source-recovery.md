@@ -1,6 +1,7 @@
 # Slow-source recovery
 
-Design note (phase 1 — no code yet) for three fixes motivated by the
+Design note (signed off 2026-07-21; open questions resolved below) for three
+fixes motivated by the
 2026-07-20 incidents. Companion to docs/source-selection.md, which describes
 how a source gets *chosen*; this note is about noticing, mid-album, that the
 chosen source is bad in a way selection couldn't see, and about two smaller
@@ -110,6 +111,11 @@ applies to the switched-to peer: a bad switch self-corrects within
 If no chain entry qualifies, **stay** — logged as a first-class decision
 (below), evaluated once: a "stayed" verdict marks the walk settled (the
 chain can't improve mid-album), so it doesn't re-log every track.
+
+The "covers ALL remaining tracks" bar is deliberately conservative. If real
+use shows switches rarely fire because chain folders have partial coverage,
+the pre-approved next step is relaxing it to "covers all but ≤1 remaining,
+leftover goes to gap-fill" — a v1.1 change, not part of this series.
 
 ### Anti-thrash
 
@@ -237,15 +243,19 @@ today's semantics so each fix flips exactly one:
 Observe 4–5 on the dev deployment against real albums before promoting to
 main.
 
-## Open questions (operator)
+## Resolved (2026-07-21)
 
-1. Floor default 0.5 MB/s — comfortable for the hi-res cap too, or start
-   at 1.0?
-2. Per-peer slowness across albums within one bot session (a slow peer
-   re-picked by the *next* album starts clean) — worth a session-scoped
-   reputation, or keep per-album?
-3. Very large single tracks: v1 only decides *between* tracks, so one
-   200 MB file at 0.1 MB/s still burns up to `DOWNLOAD_TIMEOUT_SECS`.
-   Accept for v1, or add a mid-transfer minimum-progress check later?
-4. Failed upload imports currently wait for the user to re-upload; should
-   staging get a journal-style retry on startup instead?
+1. **Floor stays 0.5 MB/s default**, hi-res cap included. The mechanism
+   targets pathological peers (the incident ran 5–7× below healthy); 1.0
+   would start flagging acceptable ones. The env knob covers taste.
+2. **Slowness stays per-album, in memory.** A session-scoped peer
+   reputation risks stale penalties and adds state, for a re-detection
+   that costs at most `SLOW_STREAK_K` tracks. Possible future step, not v1.
+3. **Between-tracks-only accepted for v1.** Roadmap item —
+   **mid-transfer minimum-progress check**: a very large single track
+   (200 MB at 0.1 MB/s) still burns up to `DOWNLOAD_TIMEOUT_SECS`, because
+   v1 only measures completed transfers; a minimum-bytes-per-interval check
+   during the transfer would bound that too.
+4. **Upload-staging retry on startup: backlog**, out of scope for this
+   series. With safe_edit the crash cause is gone, and staging survives
+   for a manual re-drop.
