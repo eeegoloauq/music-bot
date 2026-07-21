@@ -35,15 +35,18 @@ def make_album(n_tracks: int) -> dict:
 
 
 def make_folder(username: str, album: dict, *, score: float = 80.0,
-                bit_depth: int = 16, sample_rate: int = 44100):
-    """Duck-typed ScoredFolder covering every track of ``album``."""
+                bit_depth: int = 16, sample_rate: int = 44100,
+                missing: set[str] = frozenset()):
+    """Duck-typed ScoredFolder covering every track of ``album`` except the
+    titles in ``missing``."""
     files = [make_result(username,
                          f"M\\Artist - Album\\{t['trackNumber']:02d} - {t['title']}.flac",
                          bit_depth=bit_depth, sample_rate=sample_rate)
+             if t["title"] not in missing else None
              for t in album["tracks"]]
     return types.SimpleNamespace(
         folder=types.SimpleNamespace(username=username),
-        score=score, missing_count=0, matched_files=files)
+        score=score, missing_count=len(missing), matched_files=files)
 
 
 class Harness:
@@ -57,6 +60,9 @@ class Harness:
     def __init__(self, monkeypatch, script):
         self.script = script
         self.attempts: list[tuple[str, str]] = []
+        # Pin the slow-source floor to its documented default regardless of
+        # the local env (docs/slow-source-recovery.md §A).
+        monkeypatch.setattr(downloader, "SLOW_SOURCE_MIN_MBPS", 0.5)
         clock = types.SimpleNamespace(_t=0.0)
         clock.monotonic = lambda: clock._t
         self.clock = clock
@@ -102,14 +108,12 @@ class Harness:
 MB = 1024 * 1024
 
 
-async def test_speed_blind_folder_walk(monkeypatch, tmp_path):
-    """The 2026-07-20 incident shape: the folder peer delivers every track at
-    ~0.1 MB/s while a same-quality fallback folder sits in the chain — and is
-    never consulted, because measured speed is not an input to the walk. The
-    album completes with single-peer provenance.
-
-    Flips with the slow-source wiring commit (docs/slow-source-recovery.md §A).
-    """
+async def test_slow_walk_switches_to_earned_fallback(monkeypatch, tmp_path, caplog):
+    """Flipped by the slow-source wiring commit (docs/slow-source-recovery.md
+    §A): this used to pin the 2026-07-20 incident, where the walk was
+    speed-blind and a ~0.1 MB/s folder peer kept the whole album while a
+    same-quality fallback sat unused in the chain. Now two qualifying tracks
+    below the floor earn a switch to the fallback covering all remaining."""
     album = make_album(4)
     script = {("slowfolk", t["title"]): (20 * MB, 200.0) for t in album["tracks"]}
     script.update({("fastalt", t["title"]): (20 * MB, 10.0) for t in album["tracks"]})
@@ -117,10 +121,94 @@ async def test_speed_blind_folder_walk(monkeypatch, tmp_path):
     h.set_folders(monkeypatch, make_folder("slowfolk", album),
                   [make_folder("fastalt", album)])
 
+    with caplog.at_level("INFO", logger="soulseek.downloader"):
+        result = await downloader.download_album("1", str(tmp_path), album=album)
+
+    assert result["downloaded"] == 4 and not result["failed"]
+    assert result["source_counts"] == {"slowfolk": 2, "fastalt": 2}
+    decisions = [r.message for r in caplog.records if "Slow source" in r.message]
+    assert len(decisions) == 1 and "switching to peer fastalt" in decisions[0]
+    assert "covers 2/2 remaining @ 16-bit/44kHz" in decisions[0]
+
+
+async def test_slow_walk_stays_without_eligible_fallback(monkeypatch, tmp_path, caplog):
+    """No same-quality full-coverage fallback → staying is the correct
+    outcome, logged exactly once (the walk settles; no per-track re-log)."""
+    album = make_album(4)
+    script = {("slowfolk", t["title"]): (20 * MB, 200.0) for t in album["tracks"]}
+    h = Harness(monkeypatch, script)
+    h.set_folders(monkeypatch, make_folder("slowfolk", album),
+                  [make_folder("hiresalt", album, bit_depth=24,
+                               sample_rate=96_000)])  # breaks the lock
+
+    with caplog.at_level("INFO", logger="soulseek.downloader"):
+        result = await downloader.download_album("1", str(tmp_path), album=album)
+
+    assert result["downloaded"] == 4 and not result["failed"]
+    assert result["source_counts"] == {"slowfolk": 4}
+    decisions = [r.message for r in caplog.records if "Slow source" in r.message]
+    assert len(decisions) == 1 and "staying" in decisions[0]
+
+
+async def test_switch_cap_and_measured_back_switch(monkeypatch, tmp_path):
+    """Two slow folders: the album settles on the better of them. The
+    back-switch is allowed only because the first peer measured faster, and
+    the switch cap (2/album) ends the shuffling there."""
+    album = make_album(6)
+    script = {("slowfolk", t["title"]): (20 * MB, 200.0) for t in album["tracks"]}
+    script.update({("slower", t["title"]): (20 * MB, 400.0) for t in album["tracks"]})
+    h = Harness(monkeypatch, script)
+    h.set_folders(monkeypatch, make_folder("slowfolk", album),
+                  [make_folder("slower", album)])
+
+    result = await downloader.download_album("1", str(tmp_path), album=album)
+
+    assert result["downloaded"] == 6 and not result["failed"]
+    assert h.attempts == [
+        ("slowfolk", "Track 1"), ("slowfolk", "Track 2"),  # 0.1 → verdict
+        ("slower", "Track 3"), ("slower", "Track 4"),      # 0.05 → worse
+        ("slowfolk", "Track 5"), ("slowfolk", "Track 6"),  # back; cap ends it
+    ]
+
+
+async def test_floor_zero_disables_switching(monkeypatch, tmp_path):
+    """SLOW_SOURCE_MIN_MBPS=0 restores the pre-series speed-blind walk."""
+    album = make_album(4)
+    script = {("slowfolk", t["title"]): (20 * MB, 200.0) for t in album["tracks"]}
+    script.update({("fastalt", t["title"]): (20 * MB, 10.0) for t in album["tracks"]})
+    h = Harness(monkeypatch, script)
+    monkeypatch.setattr(downloader, "SLOW_SOURCE_MIN_MBPS", 0.0)
+    h.set_folders(monkeypatch, make_folder("slowfolk", album),
+                  [make_folder("fastalt", album)])
+
+    result = await downloader.download_album("1", str(tmp_path), album=album)
+
+    assert result["source_counts"] == {"slowfolk": 4}
+
+
+async def test_gap_fill_demotes_measured_slow_peer(monkeypatch, tmp_path):
+    """A measured-slow peer's files stay eligible in per-track gap-fill but
+    move behind other peers' copies — last resort, not first pick."""
+    album = make_album(4)
+    folder = make_folder("slowfolk", album, missing={"Track 4"})  # 3/4 ≥ 0.75
+    script = {("slowfolk", t["title"]): (20 * MB, 200.0) for t in album["tracks"]}
+    script[("other", "Track 4")] = (20 * MB, 10.0)
+    h = Harness(monkeypatch, script)
+    h.set_folders(monkeypatch, folder, [])
+    # The gap-fill search ranks the slow peer's copy first; demotion must
+    # put the fresh peer ahead of it.
+    h.set_track_search(monkeypatch, {
+        "Track 4": [make_result("slowfolk", "M\\Artist - Album\\04 - Track 4.flac"),
+                    make_result("other", "S\\Artist - Album\\04 - Track 4.flac")],
+    })
+
     result = await downloader.download_album("1", str(tmp_path), album=album)
 
     assert result["downloaded"] == 4 and not result["failed"]
-    assert result["source_counts"] == {"slowfolk": 4}  # fastalt never touched
+    assert h.attempts == [
+        ("slowfolk", "Track 1"), ("slowfolk", "Track 2"), ("slowfolk", "Track 3"),
+        ("other", "Track 4"),
+    ]
 
 
 async def test_failed_track_retried_after_primary_walk_completes(monkeypatch, tmp_path):

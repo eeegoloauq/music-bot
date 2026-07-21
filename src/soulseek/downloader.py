@@ -34,8 +34,13 @@ from soulseek import client as slskd
 from soulseek.client import SearchResult
 from soulseek.matcher import find_album, find_track
 from soulseek.scorer import ScoredFolder
+from config import SLOW_SOURCE_MIN_MBPS
 from soulseek.selection import (
+    MAX_SLOW_SWITCHES,
     PEER_ABANDON_K,
+    SlowSourceMonitor,
+    demote_measured_slow,
+    find_slow_source_switch,
     order_for_download,
     plan_folder_phase,
     quality_label,
@@ -629,6 +634,12 @@ async def download_album(
     # (username, filename) pairs that already failed a transfer this album —
     # shared across phases so retries go to *other* peers.
     failed_candidate_keys: set[tuple[str, str]] = set()
+    # Measured delivery speed per peer (docs/slow-source-recovery.md §A):
+    # advertised metrics got this album its peer, completed-transfer
+    # measurement decides whether to stay with it.
+    slow_monitor = SlowSourceMonitor(SLOW_SOURCE_MIN_MBPS)
+    # Peers abandoned for consecutive failures — never slow-switch targets.
+    abandoned_peers: set[str] = set()
 
     async def _attempt(i: int, track: dict, candidates: list[SearchResult],
                        ) -> SearchResult | None:
@@ -670,6 +681,7 @@ async def download_album(
             )
             album_bytes += size
             downloaded += 1
+            slow_monitor.record(chosen.username, size, elapsed)
             track_provenance[track["id"]] = chosen.username
             remaining_track_ids.discard(track["id"])
             last_error.pop(track["id"], None)
@@ -687,20 +699,61 @@ async def download_album(
                        title=track["title"], reason=str(e))
             return None
 
+    def _consider_slow_switch(current_rank: int) -> int | None:
+        """Between-tracks slow-source verdict (docs/slow-source-recovery.md
+        §A). Returns the chain rank to switch to, or None to keep walking.
+        Exactly one INFO line per decision; a "stay" settles the album so it
+        doesn't re-log every further slow track."""
+        peer = folder_chain[current_rank].folder.username
+        if not remaining_track_ids or not slow_monitor.wants_switch(peer):
+            return None
+        avg = slow_monitor.avg_mbps(peer)
+        n_samples = slow_monitor.sample_count(peer)
+        target = find_slow_source_switch(
+            slow_monitor, peer, folder_chain, album["tracks"],
+            remaining_track_ids, quality_lock, abandoned_peers)
+        if target is None:
+            slow_monitor.settle()
+            logger.info(
+                "Slow source: peer %s avg %.2f MB/s over %d track(s) (floor %g)"
+                " — staying: no chain folder covers %d remaining @ %s",
+                peer, avg, n_samples, slow_monitor.floor_mbps,
+                len(remaining_track_ids), quality_label(quality_lock),
+            )
+            return None
+        rank, chosen = target
+        slow_monitor.note_switch()
+        logger.info(
+            "Slow source: peer %s avg %.2f MB/s over %d track(s) (floor %g)"
+            " — switching to peer %s (covers %d/%d remaining @ %s, chain rank"
+            " %d, switch %d/%d)",
+            peer, avg, n_samples, slow_monitor.floor_mbps,
+            chosen.folder.username, len(remaining_track_ids),
+            len(remaining_track_ids), quality_label(quality_lock), rank,
+            slow_monitor.switches_used, MAX_SLOW_SWITCHES,
+        )
+        return rank
+
     # === Folder-chain phase ===
     # Walk ranked folder peers, abandoning any that rack up K consecutive
     # rejections. Successes from earlier peers stay; only the unfilled tail
-    # moves to the next peer.
-    for folder_rank, folder in enumerate(folder_chain):
-        if not remaining_track_ids:
-            break
+    # moves to the next peer. A slow-source switch reorders the walk —
+    # target first, skipped entries stay behind as ordinary fallbacks — and
+    # a demoted peer leaves the queue but keeps its gap-fill eligibility.
+    upcoming = list(range(len(folder_chain)))
+    walked = 0
+    while upcoming and remaining_track_ids:
+        folder_rank = upcoming.pop(0)
+        folder = folder_chain[folder_rank]
+        first_walked = walked == 0
+        walked += 1
         folder_chosen: dict[str, SearchResult] = {}
         for tr, sr in zip(album["tracks"], folder.matched_files):
             if tr["id"] in remaining_track_ids and sr is not None:
                 folder_chosen[tr["id"]] = sr
         if not folder_chosen:
             continue
-        if folder_rank > 0:
+        if not first_walked:
             logger.info(
                 "Folder fallback #%d: peer=%s score=%.1f covers %d remaining track(s)",
                 folder_rank, folder.folder.username, folder.score, len(folder_chosen),
@@ -711,8 +764,9 @@ async def download_album(
             await emit(t="folder", peer=folder.folder.username,
                        covered=n_tracks - folder.missing_count, total=n_tracks,
                        quality=quality_label(quality_lock), score=folder.score,
-                       alts=len(folder_chain) - folder_rank - 1)
+                       alts=len(upcoming))
         failures_in_a_row = 0
+        switch_to: int | None = None
         for i, track in to_download:
             if track["id"] not in folder_chosen:
                 continue
@@ -721,6 +775,9 @@ async def download_album(
             used = await _attempt(i, track, [folder_chosen[track["id"]]])
             if used is not None:
                 failures_in_a_row = 0
+                switch_to = _consider_slow_switch(folder_rank)
+                if switch_to is not None:
+                    break
             else:
                 failures_in_a_row += 1
                 if failures_in_a_row >= PEER_ABANDON_K:
@@ -728,7 +785,10 @@ async def download_album(
                         "Abandoning peer %s after %d consecutive failures, switching to next folder",
                         folder.folder.username, failures_in_a_row,
                     )
+                    abandoned_peers.add(folder.folder.username)
                     break
+        if switch_to is not None:
+            upcoming = [switch_to] + [r for r in upcoming if r != switch_to]
 
     # === Per-track fallback phase ===
     # Tracks that no folder covered — or whose folder chain failed entirely.
@@ -775,7 +835,11 @@ async def download_album(
                     track, album_artist=album["artist"], preseed=album_pool,
                     allow_search=False, diag=diag,
                 )
-            candidates = order_for_download(auto, alts, quality_lock)
+            # Measured-slow peers go to the back — still eligible (better a
+            # slow track than a missing one), but gap-fill shouldn't
+            # immediately reward the peer the folder walk just left.
+            candidates = demote_measured_slow(
+                order_for_download(auto, alts, quality_lock), slow_monitor)
             if not candidates:
                 reason = search_dead or _no_match_reason(diag)
                 last_error.setdefault(track["id"], reason)
