@@ -1,9 +1,6 @@
 # Music Bot
 
 [![Tests](https://github.com/eeegoloauq/music-bot/actions/workflows/tests.yml/badge.svg)](https://github.com/eeegoloauq/music-bot/actions/workflows/tests.yml)
-[![GitHub Release](https://img.shields.io/github/v/release/eeegoloauq/music-bot)](https://github.com/eeegoloauq/music-bot/releases)
-[![GHCR](https://img.shields.io/badge/ghcr.io-music--bot-blue)](https://github.com/eeegoloauq/music-bot/pkgs/container/music-bot)
-[![License](https://img.shields.io/github/license/eeegoloauq/music-bot)](LICENSE)
 
 A Telegram bot that fills your [Navidrome](https://www.navidrome.org/) library. Paste a link to an
 album or track from almost any music service and the bot figures out what it is, finds the audio on
