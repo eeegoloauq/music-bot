@@ -53,9 +53,10 @@ from your Navidrome, <code>l</code> the lyrics.</sub></p>
 
 ## Setup
 
-You need two containers: **slskd** (the Soulseek client) and **music-bot** itself. They talk over
-slskd's REST API. Two files is the whole setup — `compose.yaml` and `.env` — so it also works fine
-in Dockge or Portainer. Everything you'd want to change lives in `.env`.
+It's one compose stack with two services: **slskd** (the Soulseek client) and **music-bot** itself,
+talking over slskd's REST API. Two files is the whole setup — `compose.yaml` and `.env` — so it also
+works fine in Dockge or Portainer. Everything you'd want to change lives in `.env`. (No Docker?
+See [Without Docker](#without-docker) below.)
 
 ```mermaid
 flowchart LR
