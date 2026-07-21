@@ -25,6 +25,12 @@ NAVI_PUBLIC_URL = os.getenv("NAVIDROME_PUBLIC_URL", "").rstrip("/") or ""
 MAX_BIT_DEPTH = int(os.getenv("MAX_BIT_DEPTH", "24"))
 MAX_SAMPLE_RATE_HZ = int(os.getenv("MAX_SAMPLE_RATE_HZ", "96000"))
 
+# Slow-source recovery (docs/slow-source-recovery.md): a folder peer whose
+# completed tracks keep averaging below this floor (MB/s, enqueue-to-done)
+# gets switched away from mid-album — when an earned same-quality
+# replacement exists in the folder chain. 0 disables the mechanism.
+SLOW_SOURCE_MIN_MBPS = float(os.getenv("SLOW_SOURCE_MIN_MBPS", "0.5"))
+
 # Hard upper bound on a single peer file (bytes). Keeps a misconfigured /
 # malicious peer from offering a 50 GB "track". 0 disables the cap.
 MAX_FILE_BYTES = int(os.getenv("MAX_FILE_BYTES", str(2 * 1024 * 1024 * 1024)))
