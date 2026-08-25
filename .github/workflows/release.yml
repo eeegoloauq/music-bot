@@ -5,6 +5,9 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  # A tag that arrives in the same push as the branch does not start this
+  # workflow, so the release can also be run by hand against the tag.
+  workflow_dispatch:
 
 permissions:
   contents: read
