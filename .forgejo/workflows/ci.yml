@@ -9,6 +9,11 @@ on:
     branches: [main]
   pull_request:
 
+# A newer push to the same branch makes the running check pointless.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: docker
