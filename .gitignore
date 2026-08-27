@@ -13,5 +13,6 @@ package.json
 package-lock.json
 slskd-config/*
 !slskd-config/.gitkeep
+!slskd-config/slskd.yml.example
 *.zip
 .playwright-mcp/
