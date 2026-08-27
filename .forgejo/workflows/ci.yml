@@ -1,0 +1,24 @@
+# Runs in Forgejo, where the pull requests are — .github/workflows/tests.yml is
+# the same suite on GitHub, and Forgejo ignores that directory in a repository
+# that has .forgejo/workflows/. uv is installed from upstream rather than
+# through astral-sh/setup-uv, which this instance does not mirror.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: docker
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Run pytest
+        run: |
+          uv sync --frozen
+          uv run --no-sync pytest -q
