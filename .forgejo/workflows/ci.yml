@@ -16,7 +16,7 @@ jobs:
   test:
     runs-on: docker
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Pinned: the unversioned installer would run whatever astral.sh serves
       # that morning, which is a script this CI executes as itself.
       - name: Install uv
