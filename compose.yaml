@@ -1,6 +1,8 @@
 services:
   slskd:
-    image: slskd/slskd:latest
+    # Pinned, not :latest — an unpinned tag is only re-resolved on an explicit
+    # pull, so the host silently sat on 0.25.1 for months while upstream moved.
+    image: slskd/slskd:0.26.0
     container_name: slskd
     restart: unless-stopped
     environment:

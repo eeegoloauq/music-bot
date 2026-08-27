@@ -1,0 +1,36 @@
+# Reference copy of the live slskd config.
+#
+# The live file is slskd-config/slskd.yml, and it is gitignored on purpose:
+# slskd rewrites it at runtime, so tracking it would leave the deploy checkout
+# permanently dirty and `git checkout --detach` would refuse to move. Keeping a
+# reference copy here is the compromise — the live file went missing once
+# (sharing silently stopped some time after 2026-08-13, and nothing restored it
+# because nothing had a copy), and this is what it must be restored from.
+#
+# Login and directories come from the environment (see compose.yaml); this file
+# only carries what env vars cannot express.
+
+remote_configuration: false
+
+soulseek:
+  description: "music collector"
+
+shares:
+  directories:
+    - "/shared"
+    - "!/shared/.slskd-downloads"
+    - "!/shared/lost+found"
+
+web:
+  authentication:
+    disabled: true
+  port: 5030
+  https:
+    disabled: true
+
+filters:
+  search:
+    # Drop 1-2 character search requests: they match almost the whole share and
+    # cost real CPU to answer, and nobody searching that way wants our library.
+    request:
+      - ^.{1,2}$
