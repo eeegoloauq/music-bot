@@ -68,7 +68,19 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # The release notes are the message of the annotated tag; the generated
+      # commit list is appended after them.
+      - name: Release notes from the tag message
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          git config --global --add safe.directory "$PWD"
+          : > "$RUNNER_TEMP/notes.md"
+          git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG" 2>/dev/null || true
+          git tag -l --format='%(contents)' "$TAG" > "$RUNNER_TEMP/notes.md"
+
       - name: GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          body_path: ${{ runner.temp }}/notes.md
           generate_release_notes: true
