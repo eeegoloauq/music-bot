@@ -5,9 +5,7 @@
 name: ci
 
 on:
-  push:
-    branches: [main]
-  pull_request:
+  pull_request
 
 # A newer push to the same branch makes the running check pointless.
 concurrency:
