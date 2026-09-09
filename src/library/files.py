@@ -94,11 +94,14 @@ def _resolve_dir_canonical(parent: str, name: str) -> str:
 
 
 def _ensure_album_dir(dest_dir: str, artist: str, album_title: str) -> str:
-    """Create Artist/Album directory with Samba-compatible permissions.
+    """Create the Artist/Album directory.
 
-    Reuses an existing case-insensitive match for either segment (e.g. a pre-
-    existing ``Joeyy/`` is reused even if metadata says ``joeyy``), avoiding
-    duplicate folders when album titles change casing across metadata sources.
+    Permissions come from the process umask (0o002, set in ``main``), so the
+    directory is group-writable the moment it exists and nothing has to chmod
+    it afterwards. Reuses an existing case-insensitive match for either segment
+    (e.g. a pre-existing ``Joeyy/`` is reused even if metadata says ``joeyy``),
+    avoiding duplicate folders when album titles change casing across metadata
+    sources.
     """
     artist_dir = _resolve_dir_canonical(dest_dir, artist)
     if not os.path.isdir(artist_dir):
@@ -106,8 +109,6 @@ def _ensure_album_dir(dest_dir: str, artist: str, album_title: str) -> str:
     album_dir = _resolve_dir_canonical(artist_dir, album_title)
     if not os.path.isdir(album_dir):
         os.makedirs(album_dir, exist_ok=True)
-    os.chmod(album_dir, 0o777)
-    os.chmod(artist_dir, 0o777)
     return album_dir
 
 

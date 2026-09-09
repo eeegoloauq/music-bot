@@ -47,17 +47,14 @@ class PendingDownload:
 
 
 def _write(entries: list[PendingDownload]) -> None:
-    """Atomic full-file rewrite. Files land 0o666 like everything else the
-    bot writes to shared mounts, so the host user can manage them."""
+    """Atomic full-file rewrite. The umask set in ``main`` (0o002) makes both
+    the temporary file and the ledger group-writable, so a host account in the
+    same group can manage them without the bot chmod-ing anything."""
     tmp = JOURNAL_PATH + ".tmp"
     os.makedirs(os.path.dirname(JOURNAL_PATH), exist_ok=True)
     with open(tmp, "w") as f:
         json.dump([asdict(e) for e in entries], f, indent=1)
     os.replace(tmp, JOURNAL_PATH)
-    try:
-        os.chmod(JOURNAL_PATH, 0o666)
-    except OSError:
-        pass
 
 
 def load() -> list[PendingDownload]:
