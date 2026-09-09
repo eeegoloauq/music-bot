@@ -76,6 +76,7 @@ services:
   slskd:
     image: slskd/slskd:latest
     container_name: slskd
+    user: "${MUSICBOT_UID:-1000}:${MUSICBOT_GID:-1000}"
     restart: unless-stopped
     environment:
       SLSKD_SLSK_USERNAME: ${SOULSEEK_USERNAME}
@@ -86,6 +87,7 @@ services:
       SLSKD_DOWNLOADS_DIR: /downloads
       SLSKD_INCOMPLETE_DIR: /downloads/.incomplete
       SLSKD_NO_AUTH: "true"
+      SLSKD_UMASK: "0002"
       # Soulseek etiquette: share your library back, read-only. Remove this
       # line if you'd rather not share anything.
       SLSKD_SHARED_DIR: "/shared;!/shared/.slskd-downloads;!/shared/lost+found"
@@ -111,6 +113,7 @@ services:
   music-bot:
     image: ghcr.io/eeegoloauq/music-bot:latest
     container_name: music-bot
+    user: "${MUSICBOT_UID:-1000}:${MUSICBOT_GID:-1000}"
     restart: unless-stopped
     env_file: .env
     environment:
@@ -154,6 +157,16 @@ MUSIC_LIBRARY_DIR=/media/music
 # ports: lines in compose.yaml.
 #UPLOAD_HTTP_PORT=8080
 ```
+
+Both containers run as UID/GID 1000 by default. Set `MUSICBOT_UID` to the host
+account that owns the bot state and `MUSICBOT_GID` to the group that owns the
+music library. Group write comes from `umask 0002` in both containers, so new
+files are created `0664` and directories `0775` and nothing chmods anything
+afterwards. Do not also configure slskd `PUID`/`PGID` when using `user:`.
+Pre-create `bot-data`, `slskd-config`, and the library's `.slskd-downloads` with
+the selected UID/GID before the first start. See
+[volume permissions](docs/volume-permissions.md) for existing installations and
+rollback.
 
 Then `docker compose up -d`.
 
