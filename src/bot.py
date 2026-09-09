@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import errno
 import functools
 import logging
 import os
@@ -1470,6 +1471,38 @@ def _build_app() -> Application:
     return app
 
 
+def _require_writable_volumes() -> None:
+    """Stop with an instruction if the volumes still belong to someone else.
+
+    The containers no longer run as root, so an install that predates that
+    change has root-owned volumes. Without this the bot would start, log
+    nothing unusual, and silently drop every download and journal write.
+    A probe file is used rather than os.access, which answers about the uid
+    and not about the mount.
+    """
+    for label, path in (("state", os.path.dirname(journal.JOURNAL_PATH) or "/data"),
+                        ("library", MUSIC_DIR)):
+        probe = os.path.join(path, f".write-check-{os.getpid()}")
+        try:
+            with open(probe, "w"):
+                pass
+        except OSError as exc:
+            logger.error("Cannot write to the %s directory %s as uid=%d gid=%d: %s",
+                         label, path, os.geteuid(), os.getegid(), exc)
+            # A full disk is not a permission problem, and pointing at the
+            # migration script would send the reader down the wrong path.
+            if exc.errno in (errno.EACCES, errno.EPERM):
+                logger.error("On the host, stop the stack and run "
+                             "scripts/migrate-permissions.sh from the directory "
+                             "holding compose.yaml, then start it again.")
+            raise SystemExit(1)
+        finally:
+            try:
+                os.remove(probe)
+            except OSError:
+                pass
+
+
 def main():
     # The library is shared: the bot, slskd and Samba all write to it and
     # Navidrome reads it. Group write has to be there the moment a file is
@@ -1478,6 +1511,7 @@ def main():
     # papering over a mode that was already wrong. slskd gets the same value
     # through SLSKD_UMASK in compose.
     os.umask(0o002)
+    _require_writable_volumes()
 
     if not NAVI_LOGIN or not NAVI_PASS:
         logger.warning(
