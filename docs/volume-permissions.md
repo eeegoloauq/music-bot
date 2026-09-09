@@ -29,43 +29,58 @@ start when both are set.
 ## A fresh install
 
 Create `bot-data`, `slskd-config` and `$MUSIC_LIBRARY_DIR/.slskd-downloads` with
-`install -d -o UID -g GID -m 0775` using your numeric IDs. The library root has
+`install -d -o UID -g GID -m 2775` using your numeric IDs. The setgid bit is
+what keeps whatever lands there in the shared group. The library root has
 to be writable and searchable by that user or group.
 
 ## Migrating an installation that ran as root
 
-Stop both services first. Record existing numeric ownership and modes in a
-private rollback manifest before changing anything; where ACL tools are
-available, `getfacl -R -p` and `setfacl --restore=MANIFEST` capture and restore
-this metadata. Keep the manifest outside the repository — it contains your paths.
+Stop both services, then from the directory that holds `compose.yaml`:
 
-Then, with your own numeric IDs:
+    sudo ./scripts/migrate-permissions.sh
 
-1. `chown -R UID:GID bot-data slskd-config` — **including `bot-data/uploads` and
-   everything under it**. Those subdirectories were created by the root process
-   and are the one place where a missed `chown` is silent: `os.makedirs` on an
-   existing directory succeeds, and the upload watcher only fails later, when it
-   tries to write into `.incoming` or `.extracted`.
-2. `chown -R UID:GID` and `chmod -R g+w` on `$MUSIC_LIBRARY_DIR/.slskd-downloads`,
-   the staging area — partially downloaded files there were created by root and
-   have no group write, so the non-root slskd cannot finish them.
-3. In the library itself, preserve existing owners and give the chosen group
-   read/write on files and read/write/search on directories:
+It reads `.env`, takes the library group from the library directory itself,
+prints what it is about to change and asks first. `--yes` skips the question.
+Running it twice is harmless.
 
-       find $MUSIC_LIBRARY_DIR -not -path '*/lost+found*' -type f ! -perm -g+w -exec chmod g+w {} +
-       find $MUSIC_LIBRARY_DIR -not -path '*/lost+found*' -type d ! -perm -g+w -exec chmod g+w {} +
+It hands over three directories, and only these: `bot-data`, `slskd-config` and
+`$MUSIC_LIBRARY_DIR/.slskd-downloads`, each with everything under it.
+`bot-data/uploads` is where a missed `chown` stays silent — `os.makedirs` on an
+existing directory succeeds, and the upload watcher only fails later, writing
+into `.incoming` or `.extracted`.
 
-   Tagging edits the file in place, so a track without group write cannot be
-   retagged even though it can be read, and importing another disc into an
-   existing album does not go through directory creation — nothing will repair
-   such a mode later.
-4. Optional but worth doing: set the setgid bit on the library directories
-   (`find $MUSIC_LIBRARY_DIR -type d -not -name 'lost+found' -exec chmod g+s {} +`).
-   New files then inherit the directory's group whoever creates them, which keeps
-   the invariant even for a writer whose primary group is something else — a
-   Samba client, say. It is reversible with `chmod g-s`.
+It refuses to run when `MUSIC_LIBRARY_DIR` names a system directory or sits one
+level below the root, when the library group resolves to root, when the IDs are
+not numeric, or when one of the three targets is a symlink. The path is checked
+as written and again after symlinks are resolved, because `/bin` is `/usr/bin`
+on a merged-usr system and a check that saw only one spelling would let the
+other through.
 
-Leave unrelated directories such as `lost+found` alone.
+**It does not touch the library.** A recursive `chgrp` as root over a path taken
+from a config file has no safe failure mode, so the script prints the commands
+the library needs with your values already substituted, and you run them having
+read them. They look like this:
+
+    sudo find LIBRARY -xdev -name lost+found -prune -o ! -type l ! -group GID -exec chgrp GID -- {} +
+    sudo find LIBRARY -xdev -name lost+found -prune -o ! -type l ! -perm -g+w -exec chmod g+rwX -- {} +
+    sudo find LIBRARY -xdev -name lost+found -prune -o -type d ! -perm -g+s -exec chmod g+s -- {} +
+
+The group has to change, not just the mode. Group write on a track still owned
+by `root:root` buys nothing, and tagging edits the file in place, so a track
+without it cannot be retagged even though it can be read. Importing another disc
+into an existing album does not go through directory creation either, so nothing
+repairs such a mode later. The setgid bit on the third line is what keeps a new
+file in the library's group whoever writes it.
+
+Owners are kept, `lost+found` is skipped, and `-xdev` keeps a bind mount inside
+the library out of it.
+
+Want a rollback manifest first? Where ACL tools are available, `getfacl -R -p`
+records ownership and modes and `setfacl --restore=MANIFEST` puts them back.
+Keep it outside the repository, it contains your paths.
+
+Should the volumes still be wrong when the bot starts, it says so and exits
+instead of running with nothing it can write to.
 
 Record the running image and Compose configuration for rollback. Recreating a
 container preserves bind-mounted state, music and the download journal, but loses

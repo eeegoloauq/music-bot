@@ -212,3 +212,31 @@ assert stat.S_IMODE(Path(journal.JOURNAL_PATH).stat().st_mode) == 0o664
             capture_output=True, text=True,
         )
         assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_startup_refuses_a_volume_it_cannot_write(tmp_path, monkeypatch, caplog):
+    """An install that still has root-owned volumes must stop with an
+    instruction, not come up and drop every write in silence."""
+    import bot
+    import journal as journal_module
+
+    state = tmp_path / "data"
+    state.mkdir()
+    library = tmp_path / "music"
+    library.mkdir()
+    monkeypatch.setattr(journal_module, "JOURNAL_PATH", str(state / "pending.json"))
+    monkeypatch.setattr(bot, "MUSIC_DIR", str(library))
+
+    bot._require_writable_volumes()  # both writable: no complaint
+
+    real_open = open
+
+    def refuse_library(path, *args, **kwargs):
+        if str(path).startswith(str(library)):
+            raise PermissionError(13, "Permission denied")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", refuse_library)
+    with pytest.raises(SystemExit):
+        bot._require_writable_volumes()
+    assert "migrate-permissions.sh" in caplog.text
