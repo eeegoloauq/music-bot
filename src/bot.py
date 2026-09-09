@@ -1471,6 +1471,14 @@ def _build_app() -> Application:
 
 
 def main():
+    # The library is shared: the bot, slskd and Samba all write to it and
+    # Navidrome reads it. Group write has to be there the moment a file is
+    # created rather than patched in afterwards — a non-root process cannot
+    # chmod a path another writer owns, so any such chmod would only ever be
+    # papering over a mode that was already wrong. slskd gets the same value
+    # through SLSKD_UMASK in compose.
+    os.umask(0o002)
+
     if not NAVI_LOGIN or not NAVI_PASS:
         logger.warning(
             "NAVIDROME_USER/NAVIDROME_PASS not set — scan, inline audio, and share will not work"

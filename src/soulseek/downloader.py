@@ -13,6 +13,7 @@ Flow per album:
 
 import asyncio
 import contextlib
+import errno
 import logging
 import os
 import shutil
@@ -111,31 +112,43 @@ async def _download_cover(cover_uuid: str, album_dir: str) -> bytes | None:
                 cover_data = await resp.read()
                 with open(cover_path, "wb") as f:
                     f.write(cover_data)
-                os.chmod(cover_path, 0o666)
                 return cover_data
     except Exception:
         logger.warning("Failed to download cover art")
     return None
 
 
+def _relocate(src: str, dst: str) -> None:
+    """Move ``src`` to ``dst``, renaming when they share a filesystem.
+
+    A rename is a metadata op, not a multi-MB byte copy — slskd's staging dir
+    and the library both live under the /media/music mount, so that is the
+    normal path. Across devices (the upload intake under /data, say) the copy
+    is written through ``open`` rather than ``shutil.copy2``: copy2 would carry
+    over the mode of whoever produced the source — a Samba client's 0644 — and
+    the track would land in the shared library without group write. Creating
+    the file ourselves gives it this process's umask instead.
+    """
+    try:
+        os.rename(src, dst)
+        return
+    except OSError as exc:
+        if exc.errno != errno.EXDEV:
+            raise
+    with open(src, "rb") as fsrc, open(dst, "wb") as fdst:
+        shutil.copyfileobj(fsrc, fdst)
+    os.unlink(src)
+
+
 def _move_into_library(src: str, dest: str) -> None:
     """Move a downloaded file from slskd's staging dir into the library album
     dir. Lands on ``dest + .importing`` first so Navidrome's scanner never sees
     a partial file, then renames into place.
-
-    ``shutil.move`` renames when staging and library share a filesystem — they
-    do, both under the /media/music mount — so this is a metadata op, not a
-    multi-MB byte copy (the old code always copy2'd because src/dest dirs
-    differ). It falls back to copy+delete only across devices.
     """
     tmp = dest + ".importing"
     try:
-        shutil.move(src, tmp)
+        _relocate(src, tmp)
         os.replace(tmp, dest)
-        try:
-            os.chmod(dest, 0o666)
-        except OSError:
-            pass
     except BaseException:
         if os.path.exists(tmp):
             try:
