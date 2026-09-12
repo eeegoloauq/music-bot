@@ -82,6 +82,32 @@ async def get_album(album_id: str) -> dict:
     return await _get(f"/album/{album_id}")
 
 
+async def get_album_tracks(album_id: str, expected: int) -> list[dict]:
+    """Fetch the complete, ordered track list and verify its size."""
+    tracks = []
+    seen = set()
+    # The embedded list is capped at 25 and may omit a pagination link.
+    while True:
+        page = await _get(f"/album/{album_id}/tracks",
+                          params={"index": len(tracks), "limit": 100})
+        batch = page.get("data", [])
+        for track in batch:
+            if track["id"] in seen:
+                raise DeezerError(f"Duplicate track in album {album_id}")
+            seen.add(track["id"])
+        tracks.extend(batch)
+        if len(tracks) > expected or (page.get("next") and not batch):
+            raise DeezerError(f"Inconsistent track list for album {album_id}")
+        if not page.get("next"):
+            break
+    if len(tracks) != expected:
+        raise DeezerError(
+            f"Incomplete track list for album {album_id}: "
+            f"expected {expected}, received {len(tracks)}"
+        )
+    return tracks
+
+
 async def get_track(track_id: str) -> dict:
     """Full track metadata including ISRC, disk_number, track_position."""
     return await _get(f"/track/{track_id}")
