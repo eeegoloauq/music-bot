@@ -15,7 +15,7 @@ uv run --offline --frozen pytest -q
 Live metadata check (no audio download or Telegram messages):
 
 ```sh
-p env PYTHONPATH=src uv run --offline --frozen python - <<'PY'
+env PYTHONPATH=src uv run --offline --frozen python - <<'PY'
 import asyncio
 from metadata import api, client
 
