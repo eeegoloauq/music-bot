@@ -53,7 +53,8 @@ logger = logging.getLogger(__name__)
 # containers). Override via env if your compose deviates.
 SLSKD_DOWNLOAD_DIR = os.environ.get("SLSKD_DOWNLOAD_DIR", "/music/.slskd-downloads")
 
-# Per-track download timeout (seconds). Soulseek peers can be slow; give them a chance.
+# Total queue-plus-download cap for one peer attempt (seconds).  It is one
+# shared 15-minute window, not separate queue and transfer timeouts.
 DOWNLOAD_TIMEOUT_SECS = int(os.environ.get("SLSKD_DOWNLOAD_TIMEOUT", "900"))
 
 # How long after enqueue before we give up if a peer never starts the transfer.
@@ -221,11 +222,13 @@ async def _await_one_file(
     remote_filename: str,
     timeout_secs: int = DOWNLOAD_TIMEOUT_SECS,
     on_progress=None,
+    on_state=None,
 ) -> str:
     """Wait for slskd to finish a single file. Returns the final state string.
 
     ``on_progress`` (optional) is invoked as ``await cb(pct, speed_bps, eta_sec)``
-    whenever slskd reports a percent-complete change.
+    whenever slskd reports a visible progress change. ``on_state`` receives
+    ``(state, queue_position, queued_seconds)``.
     """
     async def _wrap(_fname: str, pct: float, _state: str,
                     speed_bps: int, bytes_done: int, size: int):
@@ -242,6 +245,8 @@ async def _await_one_file(
         target_filenames=[remote_filename],
         timeout_secs=timeout_secs,
         progress_cb=_wrap,
+        state_cb=(lambda _fname, state, position, elapsed:
+                  on_state(state, position, elapsed)) if on_state else None,
     )
     return states.get(remote_filename, "Unknown")
 
@@ -291,6 +296,7 @@ async def _download_chosen(
     cover_data: bytes | None,
     lyrics_task: asyncio.Task | None,
     on_progress=None,
+    on_state=None,
 ) -> tuple[str, int, str]:
     """Enqueue a single file, wait, move to library, tag.
 
@@ -305,6 +311,9 @@ async def _download_chosen(
 
     state = await _await_one_file(
         chosen.username, chosen.filename, on_progress=on_progress,
+        on_state=(lambda state, position, elapsed:
+                  on_state(state, position, elapsed, chosen.username))
+        if on_state else None,
     )
     if "succeeded" not in state.lower():
         with contextlib.suppress(Exception):
@@ -349,6 +358,7 @@ async def _try_candidates(
     cover_data: bytes | None,
     lyrics_task: asyncio.Task | None,
     on_progress=None,
+    on_state=None,
     max_attempts: int = 3,
     failed_keys: set[tuple[str, str]] | None = None,
 ) -> tuple[str, int, str, SearchResult] | None:
@@ -377,7 +387,7 @@ async def _try_candidates(
         try:
             filepath, size, fmt = await _download_chosen(
                 cand, track, album, album_dir, cover_data, lyrics_task,
-                on_progress=on_progress,
+                on_progress=on_progress, on_state=on_state,
             )
             return filepath, size, fmt, cand
         except PeerTransferError as e:
@@ -493,10 +503,15 @@ async def download_single_track(
         await emit(t="track_progress", i=1, pct=pct, speed_bps=speed_bps,
                    eta=eta_sec)
 
+    async def _on_track_state(state: str, position: int | None,
+                              queued_secs: float, peer: str):
+        await emit(t="track_state", i=1, state=state, peer=peer,
+                   queue_position=position, queued_secs=queued_secs)
+
     t0 = time.monotonic()
     res = await _try_candidates(
         candidates, track, album_ctx, album_dir, cover_data, lyrics_task,
-        on_progress=_on_track_progress,
+        on_progress=_on_track_progress, on_state=_on_track_state,
     )
     if not res:
         raise RuntimeError("All candidate peers failed.")
@@ -612,9 +627,9 @@ async def download_album(
 
     # Folder-vs-per-track policy (coverage thresholds, quality lock) lives in
     # selection.plan_folder_phase; this function just executes the plan.
-    # Stall-timeouts (peer accepts then never delivers) still cost
-    # SLSKD_DOWNLOAD_TIMEOUT per attempt before abandonment — known
-    # limitation, separate fix.
+    # Each peer attempt has one SLSKD_DOWNLOAD_TIMEOUT cap (15 minutes by
+    # default) shared by remote queueing and transfer; it is not two separate
+    # timeout windows. Slow-peer policy remains a separate concern.
     n_tracks = len(album["tracks"])
     plan = plan_folder_phase(folder_match, folder_alternatives, n_tracks)
     folder_chain: list[ScoredFolder] = plan.chain if plan else []
@@ -667,6 +682,11 @@ async def download_album(
             await emit(t="track_progress", i=progress_idx, pct=pct,
                        speed_bps=speed_bps, eta=eta_sec)
 
+        async def _on_track_state(state: str, position: int | None,
+                                  queued_secs: float, peer: str):
+            await emit(t="track_state", i=progress_idx, state=state, peer=peer,
+                       queue_position=position, queued_secs=queued_secs)
+
         # Immediate heartbeat — slskd may stall a few seconds before the first
         # transfer-progress event fires, so the user sees movement right away.
         await emit(t="track", i=progress_idx, state="start", title=track["title"])
@@ -677,6 +697,7 @@ async def download_album(
                 candidates, track, album, album_dir, cover_data,
                 lyrics_tasks.get(track["id"]),
                 on_progress=_on_track_progress,
+                on_state=_on_track_state,
                 max_attempts=max(len(candidates), 1),
                 failed_keys=failed_candidate_keys,
             )
@@ -705,11 +726,15 @@ async def download_album(
                        title=track["title"], fmt=fmt, peer=chosen.username)
             return chosen
         except PeerTransferError as e:
-            last_error[track["id"]] = str(e)
+            reason = str(e)
+            if reason in ("all matching peers already failed this album",
+                          "no peer returned a usable file"):
+                reason = last_error.get(track["id"], reason)
+            last_error[track["id"]] = reason
             logger.warning("  [%d/%d] track %s — failed: %s",
                            i, total, track["title"], e)
             await emit(t="track", i=progress_idx, state="fail",
-                       title=track["title"], reason=str(e))
+                       title=track["title"], reason=reason)
             return None
 
     def _consider_slow_switch(current_rank: int) -> int | None:

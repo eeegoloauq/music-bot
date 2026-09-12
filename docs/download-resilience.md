@@ -116,6 +116,12 @@ On startup, after `post_init`:
   duplicate rejection converges to an attach even when it races the first
   check. `wait_for_files` keys on (username, filename), so attached
   transfers report progress like fresh ones.
+- **Remote queue visibility.** A transfer queued at a peer reports its wait
+  time and, when the peer answers, its positive queue position in the existing
+  Telegram status message. Position lookup is best-effort and never affects
+  transfer monitoring or retry behavior. Each peer attempt currently has one
+  15-minute total cap shared by queueing and downloading, not separate timeout
+  allowances for those phases.
 - **Force is not resumed.** A resumed force re-run would re-stage the
   half-written fresh copy over the original's backup in
   `.redownload-backup`; a plain resume just fills what's missing.

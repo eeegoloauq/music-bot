@@ -613,17 +613,44 @@ async def get_active_download_state(username: str, filename: str) -> str | None:
     return None
 
 
+_QUEUE_POSITION_INTERVAL_SECS = 30.0
+_QUEUE_HEARTBEAT_SECS = 5.0
+
+
+async def _get_queue_position(username: str, transfer_id: str) -> int | None:
+    """Best-effort remote queue position; never part of transfer correctness.
+
+    The SDK client owns the bounded HTTP timeout.  Keep this coroutine alive
+    until that call actually returns so one slow lookup cannot be abandoned
+    and replaced by another while its worker thread is still occupied.
+    """
+    client = _get_client()
+    try:
+        value = await asyncio.to_thread(
+            client.transfers.get_queue_position,
+            username=username,
+            id=transfer_id,
+        )
+        position = int(value)
+        return position if position > 0 else None
+    except Exception:
+        return None
+
+
 async def wait_for_files(
     username: str,
     target_filenames: list[str],
     timeout_secs: int = 600,
     poll_interval: float = 2.0,
     progress_cb=None,
+    state_cb=None,
 ) -> dict[str, str]:
     """Poll slskd until each target filename reports completed or failed.
 
     ``progress_cb`` is called as ``await cb(filename, pct, state, speed_bps,
     bytes_transferred, size)`` whenever any of the visible fields change.
+    ``state_cb`` is called as ``await cb(filename, state, queue_position,
+    queued_seconds)`` on state changes and while remotely queued.
 
     Returns ``{filename: state}`` for every requested file. ``state`` is
     "Completed, Succeeded" on success or whatever slskd reports otherwise.
@@ -631,31 +658,100 @@ async def wait_for_files(
     pending = set(target_filenames)
     states: dict[str, str] = {}
     start = time.monotonic()
-    last_pct: dict[str, float] = {}
+    last_progress: dict[str, tuple] = {}
+    last_state: dict[str, str] = {}
+    last_state_notice: dict[str, float] = {}
+    queue_since: dict[str, float] = {}
+    queue_positions: dict[str, int | None] = {}
+    last_lookup: dict[str, float] = {}
+    position_tasks: dict[str, asyncio.Task] = {}
 
-    while pending and (time.monotonic() - start) < timeout_secs:
-        rows = await get_downloads(username)
-        for row in rows:
-            fname = row.get("filename", "")
-            if fname not in pending:
-                continue
-            state = row.get("state", "") or ""
-            pct = float(row.get("percentComplete", 0) or 0)
-            speed = int(row.get("averageSpeed", 0) or 0)
-            bytes_done = int(row.get("bytesTransferred", 0) or 0)
-            size = int(row.get("size", 0) or 0)
-            if progress_cb and pct != last_pct.get(fname, -1):
-                last_pct[fname] = pct
-                with contextlib.suppress(Exception):
-                    await progress_cb(fname, pct, state, speed, bytes_done, size)
-            if _state_is_complete(state) or _state_is_failed(state):
-                states[fname] = state
-                pending.discard(fname)
-        await asyncio.sleep(poll_interval)
+    try:
+        while pending and (time.monotonic() - start) < timeout_secs:
+            rows = await get_downloads(username)
+            for row in rows:
+                fname = row.get("filename", "")
+                if fname not in pending:
+                    continue
+                now = time.monotonic()
+                state = row.get("state", "") or ""
+                pct = float(row.get("percentComplete", 0) or 0)
+                speed = int(row.get("averageSpeed", 0) or 0)
+                bytes_done = int(row.get("bytesTransferred", 0) or 0)
+                size = int(row.get("size", 0) or 0)
+                visible = (pct, state, speed, bytes_done, size)
+                if progress_cb and visible != last_progress.get(fname):
+                    last_progress[fname] = visible
+                    with contextlib.suppress(Exception):
+                        await progress_cb(fname, pct, state, speed, bytes_done, size)
+
+                old_state = last_state.get(fname)
+                state_changed = state != old_state
+                if state_changed:
+                    logger.info("Transfer state changed for %s from %s: %s -> %s",
+                                fname, username, old_state or "unseen", state or "unknown")
+                    last_state[fname] = state
+
+                remotely_queued = "queued" in state.lower() and "remotely" in state.lower()
+                position_changed = False
+                task = position_tasks.get(fname)
+                if task is not None and task.done():
+                    position_tasks.pop(fname, None)
+                    position = task.result()
+                    if position != queue_positions.get(fname):
+                        queue_positions[fname] = position
+                        position_changed = True
+                        if position is not None:
+                            logger.info("Remote queue position for %s from %s: %d",
+                                        fname, username, position)
+
+                if remotely_queued:
+                    queue_since.setdefault(fname, now)
+                    transfer_id = row.get("id")
+                    if (transfer_id and fname not in position_tasks and
+                            now - last_lookup.get(fname, float("-inf")) >=
+                            _QUEUE_POSITION_INTERVAL_SECS):
+                        last_lookup[fname] = now
+                        position_tasks[fname] = asyncio.create_task(
+                            _get_queue_position(username, transfer_id))
+                    heartbeat = now - last_state_notice.get(fname, float("-inf")) >= \
+                        _QUEUE_HEARTBEAT_SECS
+                    if state_cb and (state_changed or position_changed or heartbeat):
+                        last_state_notice[fname] = now
+                        with contextlib.suppress(Exception):
+                            await state_cb(fname, state, queue_positions.get(fname),
+                                           now - queue_since[fname])
+                else:
+                    queue_since.pop(fname, None)
+                    queue_positions.pop(fname, None)
+                    if state_cb and state_changed:
+                        last_state_notice[fname] = now
+                        with contextlib.suppress(Exception):
+                            await state_cb(fname, state, None, 0.0)
+
+                if _state_is_complete(state) or _state_is_failed(state):
+                    states[fname] = state
+                    pending.discard(fname)
+            await asyncio.sleep(poll_interval)
+    finally:
+        # A queue-position request may still be inside the SDK's bounded HTTP
+        # call.  Do not cancel/replace it: let the task retain the worker until
+        # the real request finishes, consuming its result best-effort.
+        for task in position_tasks.values():
+            if task.done():
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    task.result()
+            else:
+                task.add_done_callback(
+                    lambda done: done.exception() if not done.cancelled() else None)
 
     # Anything still pending at timeout is reported as TimedOut.
     for fname in pending:
-        states[fname] = "TimedOut, ClientSide"
+        state = last_state.get(fname, "")
+        if "queued" in state.lower() and "remotely" in state.lower():
+            states[fname] = "TimedOut, ClientSide, QueuedRemotely"
+        else:
+            states[fname] = "TimedOut, ClientSide, Transfer"
     return states
 
 

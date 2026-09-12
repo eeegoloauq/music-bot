@@ -95,6 +95,35 @@ async def test_refused_enqueue_with_no_transfer_raises(monkeypatch):
         await downloader._ensure_enqueued(CHOSEN)
 
 
+async def test_transfer_state_reports_actual_retry_peer(monkeypatch):
+    async def fake_enqueued(_chosen):
+        return None
+
+    async def fake_wait(_username, _filename, **kwargs):
+        await kwargs["on_state"]("Queued, Remotely", 4, 12.0)
+        return "Completed, Errored"
+
+    async def fake_cancel(_username, _filename):
+        return None
+
+    monkeypatch.setattr(downloader, "_ensure_enqueued", fake_enqueued)
+    monkeypatch.setattr(downloader, "_await_one_file", fake_wait)
+    monkeypatch.setattr(downloader.slskd, "cancel_download", fake_cancel)
+    monkeypatch.setattr(downloader, "_remove_staging_traces", lambda *_args: None)
+    updates = []
+
+    async def on_state(*args):
+        updates.append(args)
+
+    with pytest.raises(PeerTransferError, match="Completed, Errored"):
+        await downloader._download_chosen(
+            make_result("retry-peer", "d\\01.flac"), {"title": "t"}, {},
+            "/tmp", None, None, on_state=on_state,
+        )
+
+    assert updates == [("Queued, Remotely", 4, 12.0, "retry-peer")]
+
+
 async def test_get_active_download_state_ignores_terminal_rows(monkeypatch):
     rows = [
         {"username": "peer", "directories": [{"files": [
