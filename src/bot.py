@@ -994,6 +994,14 @@ async def _handle_upload(io: ChatIO, report: uploads.IntakeReport) -> None:
             "kept in uploads staging; nothing was filed.", final=True)
         return
 
+    if _download_semaphore.locked():
+        logger.info("Upload release identified for %s; import queued until the "
+                    "current download finishes", report.name)
+        await safe_edit(
+            status_msg,
+            f"📦 {report.name}: release identified. Import queued until the "
+            "current download finishes…")
+
     async with _download_semaphore:
         try:
             album = await metadata.fetch_album(album_id)

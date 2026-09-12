@@ -19,6 +19,7 @@ Event vocabulary (producers: soulseek.downloader / soulseek.matcher):
   match           {peer, quality, score, copies}   — single-track pick
   track           {i, state: start|done|fail, title, reason?, fmt?, peer?}
   track_progress  {i, pct, speed_bps, eta}
+  track_state     {i, state, peer, queue_position, queued_secs}
 
 Unknown events are ignored, so producers can grow without breaking the UI.
 """
@@ -62,6 +63,11 @@ def fmt_speed(speed_bps: float) -> str:
     return f"{max(speed_bps, 0) / 1024:.0f} KB/s"
 
 
+def _is_remotely_queued(state: str | None) -> bool:
+    value = (state or "").lower()
+    return "queued" in value and "remotely" in value
+
+
 # --- failure reasons ---------------------------------------------------------
 
 # Raw PeerTransferError strings carry slskd state names ("transfer ended in
@@ -69,6 +75,8 @@ def fmt_speed(speed_bps: float) -> str:
 # Reasons minted by the downloader itself ("nothing found on Soulseek",
 # "only lossy copies found (mp3 320 kbps)") pass through unchanged.
 _FAILURE_MAP = (
+    ("queuedremotely", "waiting in the peer queue expired"),
+    ("clientside, transfer", "transfer timed out"),
     ("timedout", "peer accepted but never sent the file"),
     ("rejected", "peer rejected the transfer"),
     ("cancelled", "transfer was cancelled"),
@@ -121,7 +129,9 @@ class AlbumProgress:
                 i = item["i"]
                 self.order.append(i)
                 self.tracks[i] = {"title": item["title"], "state": "pending",
-                                  "pct": 0.0, "speed": 0, "reason": None}
+                                  "pct": 0.0, "speed": 0, "reason": None,
+                                  "transfer_state": None, "peer": None,
+                                  "queue_position": None, "queued_secs": 0}
             return True
         if t == "search":
             self.wait_until = None
@@ -156,7 +166,8 @@ class AlbumProgress:
                 return True
             state = ev.get("state")
             if state == "start":
-                rec.update(state="active", pct=0.0, speed=0, reason=None)
+                rec.update(state="active", pct=0.0, speed=0, reason=None,
+                           transfer_state=None, queue_position=None, queued_secs=0)
             elif state == "done":
                 rec.update(state="done", reason=None)
             elif state == "fail":
@@ -168,6 +179,17 @@ class AlbumProgress:
                 rec["pct"] = ev.get("pct", 0) or 0
                 rec["speed"] = ev.get("speed_bps", 0) or 0
             return False
+        if t == "track_state":
+            rec = self.tracks.get(ev.get("i"))
+            if rec is not None and rec["state"] == "active":
+                rec["transfer_state"] = ev.get("state")
+                rec["peer"] = ev.get("peer")
+                rec["queue_position"] = ev.get("queue_position")
+                rec["queued_secs"] = ev.get("queued_secs", 0) or 0
+                if not _is_remotely_queued(rec["transfer_state"]):
+                    rec["queue_position"] = None
+                    rec["queued_secs"] = 0
+            return True
         return False
 
     # -- render helpers --
@@ -218,9 +240,17 @@ class AlbumProgress:
         if state == "done":
             return f"✅ {title}"
         if state == "active":
+            if _is_remotely_queued(rec["transfer_state"]):
+                position = rec["queue_position"]
+                place = f"queue #{position}" if position else "position unavailable"
+                peer = f" · {esc(rec['peer'])}" if rec["peer"] else ""
+                return (f"⏳ {title}{peer} · waiting for peer · {place} · "
+                        f"{fmt_duration(rec['queued_secs'])}")
             extra = ""
+            if rec["peer"]:
+                extra += f" · {esc(rec['peer'])}"
             if rec["speed"]:
-                extra = f" · {rec['pct']:.0f}% · {fmt_speed(rec['speed'])}"
+                extra += f" · {rec['pct']:.0f}% · {fmt_speed(rec['speed'])}"
             return f"⬇️ {title}{extra}"
         if state == "fail":
             reason = humanize_failure(rec["reason"] or "")
@@ -287,6 +317,9 @@ class TrackProgress:
         self.speed = 0
         self.peer: str | None = None
         self.fmt: str | None = None
+        self.transfer_state: str | None = None
+        self.queue_position: int | None = None
+        self.queued_secs = 0.0
         self.started = time.monotonic()
 
     def handle(self, ev: dict) -> bool:
@@ -317,11 +350,23 @@ class TrackProgress:
                 self.fmt = ev.get("fmt")
             elif ev.get("state") == "start":
                 self.pct, self.speed = 0.0, 0
+                self.transfer_state = None
+                self.queue_position = None
+                self.queued_secs = 0.0
             return True
         if t == "track_progress":
             self.pct = ev.get("pct", 0) or 0
             self.speed = ev.get("speed_bps", 0) or 0
             return False
+        if t == "track_state":
+            self.transfer_state = ev.get("state")
+            self.peer = ev.get("peer") or self.peer
+            self.queue_position = ev.get("queue_position")
+            self.queued_secs = ev.get("queued_secs", 0) or 0
+            if not _is_remotely_queued(self.transfer_state):
+                self.queue_position = None
+                self.queued_secs = 0.0
+            return True
         return False
 
     def render(self) -> str:
@@ -340,12 +385,17 @@ class TrackProgress:
 
         m = self.match
         out = [header]
-        line = f"peer {esc(m.get('peer', '?'))} · {esc(m.get('quality', ''))}"
+        line = f"peer {esc(self.peer or m.get('peer', '?'))} · {esc(m.get('quality', ''))}"
         if m.get("score") is not None:
             line += f" · match {m['score']:.0f}"
         if (m.get("copies") or 0) > 1:
             line += f" · {m['copies']} copies"
         out.append(line)
+        if _is_remotely_queued(self.transfer_state):
+            place = (f"queue #{self.queue_position}" if self.queue_position
+                     else "position unavailable")
+            out.append(f"⏳ Waiting for peer · {place} · {fmt_duration(self.queued_secs)}")
+            return "\n".join(out)[:MESSAGE_LIMIT]
         extra = f" · {fmt_speed(self.speed)}" if self.speed else ""
         out.append(f"{self.pct:.0f}%{extra}")
         return "\n".join(out)[:MESSAGE_LIMIT]

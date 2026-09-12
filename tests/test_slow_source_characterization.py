@@ -9,6 +9,7 @@ outcome table and a fake clock, so per-track transfer speed is fully
 controlled without sleeping.
 """
 
+import asyncio
 import types
 
 import pytest
@@ -70,7 +71,7 @@ class Harness:
 
         async def fake_download_chosen(chosen, track, album, album_dir,
                                        cover_data, lyrics_task,
-                                       on_progress=None):
+                                       on_progress=None, on_state=None):
             self.attempts.append((chosen.username, track["title"]))
             outcome = self.script[(chosen.username, track["title"])]
             if outcome == "fail":
@@ -377,3 +378,60 @@ async def test_network_error_on_cosmetic_edit_no_longer_aborts_upload(
 
     assert len(imported) == 1        # filing work ran despite the dead chat
     assert msg.edit_calls >= 2       # the edits were attempted (and retried)
+
+
+async def test_identified_upload_reports_queue_before_waiting(
+        monkeypatch, tmp_path, caplog):
+    edits = []
+    imported = []
+
+    class RecordingMessage:
+        message_id = 8
+
+        async def edit_text(self, text, **_kwargs):
+            edits.append(text)
+            return True
+
+    async def fake_identify(_staging_dir, _name):
+        return "42"
+
+    async def fake_fetch(_album_id):
+        return {"artist": "Artist", "title": "Album", "tracks": []}
+
+    async def fake_import(album, _staging_dir, _music_dir):
+        imported.append(album)
+        return {"album_dir": str(tmp_path), "downloaded": 0, "skipped": 1,
+                "failed": [], "total": 1, "format": "FLAC", "with_lyrics": 0}
+
+    async def no_op(*_args, **_kwargs):
+        return None
+
+    semaphore = asyncio.Semaphore(1)
+    await semaphore.acquire()
+    monkeypatch.setattr(bot, "_download_semaphore", semaphore)
+    monkeypatch.setattr(bot.upload_import, "identify_album", fake_identify)
+    monkeypatch.setattr(bot.upload_import, "import_staged_album", fake_import)
+    monkeypatch.setattr(bot.metadata, "fetch_album", fake_fetch)
+    monkeypatch.setattr(bot.metadata, "enrich_genres", no_op)
+    monkeypatch.setattr(bot, "_trigger_scan", no_op)
+    monkeypatch.setattr(bot, "_try_share_album", no_op)
+    caplog.set_level("INFO", logger="bot")
+
+    report = uploads.IntakeReport(name="drop.zip", staging_dir=str(tmp_path),
+                                  audio=["01 - Track 1.flac"])
+    task = asyncio.create_task(bot._handle_upload(
+        FakeUploadIO(RecordingMessage()), report))
+    await asyncio.sleep(0)
+
+    assert edits == [
+        "📦 drop.zip: release identified. Import queued until the current "
+        "download finishes…"
+    ]
+    assert imported == []
+    assert not task.done()
+    assert "release identified" in caplog.text
+    assert "import queued" in caplog.text
+
+    semaphore.release()
+    await task
+    assert len(imported) == 1

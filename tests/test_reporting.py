@@ -26,6 +26,12 @@ def test_humanize_maps_slskd_states():
     assert reporting.humanize_failure(
         "slskd refused enqueue from someuser"
     ) == "peer refused the download request"
+    assert reporting.humanize_failure(
+        "transfer ended in state 'TimedOut, ClientSide, QueuedRemotely'"
+    ) == "waiting in the peer queue expired"
+    assert reporting.humanize_failure(
+        "transfer ended in state 'TimedOut, ClientSide, Transfer'"
+    ) == "transfer timed out"
 
 
 def test_humanize_passes_through_minted_reasons():
@@ -107,6 +113,24 @@ def test_album_progress_search_then_download_phases():
     assert "1/3 saved" in text and "1 failed" in text
 
 
+def test_album_progress_renders_queue_then_clears_it():
+    prog = AlbumProgress("Artist", "Album", 1)
+    _plan(prog, ["Song"])
+    prog.handle({"t": "track", "i": 1, "state": "start", "title": "Song"})
+    prog.handle({"t": "track_state", "i": 1, "state": "Queued, Remotely",
+                 "peer": "retry-peer", "queue_position": 12, "queued_secs": 67})
+    text = prog.render()
+    assert "⏳ Song · retry-peer" in text
+    assert "waiting for peer · queue #12 · 1m 07s" in text
+
+    prog.handle({"t": "track_state", "i": 1, "state": "InProgress",
+                 "peer": "retry-peer", "queue_position": None, "queued_secs": 0})
+    prog.handle({"t": "track_progress", "i": 1, "pct": 4, "speed_bps": 1024})
+    text = prog.render()
+    assert "⏳" not in text
+    assert "⬇️ Song · retry-peer · 4% · 1 KB/s" in text
+
+
 def test_album_progress_escapes_html():
     prog = AlbumProgress("<b>Artist</b>", "Al&bum", 1)
     _plan(prog, ["<script>"])
@@ -147,6 +171,24 @@ def test_track_progress_match_and_speed():
 
     prog.handle({"t": "track", "i": 1, "state": "done", "fmt": "FLAC", "peer": "gooduser"})
     assert prog.peer == "gooduser"
+
+
+def test_track_progress_renders_unknown_queue_position_and_retry_peer():
+    prog = TrackProgress("Artist", "Song")
+    prog.handle({"t": "match", "peer": "first-peer", "quality": "FLAC",
+                 "score": 50, "copies": 2})
+    prog.handle({"t": "track", "i": 1, "state": "start", "title": "Song"})
+    prog.handle({"t": "track_state", "i": 1, "state": "Queued, Remotely",
+                 "peer": "retry-peer", "queue_position": None, "queued_secs": 9})
+    text = prog.render()
+    assert "peer retry-peer" in text
+    assert "⏳ Waiting for peer · position unavailable · 9s" in text
+
+    prog.handle({"t": "track_state", "i": 1, "state": "InProgress",
+                 "peer": "retry-peer", "queued_secs": 0})
+    prog.handle({"t": "track_progress", "i": 1, "pct": 3, "speed_bps": 2048})
+    text = prog.render()
+    assert "Waiting for peer" not in text and "3% · 2 KB/s" in text
 
 
 # --- final summaries --------------------------------------------------------------
