@@ -112,11 +112,10 @@ async def fetch_album(album_id: str) -> dict:
     independently when Deezer doesn't have the album).
     """
     data = await deezer.get_album(album_id)
-    summary_tracks = data.get("tracks", {}).get("data", [])
+    summary_tracks = await deezer.get_album_tracks(album_id, data["nb_tracks"])
+    data["tracks"] = {"data": summary_tracks}
     if summary_tracks:
         # Enrich tracks with ISRC / disk_number / bpm via per-track endpoint.
-        # Deezer's 50 req/5sec rate limit (enforced in metadata.deezer) fits
-        # albums up to ~25 tracks in one burst.
         async def _maybe_track(tid: str):
             try:
                 return await deezer.get_track(tid)
