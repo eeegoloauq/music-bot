@@ -252,6 +252,14 @@ On download the bot replaces whatever tags the peer's file came with, so your li
 consistent. `/retag` is gentler: it only changes fields that are actually wrong and leaves everything
 else — including your cover art — untouched.
 
+Versions before 3.0.2 wrote titles like `Song (Remix) ((Remix))`. To repair an existing library,
+from the directory that holds `compose.yaml`:
+
+    docker compose run --rm --no-deps -v "$PWD/scripts:/scripts:ro" \
+        music-bot python /scripts/fix-doubled-title-version.py --apply
+
+Without `--apply` it only lists what it would change.
+
 ## Contributing
 
 Issues and PRs are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for the dev setup and
