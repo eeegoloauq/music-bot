@@ -47,7 +47,6 @@ def _adapt_album(data: dict, full_tracks: list[dict | None] | None = None) -> di
             "copyright": "",
             "explicit": bool(sum_t.get("explicit_lyrics", False) or ft.get("explicit_lyrics", False)),
             "bpm": ft.get("bpm") or None,
-            "version": ft.get("title_version") or sum_t.get("title_version") or None,
             "track_gain": float(gain) if isinstance(gain, (int, float)) else None,
         })
 
@@ -178,7 +177,6 @@ async def fetch_single_track(track_id: str) -> tuple[dict, dict]:
         "copyright": "",
         "explicit": bool(track_data.get("explicit_lyrics", False)),
         "bpm": track_data.get("bpm") or None,
-        "version": track_data.get("title_version") or None,
     }
     return track_info, album_ctx
 

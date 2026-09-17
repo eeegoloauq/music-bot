@@ -39,11 +39,8 @@ def _format_artist(track: dict, album: dict) -> str:
 
 
 def _format_title(track: dict) -> str:
-    """Build display title with version suffix."""
-    title_str = track["title"]
-    if track.get("version"):
-        title_str += f" ({track['version']})"
-    return title_str
+    """Deezer's ``title`` already carries the version suffix ("Pilé (Gospel)")."""
+    return track["title"]
 
 
 def _write_tags(filepath: str, track: dict, album: dict,
