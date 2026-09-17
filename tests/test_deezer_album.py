@@ -2,6 +2,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from library import tagger
 from metadata import api, deezer
 
 
@@ -64,3 +65,18 @@ async def test_cover_does_not_request_tracks(monkeypatch):
     monkeypatch.setattr(deezer, "_get", get)
     assert await api.fetch_cover_url("42") == "https://example.com/cover.jpg"
     get.assert_awaited_once_with("/album/42")
+
+
+async def test_title_version_is_not_appended_twice(monkeypatch):
+    # Deezer "title" already ends with "title_version" ("Pilé (Gospel)" / "(Gospel)").
+    t = {"id": 1, "title": "Pilé (Gospel)", "title_short": "Pilé", "title_version": "(Gospel)"}
+
+    async def get(path, params=None):
+        if path == "/album/42":
+            return {"id": 42, "nb_tracks": 1, "tracks": {"data": [t]}}
+        return {"data": [t], "total": 1, "next": None}
+
+    monkeypatch.setattr(deezer, "_get", get)
+    monkeypatch.setattr(deezer, "get_track", AsyncMock(return_value=t))
+    album = await api.fetch_album("42")
+    assert tagger._format_title(album["tracks"][0]) == "Pilé (Gospel)"
