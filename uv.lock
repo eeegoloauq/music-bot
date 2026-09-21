@@ -486,7 +486,7 @@ wheels = [
 
 [[package]]
 name = "music-bot"
-version = "3.0.2"
+version = "0.0.0"
 source = { virtual = "." }
 dependencies = [
     { name = "aiohttp" },
