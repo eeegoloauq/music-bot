@@ -204,3 +204,33 @@ def test_lossy_artists_tag_structure(tmp_path, suffix):
         tagger._write_m4a_tags(str(path), track, album, None, None, force=True)
         values = MP4(path)["----:com.apple.iTunes:ARTISTS"]
         assert [bytes(value).decode() for value in values] == ["A", "B", "X"]
+
+
+def test_album_level_contributors_are_not_track_guests():
+    """Deezer's "I Hate Rap": a producer credited Main on the album and on
+    every track is not a per-track co-artist — the site's own listing shows
+    only the extra names (RXKNephew, Miss Bashful), and so do we."""
+    tracks = [
+        {"id": 1, "contributors": [
+            {"name": "CHRIST DILLINGER", "role": "Main"},
+            {"name": "Rosaliedu38", "role": "Main"},
+            {"name": "RxkNephew", "role": "Featured"}]},
+        {"id": 2, "contributors": [
+            {"name": "CHRIST DILLINGER", "role": "Main"},
+            {"name": "Rosaliedu38", "role": "Main"},
+            {"name": "Miss Bashful", "role": "Main"}]},
+    ]
+    album = api._adapt_album(
+        {"id": 9, "artist": {"name": "CHRIST DILLINGER"},
+         "contributors": [{"name": "CHRIST DILLINGER", "role": "Main"},
+                          {"name": "Rosaliedu38", "role": "Main"}],
+         "tracks": {"data": [{"id": 1, "title": "Never Trust You Again",
+                              "artist": {"name": "CHRIST DILLINGER"}},
+                             {"id": 2, "title": "I Do What I Want",
+                              "artist": {"name": "CHRIST DILLINGER"}}]}},
+        tracks,
+    )
+    assert album["contributors"] == ["CHRIST DILLINGER", "Rosaliedu38"]
+    t1, t2 = album["tracks"]
+    assert (t1["coArtists"], t1["featuredArtists"]) == ([], ["RxkNephew"])
+    assert (t2["coArtists"], t2["featuredArtists"]) == (["Miss Bashful"], [])

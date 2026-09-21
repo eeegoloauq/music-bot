@@ -19,13 +19,27 @@ logger = logging.getLogger(__name__)
 
 # --- shape adapters --------------------------------------------------------
 
-def _adapt_contributors(data: dict, primary_artist: str) -> tuple[list[dict], list[str], list[str]]:
-    """Return contributors plus display-ready Main and Featured name lists."""
+def _album_contributor_names(data: dict) -> list[str]:
+    """Names credited on the album itself (``/album`` ``contributors``)."""
+    return [str(c.get("name") or "").strip()
+            for c in data.get("contributors") or [] if c.get("name")]
+
+
+def _adapt_contributors(data: dict, primary_artist: str,
+                        album_names: list[str] = ()) -> tuple[list[dict], list[str], list[str]]:
+    """Return contributors plus display-ready Main and Featured name lists.
+
+    ``album_names`` are excluded from both lists: Deezer's own track listing
+    shows as "featured artists" exactly the track contributors who are not
+    credited on the album — an album-level co-artist (a producer credited
+    "Main" on every track) is not a per-track guest.
+    """
     artists: list[dict] = []
     co_artists: list[str] = []
     featured_artists: list[str] = []
     seen: set[str] = set()
     primary_key = primary_artist.casefold()
+    album_keys = {primary_key} | {n.casefold() for n in album_names}
 
     for contributor in data.get("contributors") or []:
         name = str(contributor.get("name") or "").strip()
@@ -35,9 +49,11 @@ def _adapt_contributors(data: dict, primary_artist: str) -> tuple[list[dict], li
             continue
         seen.add(key)
         artists.append({"name": name, "role": role})
-        if role.casefold() == "main" and key != primary_key:
+        if key in album_keys:
+            continue
+        if role.casefold() == "main":
             co_artists.append(name)
-        elif role.casefold() == "featured" and key != primary_key:
+        elif role.casefold() == "featured":
             featured_artists.append(name)
 
     return artists, co_artists, featured_artists
@@ -55,7 +71,8 @@ def _adapt_album(data: dict, full_tracks: list[dict | None] | None = None) -> di
         max_disk = max(max_disk, disk)
         track_artist = (sum_t.get("artist") or {}).get("name") or \
                        (data.get("artist") or {}).get("name", "Unknown Artist")
-        artists, co_artists, featured_artists = _adapt_contributors(ft, track_artist)
+        artists, co_artists, featured_artists = _adapt_contributors(
+            ft, track_artist, _album_contributor_names(data))
         # Deezer's `gain` is ReplayGain track gain in dB (already referenced
         # against their loudness target). None when Deezer hasn't measured it.
         gain = ft.get("gain")
@@ -92,6 +109,7 @@ def _adapt_album(data: dict, full_tracks: list[dict | None] | None = None) -> di
         "copyright": data.get("label", ""),
         "label": data.get("label", ""),
         "upc": data.get("upc", ""),
+        "contributors": _album_contributor_names(data),
         "numberOfVolumes": max_disk,
         "numberOfTracks": data.get("nb_tracks") or len(tracks),
         "type": (data.get("record_type") or "album").upper(),
@@ -191,7 +209,8 @@ async def fetch_single_track(track_id: str) -> tuple[dict, dict]:
 
     artist_name = (track_data.get("artist") or {}).get("name") or \
                   album_ctx.get("artist", "Unknown Artist")
-    artists, co_artists, featured_artists = _adapt_contributors(track_data, artist_name)
+    artists, co_artists, featured_artists = _adapt_contributors(
+        track_data, artist_name, album_ctx.get("contributors") or [])
     track_info = {
         "id": str(track_data.get("id", track_id)),
         "title": track_data.get("title", "Unknown"),
