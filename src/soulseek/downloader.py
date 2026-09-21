@@ -71,6 +71,26 @@ class PeerTransferError(Exception):
 
 # --- helpers ---------------------------------------------------------------
 
+async def run_to_completion(coro):
+    """Await ``coro`` in its own task, so a ``Task.cancel()`` aimed at the
+    caller lets it finish before the CancelledError continues.
+
+    For steps that must not be left half-done when the user taps ✖ Cancel
+    (docs/cancel.md): an enqueue whose HTTP request is already on the wire —
+    abandoning the await would leave slskd downloading a file nobody will
+    collect — or a move + tag write running in a worker thread. The thread
+    would run to the end anyway; waiting for it keeps the caller's
+    bookkeeping (saved counts, the cleanup that follows) in step with disk.
+    """
+    fut = asyncio.ensure_future(coro)
+    try:
+        return await asyncio.shield(fut)
+    except asyncio.CancelledError:
+        with contextlib.suppress(BaseException):
+            await asyncio.shield(fut)
+        raise
+
+
 def _make_emit(on_event):
     """Wrap the optional async event callback (see reporting.py for the
     vocabulary) so a UI hiccup can never break a download."""
@@ -307,14 +327,28 @@ async def _download_chosen(
     ``PeerTransferError`` for per-peer issues (caller retries another peer);
     other exceptions (OSError on move, mutagen on tag) propagate as-is.
     """
-    await _ensure_enqueued(chosen)
+    try:
+        await run_to_completion(_ensure_enqueued(chosen))
 
-    state = await _await_one_file(
-        chosen.username, chosen.filename, on_progress=on_progress,
-        on_state=(lambda state, position, elapsed:
-                  on_state(state, position, elapsed, chosen.username))
-        if on_state else None,
-    )
+        state = await _await_one_file(
+            chosen.username, chosen.filename, on_progress=on_progress,
+            on_state=(lambda state, position, elapsed:
+                      on_state(state, position, elapsed, chosen.username))
+            if on_state else None,
+        )
+    except asyncio.CancelledError:
+        # User cancel (docs/cancel.md): the transfer is ours to stop — slskd
+        # would otherwise keep pulling the file — and its partial bytes are
+        # staging garbage. Never swallow the cancellation itself.
+        try:
+            await slskd.cancel_download(chosen.username, chosen.filename, remove=True)
+        except Exception as e:
+            logger.warning("Cancel: slskd kept %s from %s (%s) — it may finish "
+                           "into staging on its own", chosen.filename, chosen.username, e)
+        _remove_staging_traces(chosen.username, chosen.filename)
+        if lyrics_task is not None:
+            lyrics_task.cancel()
+        raise
     if "succeeded" not in state.lower():
         with contextlib.suppress(Exception):
             await slskd.cancel_download(chosen.username, chosen.filename)
@@ -333,18 +367,22 @@ async def _download_chosen(
     ext = chosen.extension if chosen.extension in ("flac", "m4a", "mp3") else "flac"
     dest_path = os.path.join(album_dir, f"{prefix} {track_title}.{ext}")
 
-    src_dir = os.path.dirname(src_path)
-    _move_into_library(src_path, dest_path)
-    _prune_empty_parents(src_dir, SLSKD_DOWNLOAD_DIR)
-    size = os.path.getsize(dest_path)
-
     lyrics = None
     if lyrics_task is not None:
         try:
             lyrics = await lyrics_task
+        except asyncio.CancelledError:
+            _remove_staging_traces(chosen.username, chosen.filename)
+            raise
         except Exception:
             lyrics = None
 
+    # No await from here to the tag write: a cancel can only land at an
+    # await, so the library never holds a moved-but-untagged file.
+    src_dir = os.path.dirname(src_path)
+    _move_into_library(src_path, dest_path)
+    _prune_empty_parents(src_dir, SLSKD_DOWNLOAD_DIR)
+    size = os.path.getsize(dest_path)
     _write_tags_force(dest_path, track, album, cover_data, lyrics, ext)
     fmt = _format_label_from_result(chosen)
     return dest_path, size, fmt
@@ -890,6 +928,8 @@ async def download_album(
                 quality_lock = (used.bit_depth, used.sample_rate)
 
     # Cancel orphaned lyrics tasks for tracks we never managed to download.
+    # (A user cancel skips this; the orphans are short HTTP fetches that
+    # finish on their own — docs/cancel.md.)
     for tid in remaining_track_ids:
         with contextlib.suppress(Exception):
             if not lyrics_tasks[tid].done():

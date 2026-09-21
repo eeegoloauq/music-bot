@@ -319,11 +319,13 @@ class RaisingMessage:
 
 
 class FakeUploadIO:
+    chat_id = 1
+
     def __init__(self, msg):
         self._msg = msg
         self.sent: list[str] = []
 
-    async def reply_text(self, text):
+    async def reply_text(self, text, reply_markup=None):
         self.sent.append(text)
         return self._msg
 
@@ -350,7 +352,7 @@ async def test_network_error_on_cosmetic_edit_no_longer_aborts_upload(
     async def fake_enrich(album):
         return None
 
-    async def fake_import(album, staging_dir, music_dir):
+    async def fake_import(album, staging_dir, music_dir, progress=None):
         imported.append(album)
         return {"album_dir": str(tmp_path), "downloaded": 1, "skipped": 0,
                 "failed": [], "total": 1, "format": "FLAC", "with_lyrics": 0}
@@ -398,7 +400,7 @@ async def test_identified_upload_reports_queue_before_waiting(
     async def fake_fetch(_album_id):
         return {"artist": "Artist", "title": "Album", "tracks": []}
 
-    async def fake_import(album, _staging_dir, _music_dir):
+    async def fake_import(album, _staging_dir, _music_dir, progress=None):
         imported.append(album)
         return {"album_dir": str(tmp_path), "downloaded": 0, "skipped": 1,
                 "failed": [], "total": 1, "format": "FLAC", "with_lyrics": 0}

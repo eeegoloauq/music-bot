@@ -22,7 +22,7 @@ class FakeBot:
         self.edited = []    # (chat_id, message_id, text)
         self._next_id = 100
 
-    async def send_message(self, chat_id, text):
+    async def send_message(self, chat_id, text, reply_markup=None):
         self._next_id += 1
         self.sent.append((chat_id, text))
         return types.SimpleNamespace(message_id=self._next_id, chat_id=chat_id,
@@ -31,7 +31,7 @@ class FakeBot:
     async def send_photo(self, chat_id, photo, caption):
         raise AssertionError("not used in these tests")
 
-    async def edit_message_text(self, text, chat_id, message_id):
+    async def edit_message_text(self, text, chat_id, message_id, reply_markup=None):
         self.edited.append((chat_id, message_id, text))
 
     async def _noop(self, *args, **kwargs):
@@ -85,7 +85,7 @@ def _app():
 async def test_resume_bumps_edits_and_reruns(monkeypatch):
     calls = []
 
-    async def fake_run_album(io, id, force=False, resume_entry=None):
+    async def fake_run_album(io, id, force=False, resume_entry=None, run=None):
         calls.append((id, force, resume_entry.resume_attempts))
         journal.remove("album", id, io.chat_id)  # flow reported its outcome
         return True
@@ -121,7 +121,7 @@ async def test_resume_gives_up_at_attempt_cap(monkeypatch):
 async def test_resume_oldest_first_and_survives_failures(monkeypatch):
     order = []
 
-    async def fake_run_album(io, id, force=False, resume_entry=None):
+    async def fake_run_album(io, id, force=False, resume_entry=None, run=None):
         order.append(id)
         if id == "old":
             raise RuntimeError("still broken")
