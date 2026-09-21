@@ -631,7 +631,7 @@ def _append_genres_sync(filepath: str, new_genres: list[str]) -> bool:
             if not added:
                 return False
             audio["genre"] = current + added
-            audio.save(padding=lambda info: max(info.padding, 4096))
+            audio.save()
             return True
         if ext == ".m4a":
             audio = MP4(filepath)
@@ -658,7 +658,7 @@ def _append_genres_sync(filepath: str, new_genres: list[str]) -> bool:
             if not added:
                 return False
             tags.add(TCON(encoding=3, text=current + added))
-            tags.save(filepath, v2_version=4, padding=lambda info: max(info.padding, 4096))
+            tags.save(filepath, v2_version=4)
             return True
     except Exception:
         logger.warning("Genre-only append failed: %s", filepath, exc_info=True)
@@ -786,10 +786,11 @@ def _retag_flac_surgical(filepath: str, track: dict, album: dict) -> bool:
             changed = True
 
     if changed:
-        # Padding hint keeps a small reserve so the next surgical update
-        # doesn't trigger a full file rewrite. mutagen's default would
-        # shrink padding to fit, then re-grow it on next save.
-        audio.save(padding=lambda info: max(info.padding, 4096))
+        # mutagen default padding: write in place when the new tags fit into
+        # the existing padding; resize only when they don't (or once, to trim
+        # padding above ~10 KiB). The old max(info.padding, 4096) hint forced
+        # a full-file rewrite whenever leftover padding dropped below 4 KiB.
+        audio.save()
     return changed
 
 
@@ -1047,7 +1048,7 @@ def _retag_mp3_surgical(filepath: str, track: dict, album: dict) -> bool:
             changed = True
 
     if changed:
-        mp3.save(v2_version=4, padding=lambda info: max(info.padding, 4096))
+        mp3.save(v2_version=4)
     return changed
 
 
