@@ -37,6 +37,7 @@ import journal
 import metadata
 import reporting
 import soulseek
+from soulseek.downloader import run_to_completion
 import navidrome
 import retagger
 import uploads
@@ -87,6 +88,99 @@ _in_flight: set[str] = set()
 _LOSSY_PROMPT_TTL = 300  # seconds
 _pending_lossy: dict[str, dict] = {}
 
+# Every album/track download, upload import and lossy prompt in flight,
+# keyed by the short id in its ✖ Cancel button (docs/cancel.md).
+_active_runs: dict[str, "ActiveRun"] = {}
+
+
+class ActiveRun:
+    """One cancellable run: owns the ✖ Cancel keyboard, the task the button
+    cancels, and the bookkeeping the cancel report needs. Registered on
+    creation; ``close()`` retires the button (later taps get "already
+    finished")."""
+
+    def __init__(self, chat_id: int | None, kind: str):
+        self.id = uuid.uuid4().hex[:12]        # "cancel:" + 12 hex ≤ 64 bytes
+        self.chat_id = chat_id
+        self.kind = kind                        # album | track | upload | prompt
+        self.task: asyncio.Task | None = None
+        self.cancel_requested = False
+        self.on_prompt_cancel = None            # prompt runs: async () -> None
+        self.saved_fn = None                    # () -> tracks in the library
+        self.total: int | None = None
+        self.backup: tuple[str | None, str | None] | None = None
+        self.note = ""
+        _active_runs[self.id] = self
+
+    def cancel_row(self) -> list[InlineKeyboardButton]:
+        return [InlineKeyboardButton("✖ Cancel", callback_data=f"cancel:{self.id}")]
+
+    @property
+    def markup(self) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup([self.cancel_row()])
+
+    @property
+    def open(self) -> bool:
+        return self.id in _active_runs
+
+    def attach(self) -> None:
+        """Bind to the current task."""
+        self.task = asyncio.current_task()
+
+    def close(self) -> None:
+        _active_runs.pop(self.id, None)
+
+    def cancel_text(self) -> str:
+        if self.note:
+            return f"✖ Cancelled — {self.note}"
+        saved = self.saved_fn() if self.saved_fn else 0
+        if self.kind == "track":
+            return ("✖ Cancelled — the track was already saved" if saved
+                    else "✖ Cancelled — nothing was downloaded")
+        if self.total is None:
+            return "✖ Cancelled — nothing was downloaded yet"
+        text = f"✖ Cancelled — {int(saved)}/{self.total} tracks were already saved"
+        if self.kind == "upload":
+            text += "; the rest stays in uploads staging"
+        return text
+
+
+class RunStatus:
+    """A run's status message. Telegram drops the inline keyboard on any
+    edit that doesn't resend it, so non-final edits re-attach the ✖ Cancel
+    button while the run is open; ``safe_edit(final=True)`` passes
+    ``reply_markup=None`` and the final text retires the button."""
+
+    def __init__(self, msg, run: ActiveRun):
+        self._msg = msg
+        self.run = run
+        self.message_id = msg.message_id
+        self.chat_id = getattr(msg, "chat_id", None)
+
+    async def edit_text(self, text: str, **kwargs):
+        kwargs.setdefault("reply_markup", self.run.markup if self.run.open else None)
+        return await self._msg.edit_text(text, **kwargs)
+
+    async def delete(self, *args, **kwargs):
+        return await self._msg.delete(*args, **kwargs)
+
+
+class _QueryMessage:
+    """The prompt message a callback query was tapped on, edited through
+    the query — same edit/delete surface as a Message."""
+
+    def __init__(self, query):
+        self._q = query
+        msg = query.message
+        self.message_id = getattr(msg, "message_id", None)
+        self.chat_id = getattr(msg, "chat_id", None)
+
+    async def edit_text(self, text: str, **kwargs):
+        return await self._q.edit_message_text(text, **kwargs)
+
+    async def delete(self, *args, **kwargs):
+        return await self._q.delete_message()
+
 # Re-tagger session state. One global slot — single-user bot. Cleared after
 # /retag confirm or /retag stop, or when the dry-run TTL expires.
 _RETAG_SESSION_TTL = 1200  # 20 minutes
@@ -97,7 +191,9 @@ _retag_in_progress = False
 def _purge_stale_lossy() -> None:
     now = time.monotonic()
     for cid in [k for k, v in _pending_lossy.items() if v["expire_at"] <= now]:
-        _pending_lossy.pop(cid, None)
+        entry = _pending_lossy.pop(cid, None)
+        if entry and entry.get("run_id"):
+            _active_runs.pop(entry["run_id"], None)
 
 
 def _format_lossy_summary(candidates: list) -> str:
@@ -206,6 +302,7 @@ class _NullMessage:
     """Stand-in when even the initial status send failed: edits/deletes
     no-op, so the flow runs UI-less instead of dying over messaging."""
     message_id = None
+    chat_id = None
 
     async def edit_text(self, *args, **kwargs):
         return None
@@ -218,16 +315,21 @@ async def safe_edit(status_msg, text: str, final: bool = False, **kwargs) -> boo
     """Best-effort status edit; True when the edit landed."""
     if status_msg is None:
         return False
+    if final:
+        # The final text carries no ✖ Cancel button (RunStatus injects it
+        # only when the key is absent).
+        kwargs.setdefault("reply_markup", None)
     res = await _tg_call(lambda: status_msg.edit_text(text, **kwargs),
                          "status edit", final=final)
     return res is not None
 
 
-async def safe_send(sender, text: str):
+async def safe_send(sender, text: str, reply_markup=None):
     """Best-effort initial status send. ``sender`` is anything with
     ``reply_text`` (ChatIO, telegram Message). On total failure returns a
     _NullMessage — the download/import is the job, the UI is best-effort."""
-    msg = await _tg_call(lambda: sender.reply_text(text), "status send")
+    extra = {"reply_markup": reply_markup} if reply_markup is not None else {}
+    msg = await _tg_call(lambda: sender.reply_text(text, **extra), "status send")
     return msg if msg is not None else _NullMessage()
 
 
@@ -276,7 +378,9 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "<b>Download</b>\n"
         "Send a music link from Tidal, Spotify, Apple Music, Deezer, Shazam, etc.\n"
-        "Add <b>re</b> after the link to force re-download.\n\n"
+        "Add <b>re</b> after the link to force re-download.\n"
+        "Every download and upload import carries a ✖ Cancel button until it "
+        "finishes — tap it at any stage; tracks already saved stay.\n\n"
         "<b>Inline mode</b>\n"
         f"<code>@{bot_me.username} song name</code> — search Deezer\n"
         f"<code>@{bot_me.username} np</code> — now playing as audio\n"
@@ -792,8 +896,9 @@ class ChatIO:
     def from_update(cls, update: Update) -> "ChatIO":
         return cls(update.get_bot(), update.effective_chat.id)
 
-    async def reply_text(self, text: str):
-        return await self.bot.send_message(self.chat_id, text)
+    async def reply_text(self, text: str, reply_markup=None):
+        extra = {"reply_markup": reply_markup} if reply_markup is not None else {}
+        return await self.bot.send_message(self.chat_id, text, **extra)
 
     async def reply_photo(self, photo, caption: str):
         return await self.bot.send_photo(self.chat_id, photo=photo, caption=caption,
@@ -814,9 +919,45 @@ async def _send_result(io: ChatIO, status_msg, text: str, album_dir: str) -> Non
     await safe_edit(status_msg, text, final=True, parse_mode="HTML")
 
 
+def _spawn_run(coro, io: ChatIO, what: str) -> None:
+    """Start a download as its own task. The update loop processes one
+    update at a time, so a download awaited inside a handler would block
+    every later update — the ✖ Cancel tap included — until it finished."""
+    async def go():
+        try:
+            if await coro is False:
+                await io.reply_text("Already queued.")
+        except Exception:
+            logger.exception("%s task died", what)
+    _spawn_background(go())
+
+
+async def _await_in_own_task(coro):
+    """Await ``coro`` as a separate task, so the ✖ Cancel aimed at it
+    reaches only that run — not the resume driver or upload watcher
+    awaiting it. A cancelled run returns normally (its cancel is a reported
+    outcome), so the awaiting loop just moves on."""
+    return await asyncio.create_task(coro)
+
+
+async def _report_cancelled(status_msg, run: ActiveRun, io: ChatIO | None = None) -> None:
+    """Final word on a user-cancelled run: a force backup goes back, the
+    status message gets the honest tally, the button goes away."""
+    if run.backup:
+        backup, run.backup = run.backup, None
+        run.note = ("the original copy was restored" if await _restore_backup(*backup)
+                    else "restoring the original copy FAILED — check the library")
+    text = run.cancel_text()
+    logger.info("Cancelled by user: %s — %s", run.kind, text)
+    if status_msg is not None:
+        await safe_edit(status_msg, text, final=True)
+    elif io is not None:
+        await _tg_call(lambda: io.reply_text(text), "cancel notice", final=True)
+
+
 async def _download_album(update: Update, album_id: str, force: bool = False):
-    if not await _run_album(ChatIO.from_update(update), album_id, force=force):
-        await update.message.reply_text("Already queued.")
+    io = ChatIO.from_update(update)
+    _spawn_run(_run_album(io, album_id, force=force), io, f"album {album_id}")
 
 
 async def _run_album(io: ChatIO, album_id: str, force: bool = False,
@@ -825,15 +966,22 @@ async def _run_album(io: ChatIO, album_id: str, force: bool = False,
     requests and journal resumes. Returns False when the album is already
     in flight (caller decides whether to tell the user)."""
     key = f"album:{album_id}"
+    run = ActiveRun(io.chat_id, "album")
     if key in _in_flight:
+        run.close()
         return False
     _in_flight.add(key)
+    run.attach()
+    status_msg = None
     try:
         if _download_semaphore.locked():
             status_msg = await safe_send(
-                io, "Queued — will start after the current download finishes")
+                io, "Queued — will start after the current download finishes",
+                reply_markup=run.markup)
         else:
-            status_msg = await safe_send(io, "Fetching album info…")
+            status_msg = await safe_send(io, "Fetching album info…",
+                                         reply_markup=run.markup)
+        status_msg = RunStatus(status_msg, run)
         entry = resume_entry or journal.PendingDownload(
             kind="album", id=album_id, chat_id=io.chat_id, force=force)
         entry.status_message_id = status_msg.message_id
@@ -844,26 +992,67 @@ async def _run_album(io: ChatIO, album_id: str, force: bool = False,
         # An escaped exception keeps the entry for the next startup's resume.
         journal.remove("album", album_id, io.chat_id)
         return True
+    except asyncio.CancelledError:
+        if not run.cancel_requested:
+            raise                       # shutdown, not the user — stays journaled
+        # The user's cancel is a reported outcome: swallow the cancellation,
+        # tell them what landed, and clear the ledger so a restart doesn't
+        # resurrect the request.
+        asyncio.current_task().uncancel()
+        await _report_cancelled(status_msg, run, io)
+        journal.remove("album", album_id, io.chat_id)
+        return True
     finally:
         _in_flight.discard(key)
+        run.close()
 
 
-async def _restore_backup(backup_dir: str | None, restore_target: str | None) -> None:
-    """Move a staged force-redownload backup back to its original location,
-    discarding whatever the failed/partial fresh download left there. No-op
-    if there's no backup to restore."""
-    if not (backup_dir and restore_target and os.path.isdir(backup_dir)):
-        return
+async def _restore_backup(backup_dir: str | None, restore_target: str | None) -> bool:
+    """Move a staged force-redownload backup (album dir or single file) back
+    to its original location, discarding whatever the failed/partial fresh
+    download left there. Returns True when the original is back in place;
+    False when there was nothing to restore or the move failed."""
+    if not (backup_dir and restore_target and os.path.exists(backup_dir)):
+        return False
     try:
         if os.path.isdir(restore_target):
             await asyncio.to_thread(shutil.rmtree, restore_target)
+        elif os.path.exists(restore_target):
+            os.remove(restore_target)
         os.rename(backup_dir, restore_target)
-        logger.info("Restored original album: %s", restore_target)
+        logger.info("Restored original: %s", restore_target)
+        return True
     except OSError as e:
         logger.error("Failed to restore backup %s -> %s: %s", backup_dir, restore_target, e)
+        return False
+
+
+def _drop_backup(backup: str | None) -> None:
+    if backup:
+        with contextlib.suppress(OSError):
+            os.remove(backup)
+
+
+async def _put_back(run: "ActiveRun | None", backup: str | None, existing: str | None) -> None:
+    """Restore a force backup after a failed download. The restore runs to
+    completion even if a cancel lands meanwhile (its rmtree is an await), and
+    the run gives the backup up only once the original is back — a failed
+    restore stays with the run, so a later cancel retries and reports it."""
+    fut = asyncio.ensure_future(_restore_backup(backup, existing))
+    try:
+        await run_to_completion(fut)
+    finally:
+        # Also on the cancel path: run_to_completion re-raises only after
+        # the restore finished, so the result is in.
+        ok = fut.done() and not fut.cancelled() and fut.result()
+        if run is not None and (ok or backup is None):
+            run.backup = None
 
 
 async def _do_download_album(io: ChatIO, status_msg, album_id: str, force: bool = False):
+    # The run (when the status message carries one) gets what the cancel
+    # report needs; a CancelledError itself propagates to _run_album.
+    run: ActiveRun | None = getattr(status_msg, "run", None)
     async with _download_semaphore:
         try:
             album = await metadata.fetch_album(album_id)
@@ -873,6 +1062,8 @@ async def _do_download_album(io: ChatIO, status_msg, album_id: str, force: bool 
             await safe_edit(status_msg, f"❌ Failed to fetch album info: {_short(e)}",
                             final=True)
             return
+        if run is not None:
+            run.total = len(album["tracks"])
 
         # Force re-download: move the existing album OUT of the artist tree
         # into a hidden staging dir, then download fresh. It has to leave the
@@ -894,9 +1085,13 @@ async def _do_download_album(io: ChatIO, status_msg, album_id: str, force: bool 
                     await asyncio.to_thread(shutil.rmtree, backup_dir)
                 os.rename(existing_dir, backup_dir)
                 logger.info("Force re-download: staged backup %s -> %s", existing_dir, backup_dir)
+                if run is not None:
+                    run.backup = (backup_dir, restore_target)
 
         prog = reporting.AlbumProgress(
             album["artist"], album["title"], len(album["tracks"]))
+        if run is not None:
+            run.saved_fn = lambda: prog.saved
         live = LiveStatus(
             edit_fn=lambda text: status_msg.edit_text(text, parse_mode="HTML"),
             render_fn=prog.render,
@@ -912,9 +1107,14 @@ async def _do_download_album(io: ChatIO, status_msg, album_id: str, force: bool 
             )
         except Exception as e:
             logger.error("Album download failed (%s — %s): %s", album["artist"], album["title"], e)
-            await _restore_backup(backup_dir, restore_target)
+            await _put_back(run, backup_dir, restore_target)
             await safe_edit(status_msg, f"❌ Download failed: {_short(e)}", final=True)
             return
+        if run is not None:
+            # Files are on disk: from here it's backup bookkeeping, scan and
+            # report — nothing left to cancel, and the backup is this flow's.
+            run.close()
+            run.backup = None
 
         # Only drop the backup once the fresh copy is a clean, complete success.
         # A partial or empty re-download (dead peers, some tracks missing) must
@@ -978,9 +1178,27 @@ async def _handle_upload(io: ChatIO, report: uploads.IntakeReport) -> None:
         await io.reply_text(uploads.format_rejection(report))
         return
 
-    status_msg = await safe_send(
-        io, f"📦 {report.name}: {len(report.audio)} audio file(s) received. "
-        "Identifying release…")
+    run = ActiveRun(io.chat_id, "upload")
+    run.attach()
+    status_msg = None
+    try:
+        status_msg = RunStatus(await safe_send(
+            io, f"📦 {report.name}: {len(report.audio)} audio file(s) received. "
+            "Identifying release…", reply_markup=run.markup), run)
+        await _import_upload(io, status_msg, report, run)
+    except asyncio.CancelledError:
+        if not run.cancel_requested:
+            raise
+        # Staged files are the user's own — a cancel leaves them where a
+        # failed import would: in uploads staging, nothing deleted.
+        asyncio.current_task().uncancel()
+        await _report_cancelled(status_msg, run, io)
+    finally:
+        run.close()
+
+
+async def _import_upload(io: ChatIO, status_msg, report: uploads.IntakeReport,
+                         run: ActiveRun) -> None:
     album_id = None
     diag: dict = {}
     try:
@@ -1004,10 +1222,13 @@ async def _handle_upload(io: ChatIO, report: uploads.IntakeReport) -> None:
             f"📦 {report.name}: release identified. Import queued until the "
             "current download finishes…")
 
+    progress: dict = {"saved": 0}
+    run.saved_fn = lambda: progress["saved"]
     async with _download_semaphore:
         try:
             album = await metadata.fetch_album(album_id)
             await metadata.enrich_genres(album)
+            run.total = len(album["tracks"])
             # Cosmetic edit inside the critical path — safe_edit, never a
             # bare edit_text: a network blip here once aborted the whole
             # import before a single file was filed.
@@ -1015,7 +1236,7 @@ async def _handle_upload(io: ChatIO, report: uploads.IntakeReport) -> None:
                 status_msg,
                 f"📦 Importing upload: {album['artist']} — {album['title']}…")
             result = await upload_import.import_staged_album(
-                album, report.staging_dir, MUSIC_DIR)
+                album, report.staging_dir, MUSIC_DIR, progress=progress)
         except Exception as e:
             logger.exception("Upload import failed for %s", report.name)
             await safe_edit(
@@ -1023,6 +1244,7 @@ async def _handle_upload(io: ChatIO, report: uploads.IntakeReport) -> None:
                 f"❌ Upload import failed: {_short(e)}. Files kept in staging.",
                 final=True)
             return
+    run.close()  # filed; scan and report are not cancellable
 
     scan_note = ""
     if result["downloaded"]:
@@ -1052,8 +1274,8 @@ async def _handle_upload(io: ChatIO, report: uploads.IntakeReport) -> None:
 
 
 async def _download_track(update: Update, track_id: str, force: bool = False):
-    if not await _run_track(ChatIO.from_update(update), track_id, force=force):
-        await update.message.reply_text("Already queued.")
+    io = ChatIO.from_update(update)
+    _spawn_run(_run_track(io, track_id, force=force), io, f"track {track_id}")
 
 
 async def _run_track(io: ChatIO, track_id: str, force: bool = False,
@@ -1062,15 +1284,22 @@ async def _run_track(io: ChatIO, track_id: str, force: bool = False,
     bracket. A pending lossy-fallback prompt counts as a reported outcome:
     prompts don't survive restarts by design."""
     key = f"track:{track_id}"
+    run = ActiveRun(io.chat_id, "track")
     if key in _in_flight:
+        run.close()
         return False
     _in_flight.add(key)
+    run.attach()
+    status_msg = None
     try:
         if _download_semaphore.locked():
             status_msg = await safe_send(
-                io, "Queued — will start after the current download finishes")
+                io, "Queued — will start after the current download finishes",
+                reply_markup=run.markup)
         else:
-            status_msg = await safe_send(io, "Fetching track info…")
+            status_msg = await safe_send(io, "Fetching track info…",
+                                         reply_markup=run.markup)
+        status_msg = RunStatus(status_msg, run)
         entry = resume_entry or journal.PendingDownload(
             kind="track", id=track_id, chat_id=io.chat_id, force=force)
         entry.status_message_id = status_msg.message_id
@@ -1078,12 +1307,20 @@ async def _run_track(io: ChatIO, track_id: str, force: bool = False,
         await _do_download_track(io, status_msg, track_id, force=force)
         journal.remove("track", track_id, io.chat_id)
         return True
+    except asyncio.CancelledError:
+        if not run.cancel_requested:
+            raise
+        asyncio.current_task().uncancel()
+        await _report_cancelled(status_msg, run, io)
+        journal.remove("track", track_id, io.chat_id)
+        return True
     finally:
         _in_flight.discard(key)
+        run.close()
 
 
 async def _do_download_track(io: ChatIO, status_msg, track_id: str, force: bool = False):
-
+    run: ActiveRun | None = getattr(status_msg, "run", None)
     async with _download_semaphore:
         try:
             track, album_ctx = await metadata.fetch_single_track(track_id)
@@ -1095,14 +1332,22 @@ async def _do_download_track(io: ChatIO, status_msg, track_id: str, force: bool 
                             final=True)
             return
 
+        backup = existing = None
         if force:
             album_dir = _locate_existing_album(MUSIC_DIR, album_ctx)
             existing = _find_existing_track(album_dir, track) if album_dir else None
             if existing:
-                os.remove(existing)
-                logger.info("Force re-download: removed %s", existing)
+                # Aside, not gone: a cancel (or a failed download) puts it
+                # back; a clean success drops it below.
+                backup = existing + ".redownload-backup"
+                os.replace(existing, backup)
+                logger.info("Force re-download: staged backup %s -> %s", existing, backup)
+                if run is not None:
+                    run.backup = (backup, existing)
 
         prog = reporting.TrackProgress(track["artist"], track["title"])
+        if run is not None:
+            run.saved_fn = lambda: prog.saved
         live = LiveStatus(
             edit_fn=lambda text: status_msg.edit_text(text, parse_mode="HTML"),
             render_fn=prog.render,
@@ -1118,7 +1363,16 @@ async def _do_download_track(io: ChatIO, status_msg, track_id: str, force: bool 
             )
         except RuntimeError as e:
             if "No FLAC found" in str(e):
-                if await _offer_mp3_fallback(status_msg, track_id, track, album_ctx):
+                outcome = await _offer_mp3_fallback(status_msg, track_id, track, album_ctx)
+                if outcome == "prompt":
+                    # The prompt owns the outcome now; the original is gone
+                    # either way (force semantics), so drop the backup.
+                    if run is not None:
+                        run.backup = None
+                    _drop_backup(backup)
+                    return
+                await _put_back(run, backup, existing)
+                if outcome == "reported":
                     return
                 await safe_edit(
                     status_msg,
@@ -1127,13 +1381,19 @@ async def _do_download_track(io: ChatIO, status_msg, track_id: str, force: bool 
                     final=True,
                 )
                 return
+            await _put_back(run, backup, existing)
             logger.error("Track download failed (%s — %s): %s", track["artist"], track["title"], e)
             await safe_edit(status_msg, f"❌ Download failed: {_short(e)}", final=True)
             return
         except Exception as e:
+            await _put_back(run, backup, existing)
             logger.error("Track download failed (%s — %s): %s", track["artist"], track["title"], e)
             await safe_edit(status_msg, f"❌ Download failed: {_short(e)}", final=True)
             return
+        if run is not None:
+            run.close()  # saved; scan and report are not cancellable
+            run.backup = None
+        _drop_backup(backup)
 
         scan_note = ""
         if was_downloaded:
@@ -1164,7 +1424,7 @@ async def _do_download_track(io: ChatIO, status_msg, track_id: str, force: bool 
 
 async def _offer_mp3_fallback(
     status_msg, track_id: str, track: dict, album_ctx: dict,
-) -> bool:
+) -> str | None:
     """Probe Soulseek for mp3/m4a candidates after a FLAC search came up empty.
     If any are available, send an inline-keyboard prompt and stash the
     candidates for the callback handler. Returns True when a prompt was sent
@@ -1180,19 +1440,36 @@ async def _offer_mp3_fallback(
         logger.warning("Lossy fallback search couldn't run: %s", e)
         reason = "rate-limited" if isinstance(e, soulseek.SearchThrottledError) \
             else "search error"
-        with contextlib.suppress(TelegramError):
-            await status_msg.edit_text(
-                f"Soulseek search couldn't run for {track['artist']} — "
-                f"{track['title']} ({reason}). Try again in a few minutes."
-            )
-        return True
+        await safe_edit(
+            status_msg,
+            f"Soulseek search couldn't run for {track['artist']} — "
+            f"{track['title']} ({reason}). Try again in a few minutes.",
+            final=True,
+        )
+        return "reported"
     except Exception as e:
         logger.warning("Lossy fallback search failed: %s", e)
-        return False
+        return None
     if not candidates:
-        return False
+        return None
 
     cid = uuid.uuid4().hex[:12]
+    # The search run is over; the prompt is a run of its own so ✖ Cancel
+    # keeps working while the user decides (it acts like Skip).
+    old_run: ActiveRun | None = getattr(status_msg, "run", None)
+    if old_run is not None:
+        old_run.close()
+    prompt_run = ActiveRun(status_msg.chat_id, "prompt")
+
+    async def _cancel_prompt() -> None:
+        _pending_lossy.pop(cid, None)
+        prompt_run.close()
+        await safe_edit(
+            status_msg,
+            f"✖ Cancelled — FLAC not available for {track['artist']} — "
+            f"{track['title']}, no fallback taken", final=True)
+
+    prompt_run.on_prompt_cancel = _cancel_prompt
     _pending_lossy[cid] = {
         "track_id": track_id,
         "track": track,
@@ -1201,12 +1478,14 @@ async def _offer_mp3_fallback(
         "chat_id": status_msg.chat_id,
         "message_id": status_msg.message_id,
         "expire_at": time.monotonic() + _LOSSY_PROMPT_TTL,
+        "run_id": prompt_run.id,
     }
 
     summary = _format_lossy_summary(candidates)
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton(f"✓ Accept {summary}", callback_data=f"lossy:accept:{cid}")],
         [InlineKeyboardButton("✗ Skip", callback_data=f"lossy:skip:{cid}")],
+        prompt_run.cancel_row(),
     ])
     try:
         await status_msg.edit_text(
@@ -1217,8 +1496,9 @@ async def _offer_mp3_fallback(
     except TelegramError as e:
         logger.warning("Failed to send lossy-fallback prompt: %s", e)
         _pending_lossy.pop(cid, None)
-        return False
-    return True
+        prompt_run.close()
+        return None
+    return "prompt"
 
 
 async def _handle_lossy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1241,12 +1521,11 @@ async def _handle_lossy_callback(update: Update, context: ContextTypes.DEFAULT_T
         with contextlib.suppress(TelegramError):
             await query.edit_message_text("Prompt expired (5 min).")
         return
+    _active_runs.pop(entry.get("run_id", ""), None)  # the prompt's ✖ Cancel
 
     await query.answer()
 
     track = entry["track"]
-    album_ctx = entry["album_ctx"]
-    candidates = entry["candidates"]
 
     if action == "skip":
         with contextlib.suppress(TelegramError):
@@ -1258,11 +1537,17 @@ async def _handle_lossy_callback(update: Update, context: ContextTypes.DEFAULT_T
     if action != "accept":
         return
 
-    summary = _format_lossy_summary(candidates)
-    with contextlib.suppress(TelegramError):
-        await query.edit_message_text(
-            f"Downloading: {track['artist']} — {track['title']} ({summary})"
-        )
+    # Same reason as _spawn_run: the download must not sit inside the
+    # callback handler, or no further update (✖ Cancel included) gets
+    # processed until it ends.
+    _spawn_background(_run_lossy_download(query, entry))
+
+
+async def _run_lossy_download(query, entry: dict) -> None:
+    track = entry["track"]
+    album_ctx = entry["album_ctx"]
+    candidates = entry["candidates"]
+    chat_id = entry.get("chat_id")
 
     in_flight_key = f"track:{entry['track_id']}:lossy"
     if in_flight_key in _in_flight:
@@ -1270,11 +1555,18 @@ async def _handle_lossy_callback(update: Update, context: ContextTypes.DEFAULT_T
             await query.edit_message_text("Already queued.")
         return
     _in_flight.add(in_flight_key)
+    run = ActiveRun(chat_id, "track")
+    run.attach()
+    status_msg = RunStatus(_QueryMessage(query), run)
     try:
+        summary = _format_lossy_summary(candidates)
+        await safe_edit(
+            status_msg, f"Downloading: {track['artist']} — {track['title']} ({summary})")
         async with _download_semaphore:
             prog = reporting.TrackProgress(track["artist"], track["title"])
+            run.saved_fn = lambda: prog.saved
             live = LiveStatus(
-                edit_fn=lambda text: query.edit_message_text(text, parse_mode="HTML"),
+                edit_fn=lambda text: status_msg.edit_text(text, parse_mode="HTML"),
                 render_fn=prog.render,
             )
 
@@ -1293,9 +1585,10 @@ async def _handle_lossy_callback(update: Update, context: ContextTypes.DEFAULT_T
                     "Lossy download failed (%s — %s): %s",
                     track["artist"], track["title"], e,
                 )
-                with contextlib.suppress(TelegramError):
-                    await query.edit_message_text(f"❌ Lossy download failed: {_short(e)}")
+                await safe_edit(status_msg, f"❌ Lossy download failed: {_short(e)}",
+                                final=True)
                 return
+            run.close()  # saved; scan and report are not cancellable
 
             scan_note = await _trigger_scan()
             share_url = await _try_share_album(
@@ -1308,10 +1601,57 @@ async def _handle_lossy_callback(update: Update, context: ContextTypes.DEFAULT_T
                 time.monotonic() - prog.started,
                 scan_note=scan_note, share_url=share_url,
             )
-            with contextlib.suppress(TelegramError):
-                await query.edit_message_text(done_text, parse_mode="HTML")
+            await safe_edit(status_msg, done_text, final=True, parse_mode="HTML")
+    except asyncio.CancelledError:
+        if not run.cancel_requested:
+            raise
+        asyncio.current_task().uncancel()
+        await _report_cancelled(status_msg, run)
+    except Exception:
+        logger.exception("Lossy download task died (%s — %s)",
+                         track["artist"], track["title"])
     finally:
         _in_flight.discard(in_flight_key)
+        run.close()
+
+
+async def _handle_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """✖ Cancel tapped on a status message (docs/cancel.md). Only the chat
+    that requested the run may cancel it; the run's own task does the
+    cleanup and writes the final text when the cancellation reaches it."""
+    query = update.callback_query
+    if not query or not query.data:
+        return
+    user_id = query.from_user.id if query.from_user else None
+    if user_id not in ALLOWED_USERS:
+        await query.answer("Not allowed.", show_alert=False)
+        return
+    cid = query.data.split(":", 1)[1] if ":" in query.data else ""
+    run = _active_runs.get(cid)
+    if run is None:
+        await query.answer("Nothing to cancel — already finished.", show_alert=False)
+        with contextlib.suppress(TelegramError):
+            await query.edit_message_reply_markup(reply_markup=None)
+        return
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    if chat_id != run.chat_id:
+        await query.answer("Only the chat that requested this can cancel it.",
+                           show_alert=True)
+        return
+    if run.cancel_requested:
+        await query.answer("Cancelling…", show_alert=False)
+        return
+    run.cancel_requested = True
+    logger.info("Cancel requested by chat %s for %s run %s", chat_id, run.kind, run.id)
+    # Cancel first, acknowledge after: a failed query.answer() must not
+    # leave the flag set with the task still running.
+    if run.on_prompt_cancel is not None:
+        await run.on_prompt_cancel()
+    elif run.task is not None:
+        run.task.cancel()
+    # else: not attached yet — ActiveRun.attach() cancels on arrival
+    with contextlib.suppress(TelegramError):
+        await query.answer("Cancelling…", show_alert=False)
 
 
 async def _try_share_album(artist: str, title: str, skip_delay: bool = False) -> str | None:
@@ -1405,9 +1745,9 @@ async def _resume_pending(app: Application) -> None:
                     chat_id=entry.chat_id, message_id=entry.status_message_id,
                 )
         io = ChatIO(app.bot, entry.chat_id)
-        run = _run_album if entry.kind == "album" else _run_track
+        runner = _run_album if entry.kind == "album" else _run_track
         try:
-            await run(io, entry.id, resume_entry=entry)
+            await _await_in_own_task(runner(io, entry.id, resume_entry=entry))
         except Exception as e:
             # Entry stays in the journal (bumped) — next restart retries
             # until the cap; the failure itself is already logged/reported
@@ -1438,7 +1778,7 @@ async def _post_init(app: Application) -> None:
 
         async def _on_upload(report: uploads.IntakeReport) -> None:
             with contextlib.suppress(TelegramError):
-                await _handle_upload(owner_io, report)
+                await _await_in_own_task(_handle_upload(owner_io, report))
 
         _spawn_background(uploads.watch_loop(_on_upload))
     # One-page upload site feeding the same watched folder (off unless
@@ -1477,6 +1817,7 @@ def _build_app() -> Application:
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(InlineQueryHandler(handle_inline_query))
     app.add_handler(CallbackQueryHandler(_handle_lossy_callback, pattern=r"^lossy:"))
+    app.add_handler(CallbackQueryHandler(_handle_cancel_callback, pattern=r"^cancel:"))
     app.add_error_handler(_error_handler)
     return app
 

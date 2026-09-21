@@ -193,7 +193,8 @@ python src/bot.py      # needs slskd running and reachable
 
 **Downloads** — just send a music link. Album or single track is auto-detected; paste several links
 and they all queue up. Add `re` after a link to re-download something you already have (your existing
-copy is kept safe until the new one finishes cleanly).
+copy is kept safe until the new one finishes cleanly). Every status message carries a ✖ Cancel
+button until the download is done — tracks already saved stay.
 
 **Inline mode** — type `@yourbot` followed by:
 

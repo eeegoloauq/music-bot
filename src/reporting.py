@@ -214,6 +214,11 @@ class AlbumProgress:
             lines.append(f"  pacing — next search in ~{int(wait)}s")
         return lines
 
+    @property
+    def saved(self) -> int:
+        """Tracks that reached the library so far (the cancel report)."""
+        return self._counts()[0]
+
     def _counts(self) -> tuple[int, int, int]:
         done = sum(1 for r in self.tracks.values() if r["state"] == "done")
         failed = sum(1 for r in self.tracks.values() if r["state"] == "fail")
@@ -320,6 +325,7 @@ class TrackProgress:
         self.transfer_state: str | None = None
         self.queue_position: int | None = None
         self.queued_secs = 0.0
+        self.saved = False              # the file reached the library
         self.started = time.monotonic()
 
     def handle(self, ev: dict) -> bool:
@@ -348,6 +354,7 @@ class TrackProgress:
             if ev.get("state") == "done":
                 self.peer = ev.get("peer")
                 self.fmt = ev.get("fmt")
+                self.saved = True
             elif ev.get("state") == "start":
                 self.pct, self.speed = 0.0, 0
                 self.transfer_state = None

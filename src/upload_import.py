@@ -42,6 +42,7 @@ from library.files import (
 from library.tagger import _patch_missing_tags
 from soulseek.downloader import (
     _download_cover, _move_into_library, _result_dict, _write_tags_force,
+    run_to_completion,
 )
 from uploads import AUDIO_EXTS
 
@@ -324,17 +325,37 @@ def _format_label(path: str) -> str:
     return " ".join(parts)
 
 
-async def import_staged_album(album: dict, staging_dir: str, dest_dir: str) -> dict:
+def _file_track(src: str, dest: str, track: dict, album: dict,
+                cover_data: bytes | None, lyrics: dict | None, ext: str,
+                progress: dict) -> None:
+    """Move one staged file into the library and tag it — one worker-thread
+    step, so a cancel (docs/cancel.md) sees either the staged file or the
+    finished library file, never a moved-but-untagged one. The saved count
+    is bumped here, by the thread, so it stays right even when the awaiting
+    coroutine was cancelled meanwhile."""
+    _move_into_library(src, dest)
+    if ext in ("flac", "m4a", "mp3"):
+        _write_tags_force(dest, track, album, cover_data, lyrics, ext)
+    progress["saved"] = progress.get("saved", 0) + 1
+
+
+async def import_staged_album(album: dict, staging_dir: str, dest_dir: str,
+                              progress: dict | None = None) -> dict:
     """File a staged upload into the library. Returns the download_album
     result-dict shape (reporting.render_album_final renders it), plus
-    ``leftover_files``: staged audio that matched no track and stayed put."""
+    ``leftover_files``: staged audio that matched no track and stayed put.
+
+    ``progress`` (optional dict) gets ``saved`` — files that reached the
+    library — updated as the import goes, for the cancel report."""
     t0 = time.monotonic()
+    progress = progress if progress is not None else {}
+    progress.setdefault("saved", 0)
     existing_dir = await asyncio.to_thread(_locate_existing_album, dest_dir, album)
     album_dir = existing_dir or _ensure_album_dir(
         dest_dir, _sanitize(album["artist"]), _sanitize(album["title"]))
     cover_data = await _download_cover(album.get("cover_uuid", ""), album_dir)
 
-    downloaded = skipped = with_lyrics = 0
+    skipped = with_lyrics = 0
     failed: list[tuple[str, str]] = []
     format_label = ""
     total = len(album["tracks"])
@@ -371,16 +392,14 @@ async def import_staged_album(album: dict, staging_dir: str, dest_dir: str) -> d
                 track["title"], track["artist"], album["title"],
                 track.get("duration", 0))
 
-        await asyncio.to_thread(_move_into_library, src, dest)
-        if ext in ("flac", "m4a", "mp3"):
-            await asyncio.to_thread(
-                _write_tags_force, dest, track, album, cover_data, lyrics, ext)
+        await run_to_completion(asyncio.to_thread(
+            _file_track, src, dest, track, album, cover_data, lyrics, ext, progress))
         if lyrics:
             with_lyrics += 1
-        downloaded += 1
         logger.info("  [%d/%d] %s — filed from upload [%s]",
                     i, total, track["title"], format_label)
 
+    downloaded = progress["saved"]
     leftovers = await asyncio.to_thread(_staged_audio, staging_dir)
     if not leftovers:
         # nothing worth keeping — art/playlists go with the staging dir
