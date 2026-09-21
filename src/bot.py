@@ -181,11 +181,22 @@ class _QueryMessage:
     async def delete(self, *args, **kwargs):
         return await self._q.delete_message()
 
-# Re-tagger session state. One global slot — single-user bot. Cleared after
-# /retag confirm or /retag stop, or when the dry-run TTL expires.
-_RETAG_SESSION_TTL = 1200  # 20 minutes
+# Re-tagger session state. One global slot — single-user bot. The session is
+# a library snapshot, so library changes make it stale; the timer is only a
+# safety net.
+_RETAG_SESSION_TTL = 7200  # 2 hours
 _retag_session: dict | None = None
+_retag_invalidated_reason: str | None = None
 _retag_in_progress = False
+
+
+def _invalidate_retag_session(reason: str) -> None:
+    global _retag_session, _retag_invalidated_reason
+    if _retag_session is None:
+        return
+    _retag_session = None
+    _retag_invalidated_reason = reason
+    logger.info("Invalidated re-tag session: %s", reason)
 
 
 def _purge_stale_lossy() -> None:
@@ -619,7 +630,7 @@ def _format_retag_summary(plans: list, summary, elapsed: float, sample_n: int = 
 
 @authorized
 async def cmd_retag(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global _retag_session, _retag_in_progress
+    global _retag_session, _retag_invalidated_reason, _retag_in_progress
 
     args = (context.args or [])
     sub = args[0].lower() if args else ""
@@ -630,18 +641,26 @@ async def cmd_retag(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             _retag_session = None
             await update.message.reply_text("Re-tag session dropped.")
+        _retag_invalidated_reason = None
         return
 
     if sub == "confirm":
         if _retag_session is None:
-            await update.message.reply_text(
-                "No re-tag session to confirm. Run /retag first."
-            )
+            if _retag_invalidated_reason:
+                await update.message.reply_text(
+                    "Library changed since the scan "
+                    f"({_retag_invalidated_reason}) — run /retag again."
+                )
+            else:
+                await update.message.reply_text(
+                    "No re-tag session to confirm. Run /retag first."
+                )
             return
         if time.monotonic() > _retag_session["expire_at"]:
             _retag_session = None
+            _retag_invalidated_reason = None
             await update.message.reply_text(
-                "Re-tag session expired (20 min). Run /retag again."
+                "Re-tag session expired (2 hours). Run /retag again."
             )
             return
         if _retag_in_progress:
@@ -697,6 +716,7 @@ async def cmd_retag(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "summary": summary,
         "expire_at": time.monotonic() + _RETAG_SESSION_TTL,
     }
+    _retag_invalidated_reason = None
     text = _format_retag_summary(plans, summary, elapsed)
     if not await safe_edit(status_msg, text, final=True, parse_mode="HTML"):
         await _tg_call(lambda: update.message.reply_text(text, parse_mode="HTML"),
@@ -813,6 +833,7 @@ async def _handle_delete(update: Update, rel_path: str):
 
     await asyncio.to_thread(shutil.rmtree, full_path)
     logger.info("Deleted album: %s/%s", artist_name, album_name)
+    _invalidate_retag_session("album deleted")
 
     def _remove_if_empty(d: str) -> bool:
         try:
@@ -1154,6 +1175,7 @@ async def _do_download_album(io: ChatIO, status_msg, album_id: str, force: bool 
 
         scan_note = ""
         if result["downloaded"] > 0:
+            _invalidate_retag_session("album downloaded")
             scan_note = await _trigger_scan()
 
         # Share link works even for "already in library" — useful when re-pasting old albums.
@@ -1253,6 +1275,7 @@ async def _import_upload(io: ChatIO, status_msg, report: uploads.IntakeReport,
 
     scan_note = ""
     if result["downloaded"]:
+        _invalidate_retag_session("upload imported")
         scan_note = await _trigger_scan()
     share_url = await _try_share_album(
         album["artist"], album["title"], skip_delay=result["downloaded"] == 0)
@@ -1402,6 +1425,7 @@ async def _do_download_track(io: ChatIO, status_msg, track_id: str, force: bool 
 
         scan_note = ""
         if was_downloaded:
+            _invalidate_retag_session("track downloaded")
             scan_note = await _trigger_scan()
 
         share_url = await _try_share_album(
@@ -1579,7 +1603,7 @@ async def _run_lossy_download(query, entry: dict) -> None:
                 await live.refresh(force=prog.handle(ev))
 
             try:
-                path, _was, fmt = await soulseek.download_single_track(
+                path, was_downloaded, fmt = await soulseek.download_single_track(
                     track, album_ctx, MUSIC_DIR,
                     accept_lossy=True,
                     precomputed_candidates=candidates,
@@ -1595,6 +1619,8 @@ async def _run_lossy_download(query, entry: dict) -> None:
                 return
             run.close()  # saved; scan and report are not cancellable
 
+            if was_downloaded:
+                _invalidate_retag_session("lossy track downloaded")
             scan_note = await _trigger_scan()
             share_url = await _try_share_album(
                 album_ctx.get("artist", track["artist"]),

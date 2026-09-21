@@ -1176,14 +1176,20 @@ async def run_apply(
         if not plan.needs_apply:
             continue
         counter += 1
-        try:
-            written, skipped = await apply_plan(plan)
-            plan.files_written = written
-            plan.files_skipped = skipped
-            written_total += written
-            skipped_total += skipped
-        except Exception as e:
-            failed.append((f"{plan.artist_dir}/{plan.album_dir}", str(e)))
+        if not os.path.isdir(plan.folder):
+            plan.files_written = 0
+            plan.files_skipped = len(plan.files)
+            skipped_total += plan.files_skipped
+            logger.info("Re-tag folder disappeared; skipping: %s", plan.folder)
+        else:
+            try:
+                written, skipped = await apply_plan(plan)
+                plan.files_written = written
+                plan.files_skipped = skipped
+                written_total += written
+                skipped_total += skipped
+            except Exception as e:
+                failed.append((f"{plan.artist_dir}/{plan.album_dir}", str(e)))
         if progress is not None:
             try:
                 await progress(counter, total, plan)
