@@ -206,6 +206,29 @@ def _locate_existing_album(music_dir: str, album_meta: dict) -> str | None:
     return None
 
 
+# "01. Artist - Title", "1-02 Title", "07 - Title", "Artist - Title". A number
+# counts only with a delimiter after it, so "1985" stays a title; "d-" is a
+# disc only when a track number follows ("07-Title" is track 7).
+_FNAME_RE = re.compile(
+    r"^(?:(?P<disc>\d{1,2})-(?=\d))?(?:(?P<num>\d{1,3})[.\s-]+)?(?P<rest>.+)$")
+
+
+def _guess_from_filename(fname: str) -> tuple[str, set[str]]:
+    """(tracknumber, candidate normalized titles) read off a filename, for
+    files that carry no tags at all (rips and zips from the wild). Every
+    " - " split is a candidate — "Artist - Title" is the common order, but
+    "Song - Live" is a title too."""
+    stem = os.path.splitext(fname)[0].strip()
+    m = _FNAME_RE.match(stem)
+    if not m:
+        return "0", set()
+    rest = m.group("rest").strip()
+    parts = rest.split(" - ")
+    titles = {_normalize_title(" - ".join(parts[i:])) for i in range(len(parts))}
+    num = (m.group("num") or "0").lstrip("0") or "0"
+    return num, {t for t in titles if t}
+
+
 def _find_existing_track(album_dir: str, track: dict) -> str | None:
     """Find an existing audio file for this track in album_dir.
 
@@ -228,6 +251,9 @@ def _find_existing_track(album_dir: str, track: dict) -> str | None:
 
     isrc = (track.get("isrc") or "").upper()
     track_title_norm = _normalize_title(track["title"])
+    # A filename can't carry "?" or ":" — a name-derived title is compared
+    # against the sanitised form too; a real title tag is not.
+    name_title_norms = {track_title_norm, _normalize_title(title)}
 
     # Two-pass walk: ISRC and tracknum+title match in pass 1 (strong signals).
     # Title-only match collected in pass 1, returned in pass 2 — same song
@@ -263,11 +289,18 @@ def _find_existing_track(album_dir: str, track: dict) -> str | None:
                 tnum = next(iter(af.get("tracknumber") or ["0"]), "0").split("/")[0].strip()
                 ftitle = _normalize_title(next(iter(af.get("title") or [""]), ""))
 
+            if ftitle:
+                title_match = ftitle == track_title_norm
+            else:
+                # Untagged file: the name is all there is.
+                tnum, ftitles = _guess_from_filename(fname)
+                title_match = bool(ftitles & name_title_norms)
+
             if isrc and file_isrc == isrc:
                 return fpath
-            if tnum == str(num) and ftitle == track_title_norm:
+            if tnum == str(num) and title_match:
                 return fpath
-            if ftitle and ftitle == track_title_norm and title_only_hit is None:
+            if title_match and title_only_hit is None:
                 title_only_hit = fpath
         except Exception:
             continue
