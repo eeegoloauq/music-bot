@@ -570,7 +570,12 @@ def _format_retag_summary(plans: list, summary, elapsed: float, sample_n: int = 
         head = f"{p.artist_dir} / {p.album_dir}"
         if len(head) > 70:
             head = head[:68] + "…"
-        failed_lines.append(f"  {head}")
+        # The search's own note ("edition differs…", "found as …") is the
+        # useful part; the generic prefix is implied by the section title.
+        note = (p.error or "").split(" — ", 1)
+        if len(note) == 2:
+            head += f" — {note[1]}"
+        failed_lines.append(f"  {reporting.esc(head)}")
 
     out = [
         f"<b>Scan complete</b> · {summary.total} albums · {_format_eta(elapsed)}",
