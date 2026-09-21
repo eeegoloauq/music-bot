@@ -30,12 +30,39 @@ def _id3_get_txxx(audio, desc: str) -> str:
 
 
 def _format_artist(track: dict, album: dict) -> str:
-    """Build display artist string with featured artists."""
-    artist_str = track.get("artist", album.get("artist", "Unknown"))
-    feat = track.get("featuredArtists", [])
+    """Build a display artist string with co-artists and featured artists."""
+    artists = _artist_names(track, album)
+    main_count = 1 + len(_dedupe_names(track.get("coArtists") or [], artists[:1]))
+    main = artists[:main_count]
+    if len(main) == 1:
+        artist_str = main[0]
+    else:
+        artist_str = ", ".join(main[:-1]) + " & " + main[-1]
+    feat = artists[main_count:]
     if feat:
         artist_str += " feat. " + ", ".join(feat)
     return artist_str
+
+
+def _dedupe_names(names, initial=()) -> list[str]:
+    result: list[str] = []
+    seen = {str(name).casefold() for name in initial if name}
+    for name in names:
+        clean = str(name or "").strip()
+        key = clean.casefold()
+        if clean and key not in seen:
+            result.append(clean)
+            seen.add(key)
+    return result
+
+
+def _artist_names(track: dict, album: dict) -> list[str]:
+    """Return canonical ARTISTS values: primary, other Main, then Featured."""
+    primary = str(track.get("artist") or album.get("artist") or "Unknown").strip()
+    names = [primary]
+    names.extend(_dedupe_names(track.get("coArtists") or [], names))
+    names.extend(_dedupe_names(track.get("featuredArtists") or [], names))
+    return names
 
 
 def _format_title(track: dict) -> str:
@@ -100,6 +127,9 @@ def _write_tags(filepath: str, track: dict, album: dict,
         genres = album.get("genres") or []
         if genres:
             audio["genre"] = genres
+        artist_names = _artist_names(track, album)
+        if artist_names and (force or "artists" not in audio):
+            audio["artists"] = artist_names
         if album.get("label"):
             tags["publisher"] = album["label"]
 
@@ -247,6 +277,10 @@ def _write_m4a_tags(filepath: str, track: dict, album: dict,
 
         if track.get("isrc"):
             _ff("ISRC", track["isrc"])
+        artists_key = "----:com.apple.iTunes:ARTISTS"
+        artist_names = _artist_names(track, album)
+        if artist_names and (force or artists_key not in audio):
+            audio[artists_key] = [MP4FreeForm(name.encode("utf-8")) for name in artist_names]
         if album.get("upc"):
             _ff("BARCODE", album["upc"])
         if album.get("type"):
@@ -357,6 +391,9 @@ def _write_mp3_tags(filepath: str, track: dict, album: dict,
 
         if album.get("upc"):
             audio.add(TXXX(encoding=3, desc="BARCODE", text=album["upc"]))
+        artist_names = _artist_names(track, album)
+        if artist_names:
+            audio.add(TXXX(encoding=3, desc="ARTISTS", text=artist_names))
         if album.get("type"):
             audio.add(TXXX(encoding=3, desc="RELEASETYPE", text=album["type"].lower()))
         if track.get("explicit"):
@@ -448,6 +485,11 @@ async def _patch_flac_tags(filepath: str, track: dict, album: dict) -> list[str]
                 audio[k] = want
                 added.append(k)
 
+        artist_names = _artist_names(track, album)
+        if artist_names and "artists" not in audio:
+            audio["artists"] = artist_names
+            added.append("artists")
+
         # Migrate existing files: if lyrics=plain but syncedlyrics=LRC,
         # promote LRC to lyrics so Navidrome serves it as synced via API.
         synced_val = next(iter(audio.get("syncedlyrics") or []), "")
@@ -512,6 +554,12 @@ async def _patch_m4a_tags(filepath: str, track: dict, album: dict) -> list[str]:
                 added.append({"\xa9alb": "album", "aART": "albumartist",
                               "\xa9ART": "artist"}.get(k, k))
 
+        artists_key = "----:com.apple.iTunes:ARTISTS"
+        artist_names = _artist_names(track, album)
+        if artist_names and artists_key not in audio:
+            audio[artists_key] = [MP4FreeForm(name.encode("utf-8")) for name in artist_names]
+            added.append("artists")
+
         lrclib_key = "----:com.apple.iTunes:LRCLIBCHECKED"
         has_lyrics = "\xa9lyr" in audio
         has_checked = lrclib_key in audio
@@ -573,6 +621,12 @@ async def _patch_mp3_tags(filepath: str, track: dict, album: dict) -> list[str]:
                 audio.add(cls(encoding=3, text=want))
                 added.append({"TALB": "album", "TPE2": "albumartist",
                               "TPE1": "artist"}[fid])
+
+        artist_names = _artist_names(track, album)
+        has_artists = any(f.desc == "ARTISTS" for f in audio.getall("TXXX"))
+        if artist_names and not has_artists:
+            audio.add(TXXX(encoding=3, desc="ARTISTS", text=artist_names))
+            added.append("artists")
 
         has_lyrics = bool(audio.getall("USLT"))
         has_checked = any(f.desc == "LRCLIBCHECKED" for f in audio.getall("TXXX"))

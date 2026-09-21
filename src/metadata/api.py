@@ -19,6 +19,29 @@ logger = logging.getLogger(__name__)
 
 # --- shape adapters --------------------------------------------------------
 
+def _adapt_contributors(data: dict, primary_artist: str) -> tuple[list[dict], list[str], list[str]]:
+    """Return contributors plus display-ready Main and Featured name lists."""
+    artists: list[dict] = []
+    co_artists: list[str] = []
+    featured_artists: list[str] = []
+    seen: set[str] = set()
+    primary_key = primary_artist.casefold()
+
+    for contributor in data.get("contributors") or []:
+        name = str(contributor.get("name") or "").strip()
+        role = str(contributor.get("role") or "").strip()
+        key = name.casefold()
+        if not name or key in seen:
+            continue
+        seen.add(key)
+        artists.append({"name": name, "role": role})
+        if role.casefold() == "main" and key != primary_key:
+            co_artists.append(name)
+        elif role.casefold() == "featured" and key != primary_key:
+            featured_artists.append(name)
+
+    return artists, co_artists, featured_artists
+
 def _adapt_album(data: dict, full_tracks: list[dict | None] | None = None) -> dict:
     """Map a Deezer ``/album/{id}`` response to the dict shape downstream code expects."""
     summary_tracks = data.get("tracks", {}).get("data", [])
@@ -32,6 +55,7 @@ def _adapt_album(data: dict, full_tracks: list[dict | None] | None = None) -> di
         max_disk = max(max_disk, disk)
         track_artist = (sum_t.get("artist") or {}).get("name") or \
                        (data.get("artist") or {}).get("name", "Unknown Artist")
+        artists, co_artists, featured_artists = _adapt_contributors(ft, track_artist)
         # Deezer's `gain` is ReplayGain track gain in dB (already referenced
         # against their loudness target). None when Deezer hasn't measured it.
         gain = ft.get("gain")
@@ -42,7 +66,9 @@ def _adapt_album(data: dict, full_tracks: list[dict | None] | None = None) -> di
             "discNumber": disk,
             "duration": int(ft.get("duration") or sum_t.get("duration") or 0),
             "artist": track_artist,
-            "featuredArtists": [],
+            "artists": artists,
+            "coArtists": co_artists,
+            "featuredArtists": featured_artists,
             "isrc": ft.get("isrc") or "",
             "copyright": "",
             "explicit": bool(sum_t.get("explicit_lyrics", False) or ft.get("explicit_lyrics", False)),
@@ -165,6 +191,7 @@ async def fetch_single_track(track_id: str) -> tuple[dict, dict]:
 
     artist_name = (track_data.get("artist") or {}).get("name") or \
                   album_ctx.get("artist", "Unknown Artist")
+    artists, co_artists, featured_artists = _adapt_contributors(track_data, artist_name)
     track_info = {
         "id": str(track_data.get("id", track_id)),
         "title": track_data.get("title", "Unknown"),
@@ -172,7 +199,9 @@ async def fetch_single_track(track_id: str) -> tuple[dict, dict]:
         "discNumber": int(track_data.get("disk_number") or 1),
         "duration": int(track_data.get("duration") or 0),
         "artist": artist_name,
-        "featuredArtists": [],
+        "artists": artists,
+        "coArtists": co_artists,
+        "featuredArtists": featured_artists,
         "isrc": track_data.get("isrc") or "",
         "copyright": "",
         "explicit": bool(track_data.get("explicit_lyrics", False)),
