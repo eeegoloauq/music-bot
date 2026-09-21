@@ -244,7 +244,38 @@ def _gate_candidate(
     return aid
 
 
-async def _search_album(artist: str, album: str, files: list[str]) -> str | None:
+def _near_miss(cand: dict, folder_artist_words: set[str],
+               folder_album_words: set[str], on_disk: int) -> str | None:
+    """Why a hit that *looks* like the album was rejected — for the dry-run
+    report, so "not found" can say "found, but…". Album title must pass
+    the same subset rule as the gate; then either the track count is off
+    (another edition) or the artist differs (a collab credited to the
+    other name, a romanised name)."""
+    nb = int(cand.get("nb_tracks") or 0)
+    # Title: the gate's subset rule ("X" ↔ "X (Deluxe)"), plus a cap on
+    # what the longer side adds — a one-word folder ("woody") buried in a
+    # longer title is a coincidence, not a near miss.
+    cand_album_words = _significant_words(cand.get("title", ""))
+    if not folder_album_words or not cand_album_words:
+        return None
+    small, big = sorted((folder_album_words, cand_album_words), key=len)
+    if len(small - big) > max(0, len(small) // 4):
+        return None
+    if len(big - small) > max(1, len(big) // 3):
+        return None
+    artist_name = (cand.get("artist") or {}).get("name", "")
+    title = f"{artist_name} — {cand.get('title', '')}"
+    # Artist first: a same-titled album by someone else is not "another
+    # edition", whatever its track count.
+    cand_artist_words = _significant_words(artist_name)
+    if folder_artist_words and not (folder_artist_words & cand_artist_words):
+        return f"found as {title} ({nb} tracks)" if nb else f"found as {title}"
+    if nb and abs(nb - on_disk) > 1:
+        return f"track count differs: {nb} on Deezer vs {on_disk} here ({title})"
+    return None
+
+
+async def _search_album(artist: str, album: str, files: list[str]) -> tuple[str | None, str | None]:
     """Identify the album on Deezer via a multi-pass search:
 
     1. Combined ``"<artist> <album>"`` query — usual case, top 5 hits gated
@@ -256,7 +287,9 @@ async def _search_album(artist: str, album: str, files: list[str]) -> str | None
        The album word-overlap gate stays in force; the track-count match
        provides the second signal.
 
-    Returns the first id that clears all gates, else ``None``.
+    Returns ``(id, None)`` for the first hit that clears all gates, else
+    ``(None, note)`` where ``note`` explains the closest rejected hit (or
+    is ``None`` when nothing came close).
     """
     cleaned_artist = _clean_search_term(artist)
     cleaned_album = _clean_search_term(album)
@@ -273,6 +306,7 @@ async def _search_album(artist: str, album: str, files: list[str]) -> str | None
         queries.append((cleaned_artist, 25, True))
 
     seen_ids: set[str] = set()
+    note: str | None = None
     for query, limit, require_album_overlap in queries:
         try:
             candidates = await deezer.search_albums(query, limit=limit)
@@ -285,10 +319,12 @@ async def _search_album(artist: str, album: str, files: list[str]) -> str | None
                 require_album_overlap=require_album_overlap,
             )
             if aid and aid not in seen_ids:
-                return aid
+                return aid, None
             if aid:
                 seen_ids.add(aid)
-    return None
+            if note is None:
+                note = _near_miss(cand, folder_artist_words, folder_album_words, on_disk)
+    return None, note
 
 
 async def _try_lastfm_only(artist: str, album: str) -> list[str]:
@@ -509,8 +545,9 @@ async def plan_album(folder: str, artist: str, album: str) -> AlbumPlan:
                 plan.album_id = tag[1]
                 break
 
+        search_note: str | None = None
         if not plan.album_id:
-            plan.album_id = await _search_album(artist, album, plan.files)
+            plan.album_id, search_note = await _search_album(artist, album, plan.files)
 
         if plan.album_id:
             try:
@@ -548,7 +585,8 @@ async def plan_album(folder: str, artist: str, album: str) -> AlbumPlan:
         )
         return plan
 
-    plan.error = "could not identify album"
+    plan.error = ("could not identify album — " + search_note if search_note
+                  else "could not identify album")
     return plan
 
 
