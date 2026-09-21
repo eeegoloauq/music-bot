@@ -6,17 +6,20 @@ import os
 import pytest
 
 import upload_import
+from metadata.deezer import _clean_title
 from upload_import import (
-    _read_signals, identify_album, import_staged_album, _stringify,
+    _consensus_artist, _read_signals, describe_identify_failure,
+    identify_album, import_staged_album, _stringify,
 )
 
 
 SIGNALS_EMPTY = {"urls": [], "isrcs": [], "upcs": [], "artist": "", "album": ""}
 
 
-def set_signals(monkeypatch, **overrides):
+def set_signals(monkeypatch, file_artist=None, **overrides):
     sig = {**SIGNALS_EMPTY, **overrides}
     monkeypatch.setattr(upload_import, "_read_signals", lambda _dir: sig)
+    monkeypatch.setattr(upload_import, "_consensus_artist", lambda _dir: file_artist)
     return sig
 
 
@@ -94,9 +97,136 @@ async def test_name_fallback_tries_both_orders(monkeypatch):
     assert await identify_album("/staging", "Can't Hesitate - $wagZilla.zip") == "88"
 
 
+async def test_file_name_artist_rung_precedes_bare_name(monkeypatch):
+    # untagged rip: files "NN. Christ Dillinger - Title.flac", zip carries the
+    # year — the artist comes from the file names, the title from the zip name
+    set_signals(monkeypatch, file_artist="Christ Dillinger")
+    seen = []
+
+    async def find(artist, title):
+        seen.append((artist, title))
+        return "1057517592" if artist == "Christ Dillinger" else None
+
+    monkeypatch.setattr(upload_import.deezer, "find_album_id", find)
+    diag = {}
+    got = await identify_album("/staging", "Christ Dillinger - I Hate Rap (2026).zip",
+                               diag=diag)
+    assert got == "1057517592"
+    assert seen == [("Christ Dillinger", "I Hate Rap (2026)")]
+    assert diag["file_artist"] == "Christ Dillinger"
+
+
+async def test_file_name_artist_rung_uses_whole_name_without_artist(monkeypatch):
+    set_signals(monkeypatch, file_artist="Christ Dillinger")
+    seen = []
+
+    async def find(artist, title):
+        seen.append((artist, title))
+        return "1057517592"
+
+    monkeypatch.setattr(upload_import.deezer, "find_album_id", find)
+    assert await identify_album("/staging", "I Hate Rap (2026)") == "1057517592"
+    assert seen == [("Christ Dillinger", "I Hate Rap (2026)")]
+
+
 async def test_no_signals_no_id(monkeypatch):
     set_signals(monkeypatch)
     assert await identify_album("/staging", "IMG_2024") is None
+
+
+async def test_identify_failure_is_logged_and_described(monkeypatch, caplog):
+    set_signals(monkeypatch, file_artist="Christ Dillinger")
+
+    async def find(artist, title):
+        return None
+
+    monkeypatch.setattr(upload_import.deezer, "find_album_id", find)
+    diag = {}
+    with caplog.at_level("WARNING", logger="upload_import"):
+        assert await identify_album("/staging", "Christ Dillinger - I Hate Rap (2026).zip",
+                                    diag=diag) is None
+    rec = [r for r in caplog.records if "Upload identify failed" in r.getMessage()]
+    assert len(rec) == 1 and rec[0].levelname == "WARNING"
+    msg = rec[0].getMessage()
+    assert "urls=[] upcs=[] isrcs=[] artist=''" in msg
+    assert "file-name artist='Christ Dillinger'" in msg
+    assert "('Christ Dillinger', 'I Hate Rap (2026)')" in msg
+    assert diag["name_queries"] == [
+        ("Christ Dillinger", "I Hate Rap (2026)"),          # file-name rung
+        ("Christ Dillinger", "I Hate Rap (2026)"),          # name, as written
+        ("I Hate Rap (2026)", "Christ Dillinger"),          # name, swapped
+    ]
+    assert describe_identify_failure(diag) == (
+        'tags: none; name search "Christ Dillinger - I Hate Rap (2026)" — no Deezer hit')
+
+
+def test_describe_identify_failure_without_any_query():
+    diag = {"signals": {}, "tag_queries": [], "name_queries": [], "name": "IMG_2024"}
+    assert describe_identify_failure(diag) == (
+        'tags: none; name "IMG_2024" has no "Artist - Title" shape — '
+        "nothing to search Deezer with")
+
+
+async def test_year_is_dropped_from_the_deezer_query(monkeypatch):
+    queries = []
+
+    async def search_albums(q, limit=5):
+        queries.append(q)
+        return [{"id": 1057517592, "artist": {"name": "Christ Dillinger"}}]
+
+    monkeypatch.setattr(upload_import.deezer, "search_albums", search_albums)
+    assert await upload_import.deezer.find_album_id(
+        "Christ Dillinger", "I Hate Rap (2026)") == "1057517592"
+    assert queries == ['artist:"Christ Dillinger" album:"I Hate Rap"']
+
+
+def test_describe_identify_failure_lists_tag_signals():
+    diag = {"signals": {"urls": False, "upcs": True, "isrcs": False,
+                        "artist": True, "album": True},
+            "tag_queries": [("A", "B")], "name_queries": [("x", "y")], "name": "x - y"}
+    assert describe_identify_failure(diag) == (
+        'tags: UPC+artist+album; tag search "A — B"; name search "x - y" — no Deezer hit')
+
+
+def test_clean_title_strips_trailing_year():
+    assert _clean_title("I Hate Rap (2026)") == "I Hate Rap"
+    assert _clean_title("I Hate Rap [1999]") == "I Hate Rap"
+    assert _clean_title("I Hate Rap (Deluxe) (2026)") == "I Hate Rap"
+    assert _clean_title("1999") == "1999"              # bare year is a title
+    assert _clean_title("Summer (2026 Mix)") == "Summer"  # decor, not year rule
+
+
+def test_consensus_artist_needs_half_the_files(tmp_path):
+    for i, name in enumerate(("01. Christ Dillinger - Intro", "02 - Christ Dillinger - Rap",
+                              "03 christ dillinger - Outro", "Jay-Z - Bonus",
+                              "no dash here"), 1):
+        (tmp_path / f"{name}.flac").write_bytes(b"x")
+    (tmp_path / "cover.jpg").write_bytes(b"x")  # not audio, not counted
+    assert _consensus_artist(str(tmp_path)) == "Christ Dillinger"  # 3 of 5
+
+    split = tmp_path / "split"
+    split.mkdir()
+    (split / "01. A - x.flac").write_bytes(b"x")
+    (split / "02. B - y.flac").write_bytes(b"x")
+    (split / "03. C - z.flac").write_bytes(b"x")
+    assert _consensus_artist(str(split)) is None  # 1 of 3 each
+
+    tie = tmp_path / "tie"
+    tie.mkdir()
+    (tie / "01. A - x.flac").write_bytes(b"x")
+    (tie / "02. B - y.flac").write_bytes(b"x")
+    assert _consensus_artist(str(tie)) is None  # 1:1 is not a consensus
+
+
+def test_track_name_number_prefix_does_not_eat_numeric_artists():
+    from upload_import import _TRACK_NAME_RE as R
+    assert R.match("01. Christ Dillinger - Intro")["artist"] == "Christ Dillinger"
+    assert R.match("01 - Christ Dillinger - Intro")["artist"] == "Christ Dillinger"
+    assert R.match("01 Christ Dillinger - Intro")["artist"] == "Christ Dillinger"
+    assert R.match("50 Cent - In Da Club")["artist"] == "50 Cent"
+    assert R.match("2 Chainz - Birthday Song")["artist"] == "2 Chainz"
+    assert R.match("Jay-Z - Encore")["artist"] == "Jay-Z"
+    assert R.match("no dash") is None
 
 
 # --- signal harvesting ------------------------------------------------------

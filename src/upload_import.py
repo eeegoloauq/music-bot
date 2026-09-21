@@ -12,7 +12,15 @@ resolves wins:
      → the same ``metadata.resolve_link`` a pasted chat link goes through
   2. ISRC / UPC tags → direct Deezer lookup
   3. artist + album text tags → Deezer search
-  4. the zip/folder name, tried as both "Artist - Title" and "Title - Artist"
+  4. the artist the audio *file names* agree on (``NN. Artist - Title``)
+     + the zip/folder name as the album title
+  5. the zip/folder name, tried as both "Artist - Title" and "Title - Artist"
+
+Rung 4 sits before the bare name because it rests on N files agreeing, not
+one free-form string: it settles which side of the name is the artist, and
+still works when the name carries no artist at all ("I Hate Rap (2026).zip").
+A miss at every rung is logged at WARNING with everything that was tried;
+``describe_identify_failure`` turns the same record into the chat reply.
 """
 
 import asyncio
@@ -46,6 +54,13 @@ _LINK_RE = re.compile(
     re.IGNORECASE,
 )
 _ISRC_RE = re.compile(r"^[A-Z]{2}[A-Z0-9]{3}\d{7}$")
+# Track file names as rippers write them: "01. Artist - Title",
+# "01 - Artist - Title", "01 Artist - Title", "Artist - Title". The number
+# is optional and needs a separator or a leading zero — "50 Cent - Title"
+# and "2 Chainz - Title" are artists, not track numbers. The first " - "
+# splits artist from title.
+_TRACK_NAME_RE = re.compile(
+    r"^(?:(?:\d{1,3}\s*[.\-)]|0\d)\s+)?(?P<artist>.+?)\s+-\s+(?P<title>.+)$")
 
 
 def _stringify(val) -> list[str]:
@@ -109,6 +124,75 @@ def _read_signals(staging_dir: str) -> dict:
     }
 
 
+def _consensus_artist(staging_dir: str) -> str | None:
+    """The artist at least half of the staged audio file names name in an
+    ``[NN.] Artist - Title`` pattern, or None. Untagged rips usually still
+    carry the artist in every file name."""
+    votes: dict[str, str] = {}
+    counts: dict[str, int] = {}
+    n_files = 0
+    for _root, _dirs, files in os.walk(staging_dir):
+        for fname in sorted(files):  # first spelling seen wins the casing
+            stem, ext = os.path.splitext(fname)
+            if ext.lower() not in AUDIO_EXTS:
+                continue
+            n_files += 1
+            m = _TRACK_NAME_RE.match(stem.strip())
+            if not m:
+                continue
+            artist = m.group("artist").strip()
+            key = artist.casefold()
+            votes.setdefault(key, artist)
+            counts[key] = counts.get(key, 0) + 1
+    if not counts:
+        return None
+    key, n = max(counts.items(), key=lambda kv: kv[1])
+    if n * 2 < n_files or sum(1 for c in counts.values() if c == n) > 1:
+        return None  # under half, or a tie — no consensus
+    return votes[key]
+
+
+def _strip_zip(fallback_name: str) -> str:
+    return re.sub(r"\.zip$", "", fallback_name, flags=re.IGNORECASE).strip()
+
+
+def _title_from_name(name: str, artist: str) -> str:
+    """Album title from a zip/folder name once the artist is known: drop the
+    side of ``Artist - Title`` that is the artist, else keep the whole name
+    (the year is stripped by deezer._clean_title on search)."""
+    if " - " in name:
+        left, _, right = name.partition(" - ")
+        if left.strip().casefold() == artist.casefold():
+            return right.strip()
+        if right.strip().casefold() == artist.casefold():
+            return left.strip()
+    return name
+
+
+def describe_identify_failure(diag: dict) -> str:
+    """One honest clause for the chat reply: which signals the files had and
+    what went to Deezer. ``diag`` is the dict ``identify_album`` fills."""
+    sig = diag.get("signals") or {}
+    have = [label for key, label in (("urls", "URL"), ("upcs", "UPC"),
+                                     ("isrcs", "ISRC"), ("artist", "artist"),
+                                     ("album", "album"))
+            if sig.get(key)]
+    parts = ["tags: " + ("+".join(have) if have else "none")]
+    tag_q = diag.get("tag_queries") or []
+    if tag_q:
+        parts.append("tag search " + ", ".join(f'"{a} — {t}"' for a, t in tag_q))
+    name = diag.get("name")
+    name_q = diag.get("name_queries") or []
+    if name and name_q:
+        parts.append(f'name search "{name}"')
+    elif name:
+        parts.append(f'name "{name}" has no "Artist - Title" shape')
+    searched = bool(tag_q or name_q or sig.get("urls") or sig.get("upcs")
+                    or sig.get("isrcs"))
+    return "; ".join(parts) + (" — no Deezer hit" if searched
+                               else " — nothing to search Deezer with")
+
+
 async def _album_of_track(track_id: str) -> str | None:
     with contextlib.suppress(Exception):
         t = await deezer.get_track(track_id)
@@ -118,9 +202,19 @@ async def _album_of_track(track_id: str) -> str | None:
     return None
 
 
-async def identify_album(staging_dir: str, fallback_name: str) -> str | None:
-    """Walk the ladder; return a Deezer album id or None."""
+async def identify_album(staging_dir: str, fallback_name: str,
+                         diag: dict | None = None) -> str | None:
+    """Walk the ladder; return a Deezer album id or None.
+
+    ``diag`` (optional) collects what was tried for the failure report:
+    ``signals`` (which tag signals the files had), ``tag_queries`` and
+    ``name_queries`` (artist/title pairs sent to Deezer), ``file_artist``
+    (the file-name consensus) and ``name`` (the zip/folder name searched)."""
+    diag = diag if diag is not None else {}
     sig = await asyncio.to_thread(_read_signals, staging_dir)
+    diag["signals"] = {k: bool(v) for k, v in sig.items()}
+    diag["tag_queries"] = []
+    diag["name_queries"] = []
 
     for url in sig["urls"]:
         result = None
@@ -149,24 +243,49 @@ async def identify_album(staging_dir: str, fallback_name: str) -> str | None:
                 return str(aid)
 
     if sig["artist"] and sig["album"]:
+        diag["tag_queries"].append((sig["artist"], sig["album"]))
         with contextlib.suppress(Exception):
             aid = await deezer.find_album_id(sig["artist"], sig["album"])
             if aid:
                 logger.info("Upload identified via artist/album tags → %s", aid)
                 return aid
 
+    # Untagged rips: the file names still agree on an artist, and the
+    # zip/folder name is the album.
+    name = _strip_zip(fallback_name)
+    diag["name"] = name
+    file_artist = await asyncio.to_thread(_consensus_artist, staging_dir)
+    diag["file_artist"] = file_artist
+    if file_artist and name:
+        title = _title_from_name(name, file_artist)
+        diag["name_queries"].append((file_artist, title))
+        with contextlib.suppress(Exception):
+            aid = await deezer.find_album_id(file_artist, title)
+            if aid:
+                logger.info("Upload identified via file names %r + name %r → album %s",
+                            file_artist, name, aid)
+                return aid
+
     # Last resort: the zip/folder name. Both orders — the wild carries
     # "Artist - Title" and "Title - Artist" about equally often.
-    name = re.sub(r"\.zip$", "", fallback_name, flags=re.IGNORECASE).strip()
     if " - " in name:
         left, _, right = name.partition(" - ")
         for artist, title in ((left.strip(), right.strip()),
                               (right.strip(), left.strip())):
+            diag["name_queries"].append((artist, title))
             with contextlib.suppress(Exception):
                 aid = await deezer.find_album_id(artist, title)
                 if aid:
                     logger.info("Upload identified via name %r → album %s", name, aid)
                     return aid
+
+    logger.warning(
+        "Upload identify failed for %r: signals urls=%s upcs=%s isrcs=%s artist=%r "
+        "album=%r; file-name artist=%r; tag queries=%s; name queries=%s",
+        fallback_name, sig["urls"][:5], sig["upcs"][:5], sig["isrcs"][:5],
+        sig["artist"], sig["album"], file_artist, diag["tag_queries"],
+        diag["name_queries"],
+    )
     return None
 
 

@@ -341,7 +341,7 @@ async def test_network_error_on_cosmetic_edit_no_longer_aborts_upload(
     """
     imported = []
 
-    async def fake_identify(staging_dir, name):
+    async def fake_identify(staging_dir, name, diag=None):
         return "42"
 
     async def fake_fetch(album_id):
@@ -392,7 +392,7 @@ async def test_identified_upload_reports_queue_before_waiting(
             edits.append(text)
             return True
 
-    async def fake_identify(_staging_dir, _name):
+    async def fake_identify(_staging_dir, _name, diag=None):
         return "42"
 
     async def fake_fetch(_album_id):

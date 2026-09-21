@@ -167,6 +167,9 @@ _TITLE_DECOR_RE = _re.compile(
     r"special|bonus[^)\]]*|remaster(?:ed)?|version|edition|mix)[^)\]]*[\)\]]",
     _re.IGNORECASE,
 )
+# A trailing release year — "I Hate Rap (2026)" on a zip or folder name —
+# is never part of Deezer's title; left in, the strict query finds nothing.
+_TRAILING_YEAR_RE = _re.compile(r"\s*[\(\[](?:19|20)\d{2}[\)\]]\s*$")
 _FEAT_RE = _re.compile(r"\s+(?:feat\.?|ft\.?|featuring)\s+.+$", _re.IGNORECASE)
 _AMP_COARTIST_RE = _re.compile(r"\s+&\s+.+$")  # only "& X" (preserve "Tyler, The Creator")
 
@@ -179,6 +182,7 @@ def _clean_artist(s: str) -> str:
 
 def _clean_title(s: str) -> str:
     s = _TITLE_DECOR_RE.sub("", s or "")
+    s = _TRAILING_YEAR_RE.sub("", s)
     s = _FEAT_RE.sub("", s)
     return s.strip()
 

@@ -982,15 +982,17 @@ async def _handle_upload(io: ChatIO, report: uploads.IntakeReport) -> None:
         io, f"📦 {report.name}: {len(report.audio)} audio file(s) received. "
         "Identifying release…")
     album_id = None
+    diag: dict = {}
     try:
-        album_id = await upload_import.identify_album(report.staging_dir, report.name)
+        album_id = await upload_import.identify_album(
+            report.staging_dir, report.name, diag=diag)
     except Exception as e:
         logger.error("Upload identify failed for %s: %s", report.name, e)
     if not album_id:
         await safe_edit(
             status_msg,
-            f"❓ {report.name}: couldn't match this to a release — no usable "
-            "URL/ISRC/UPC/artist tags, and the name didn't search. Files are "
+            f"❓ {report.name}: couldn't match this to a release — "
+            f"{upload_import.describe_identify_failure(diag)}. Files are "
             "kept in uploads staging; nothing was filed.", final=True)
         return
 
