@@ -39,7 +39,7 @@ from metadata.lastfm import fetch_album_tags
 from library.files import (
     _comment_value, _resolve_dir_canonical, _sanitize, _normalize_title,
 )
-from library.tagger import _format_artist, _format_title
+from library.tagger import _artist_names, _format_artist, _format_title
 
 logger = logging.getLogger(__name__)
 
@@ -311,13 +311,14 @@ def _read_file_summary(filepath: str) -> dict:
     out = {"path": filepath, "ext": ext, "comment": "", "genres": [],
            "artist": "", "album": "", "albumartist": "",
            "releasedate": "", "has_rg": False, "isrc": "",
-           "tracknumber": 0, "title": ""}
+           "tracknumber": 0, "title": "", "has_artists": False}
     try:
         if ext == ".flac":
             f = FLAC(filepath)
             out["comment"] = next(iter(f.get("comment") or []), "")
             out["genres"] = [str(g) for g in (f.get("genre") or [])]
             out["artist"] = next(iter(f.get("artist") or []), "")
+            out["has_artists"] = bool(f.get("artists"))
             out["album"] = next(iter(f.get("album") or []), "")
             out["albumartist"] = next(iter(f.get("albumartist") or []), "")
             out["releasedate"] = next(iter(f.get("releasedate") or []), "")
@@ -333,6 +334,7 @@ def _read_file_summary(filepath: str) -> dict:
             gen = f.get("\xa9gen", [])
             out["genres"] = [str(g) for g in gen] if gen else []
             out["artist"] = str(f.get("\xa9ART", [""])[0])
+            out["has_artists"] = bool(f.get("----:com.apple.iTunes:ARTISTS"))
             out["album"] = str(f.get("\xa9alb", [""])[0])
             out["albumartist"] = str(f.get("aART", [""])[0])
             day = f.get("\xa9day", [""])
@@ -356,6 +358,9 @@ def _read_file_summary(filepath: str) -> dict:
             tcon = tags.get("TCON")
             out["genres"] = [str(x) for x in (tcon.text if tcon else [])]
             out["artist"] = str(tags.get("TPE1").text[0]) if tags.get("TPE1") else ""
+            out["has_artists"] = any(
+                f.desc.upper() == "ARTISTS" and bool(f.text) for f in tags.getall("TXXX")
+            )
             out["album"] = str(tags.get("TALB").text[0]) if tags.get("TALB") else ""
             out["albumartist"] = str(tags.get("TPE2").text[0]) if tags.get("TPE2") else ""
             tdrl = tags.get("TDRL") or tags.get("TDRC")
@@ -460,6 +465,22 @@ def _compute_changes(folder: str, artist: str, album: str,
     )
     if n_casing:
         changes.append(f"album/albumartist casing: {n_casing}/{n_files}")
+
+    n_missing_artists = 0
+    n_display_artist = 0
+    for summary in files_summary:
+        track = _match_track(summary, fresh_meta.get("tracks") or [])
+        if not track:
+            continue
+        if _artist_names(track, fresh_meta) and not summary.get("has_artists"):
+            n_missing_artists += 1
+        canonical_artist = _format_artist(track, fresh_meta)
+        if canonical_artist and summary["artist"] != canonical_artist:
+            n_display_artist += 1
+    if n_missing_artists:
+        changes.append(f"artists: {n_missing_artists}/{n_files} missing")
+    if n_display_artist:
+        changes.append(f"track artist: {n_display_artist}/{n_files} differs")
 
     return (
         changes,
@@ -652,6 +673,7 @@ def _build_canonical_flac(track: dict, album: dict) -> dict:
         out["replaygain_reference_loudness"] = "89.0 dB"
 
     out["__genres__"] = list(album.get("genres") or [])
+    out["__artists__"] = _artist_names(track, album)
     return out
 
 
@@ -676,6 +698,11 @@ def _retag_flac_surgical(filepath: str, track: dict, album: dict) -> bool:
         if current != [want]:
             audio[key] = want
             changed = True
+
+    artist_names = canonical.get("__artists__") or []
+    if artist_names and "artists" not in audio:
+        audio["artists"] = artist_names
+        changed = True
 
     # Genres are union — append Last.fm / Deezer genres without dropping
     # whatever the file already had.
@@ -756,6 +783,12 @@ def _retag_m4a_surgical(filepath: str, track: dict, album: dict) -> bool:
         if current_str != want:
             audio[key] = [want]
             changed = True
+
+    artists_key = "----:com.apple.iTunes:ARTISTS"
+    artist_names = _artist_names(track, album)
+    if artist_names and artists_key not in audio:
+        audio[artists_key] = [MP4FreeForm(name.encode("utf-8")) for name in artist_names]
+        changed = True
 
     want_trkn = (num, total_tracks)
     if audio.get("trkn") != [want_trkn]:
@@ -882,6 +915,11 @@ def _retag_mp3_surgical(filepath: str, track: dict, album: dict) -> bool:
     _set_text(TPE1, artist_str)
     _set_text(TPE2, album.get("artist") or artist_str)
     _set_text(TALB, album.get("title", "") or "")
+
+    artist_names = _artist_names(track, album)
+    if artist_names and not any(f.desc == "ARTISTS" for f in audio.getall("TXXX")):
+        audio.add(TXXX(encoding=3, desc="ARTISTS", text=artist_names))
+        changed = True
     _set_text(
         TRCK, f"{num}/{total_tracks}" if total_tracks else str(num),
     )
