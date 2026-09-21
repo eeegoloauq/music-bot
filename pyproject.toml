@@ -1,6 +1,8 @@
 [project]
 name = "music-bot"
-version = "3.0.3"
+# Not a package (tool.uv.package = false): the release version is the git
+# tag, and the image is tagged from it in .github/workflows/release.yml.
+version = "0.0.0"
 description = "Telegram bot for Soulseek music downloads via slskd"
 license = "MIT"
 license-files = ["LICENSE"]
