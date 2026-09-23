@@ -19,7 +19,7 @@ bot.py                  URL detect, auth (ALLOWED_USERS), force-mode, dispatch; 
 The audio source sits behind `download_album` / `download_single_track`; everything upstream is
 source-agnostic. Second entry point: **local upload** (`uploads.py` watches `/data/uploads`,
 `upload_web.py` optional page, `upload_import.py` identifies by tags) — docs/local-upload-plan.md.
-`retagger.py` re-tags an existing library.
+`retagger.py` re-tags an existing library. Planned larger work: `ROADMAP.md`.
 
 ## Commands
 
