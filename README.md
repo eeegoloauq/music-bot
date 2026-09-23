@@ -1,21 +1,15 @@
-<div align="center">
-
 # Music Bot
 
-**A Telegram bot that fills your Navidrome library.**
+A Telegram bot that fills your [Navidrome](https://www.navidrome.org/) library. Paste a link to an
+album or track from almost any music service; the bot identifies it, finds the audio on
+[Soulseek](https://www.slsknet.org/), tags it and moves the files into your library.
 
 [![Release](https://img.shields.io/github/v/release/eeegoloauq/music-bot?label=release)](https://github.com/eeegoloauq/music-bot/releases/latest)
-[![Tests](https://github.com/eeegoloauq/music-bot/actions/workflows/tests.yml/badge.svg)](https://github.com/eeegoloauq/music-bot/actions/workflows/tests.yml)
+[![Tests](https://github.com/eeegoloauq/music-bot/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/eeegoloauq/music-bot/actions/workflows/tests.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-</div>
-
-Paste a link to an
-album or track from almost any music service and the bot figures out what it is, finds the audio on
-[Soulseek](https://www.slsknet.org/), tags it properly, and drops the files into your library. A
-minute later it's playing in Navidrome.
-
-It uses [Deezer](https://www.deezer.com/)'s open API for metadata (no login, no token) and downloads
-from Soulseek peers through [slskd](https://github.com/slskd/slskd).
+Metadata comes from [Deezer](https://www.deezer.com/)'s open API (no login or token). Downloads go
+through [slskd](https://github.com/slskd/slskd).
 
 <h2 align="center">Paste a link, get the album</h2>
 <p align="center">
@@ -23,14 +17,14 @@ from Soulseek peers through [slskd](https://github.com/slskd/slskd).
   <img src=".github/screenshots/download-done.jpg" width="390" alt="Finished download with summary">
 </p>
 <p align="center"><sub>The bot edits one status message the whole way: which peer it picked, each track
-as it lands, and what you actually got in the end.</sub></p>
+as it lands, and what arrived in the end.</sub></p>
 
 <h2 align="center">Search from any chat</h2>
 <p align="center">
   <img src=".github/screenshots/search.jpg" width="440" alt="Inline search">
 </p>
 <p align="center"><sub>Type <code>@yourbot</code> and a name in any chat, tap a result — the download
-starts.</sub></p>
+starts. Turn inline mode on first: <code>/setinline</code> in @BotFather.</sub></p>
 
 <h2 align="center">Share what you're playing</h2>
 <p align="center">
@@ -41,28 +35,28 @@ from your Navidrome, <code>l</code> the lyrics.</sub></p>
 
 ## What it can do
 
-- **Download albums and tracks.** Paste a link from Tidal, Spotify, Apple Music, Deezer, YouTube
+- Paste a link from Tidal, Spotify, Apple Music, Deezer, YouTube
   Music, SoundCloud, Amazon Music, or Shazam. You get FLAC with full metadata in your library.
-- **mp3 fallback.** If no peer has a lossless copy, the bot offers you an mp3 (≥ 320 kbps) with a
-  tap — it never silently downgrades quality on you.
-- **Picky about sources.** Every candidate file is duration-checked against Deezer track by track and
+- If no peer has a lossless copy, the bot offers you an mp3 (≥ 256 kbps) or
+  m4a with a tap. It never downgrades quality without asking.
+- Every candidate file is duration-checked against Deezer track by track and
   scored on match confidence and peer reliability before anything is queued. The full policy is
   written up in [docs/source-selection.md](docs/source-selection.md).
-- **Good genres.** Deezer's genres plus Last.fm community tags, so Navidrome gets useful tags like
+- Genres come from Deezer plus Last.fm community tags, so Navidrome gets tags like
   "witch house" or "future garage" instead of just "Electronic".
-- **Re-tag your library.** `/retag` walks everything you already have and refreshes the tags from
+- `/retag` goes through everything you already have and refreshes the tags from
   current metadata, without touching the audio or your embedded cover art.
-- **Bring your own files.** Drop a zip on the built-in upload page or into a watched folder —
-  identified, tagged, and filed like any download. See [Local uploads](#local-uploads).
-- **Inline search.** Type `@yourbot` in any chat to search, share what you're playing, grab lyrics,
+- Drop a zip on the built-in upload page or into a watched folder; it is identified, tagged and
+  filed like any download. See [Local uploads](#local-uploads).
+- Type `@yourbot` in any chat to search, share what you're playing, grab lyrics,
   or search your own library.
-- **Private.** Only the Telegram user IDs you list can use it.
+- Only the Telegram user IDs you list can use it.
 
 ## Setup
 
-It's one compose stack with two services: **slskd** (the Soulseek client) and **music-bot** itself,
-talking over slskd's REST API. Two files is the whole setup — `compose.yaml` and `.env` — so it also
-works fine in Dockge or Portainer. Everything you'd want to change lives in `.env`. (No Docker?
+One compose stack with two services, slskd (the Soulseek client) and music-bot, talking over slskd's
+REST API. The setup is two files, `compose.yaml` and `.env`, so it also works in Dockge or
+Portainer. Settings live in `.env`. (No Docker?
 See [Without Docker](#without-docker) below.)
 
 ```mermaid
@@ -78,68 +72,10 @@ flowchart LR
 
 ### 1. `compose.yaml`
 
-```yaml
-services:
-  slskd:
-    image: slskd/slskd:latest
-    container_name: slskd
-    user: "${MUSICBOT_UID:-1000}:${MUSICBOT_GID:-1000}"
-    restart: unless-stopped
-    environment:
-      SLSKD_SLSK_USERNAME: ${SOULSEEK_USERNAME}
-      SLSKD_SLSK_PASSWORD: ${SOULSEEK_PASSWORD}
-      SLSKD_SLSK_LISTEN_PORT: ${SLSKD_LISTEN_PORT:-50300}
-      # Download paths are set here (not in slskd.yml) so the bot and slskd
-      # always agree on where files land.
-      SLSKD_DOWNLOADS_DIR: /downloads
-      SLSKD_INCOMPLETE_DIR: /downloads/.incomplete
-      SLSKD_NO_AUTH: "true"
-      SLSKD_UMASK: "0002"
-      # Soulseek etiquette: share your library back, read-only. Remove this
-      # line if you'd rather not share anything.
-      SLSKD_SHARED_DIR: "/shared;!/shared/.slskd-downloads;!/shared/lost+found"
-      SLSKD_SLSK_DESCRIPTION: "music collector"
-    volumes:
-      # slskd state — it drops an auto-generated slskd.yml here on first run,
-      # you don't need to create or edit anything in it.
-      - ./slskd-config:/app
-      - ${MUSIC_LIBRARY_DIR:-/media/music}/.slskd-downloads:/downloads
-      - ${MUSIC_LIBRARY_DIR:-/media/music}:/shared:ro
-    ports:
-      - 127.0.0.1:5030:5030
-      - ${SLSKD_LISTEN_PORT:-50300}:${SLSKD_LISTEN_PORT:-50300}
-    # Wait until slskd has actually logged into Soulseek before starting the
-    # bot — otherwise the first search runs against an empty peer pool.
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:5030/api/v0/server | grep -q '\"isLoggedIn\":true'"]
-      interval: 5s
-      timeout: 3s
-      retries: 30
-      start_period: 15s
+Use [`compose.yaml`](compose.yaml) from this repo as is. Its comments explain each setting:
 
-  music-bot:
-    image: ghcr.io/eeegoloauq/music-bot:latest
-    container_name: music-bot
-    user: "${MUSICBOT_UID:-1000}:${MUSICBOT_GID:-1000}"
-    restart: unless-stopped
-    env_file: .env
-    environment:
-      SLSKD_HOST: http://slskd:5030
-      SLSKD_DOWNLOAD_DIR: /music/.slskd-downloads
-    volumes:
-      - ${MUSIC_LIBRARY_DIR:-/media/music}:/music
-      # Bot state: download resume journal + local-upload staging. Create the
-      # folder first so it isn't root-owned: install -d -o 1000 -g 1000 bot-data
-      - ./bot-data:/data
-    # Local-upload page (optional, see "Local uploads"): set UPLOAD_HTTP_PORT
-    # in .env and uncomment. The page has no auth — LAN at most, never public.
-    #ports:
-    #  - 127.0.0.1:${UPLOAD_HTTP_PORT:-8080}:${UPLOAD_HTTP_PORT:-8080}
-    extra_hosts:
-      - host.docker.internal:host-gateway
-    depends_on:
-      slskd:
-        condition: service_healthy
+```bash
+curl -O https://raw.githubusercontent.com/eeegoloauq/music-bot/main/compose.yaml
 ```
 
 ### 2. `.env`
@@ -193,7 +129,7 @@ See [.env.example](.env.example) for every option, including proxy support and t
 ```bash
 uv sync --frozen
 cp .env.example .env   # fill it in
-python src/bot.py      # needs slskd running and reachable
+uv run python src/bot.py   # needs slskd running and reachable
 ```
 
 ## Using it
@@ -224,8 +160,8 @@ tags library-wide; shows a preview first, then `/retag confirm` to apply).
 </p>
 
 Music you already have can go in through the same tagging/dedup pipeline: drop a `.zip` (or a
-folder of tracks) either on the upload page — set `UPLOAD_HTTP_PORT` in `.env` and uncomment the
-`ports:` lines in `compose.yaml` — or straight into `./bot-data/uploads/` (Samba/SFTP works fine).
+folder of tracks) on the upload page (set `UPLOAD_HTTP_PORT` in `.env` and uncomment the
+`ports:` lines in `compose.yaml`) or into `./bot-data/uploads/` (Samba or SFTP work too).
 The release is identified from the files' own tags (embedded streaming URL, ISRC/UPC,
 artist+album) or the zip name; if nothing matches, the bot says so and files nothing. Results
 report to Telegram like any download.
@@ -235,8 +171,7 @@ front.
 
 ## Configuration
 
-Most people only set the handful of variables in the `.env` above. Everything else has a sensible
-default:
+The `.env` above covers most setups. Other variables and their defaults:
 
 | Variable | Default | What it's for |
 |---|---|---|
@@ -252,13 +187,12 @@ default:
 
 ## How files get tagged
 
-Every download is fully tagged from Deezer — artist, album, title, track and disc numbers, date,
+Every download is tagged from Deezer: artist, album, title, track and disc numbers, date,
 ISRC, label, genres (Deezer + Last.fm), ReplayGain, embedded cover art, and synced lyrics from
 [lrclib](https://lrclib.net). FLAC, M4A, and mp3 are all handled.
 
 On download the bot replaces whatever tags the peer's file came with, so your library stays
-consistent. `/retag` is gentler: it only changes fields that are actually wrong and leaves everything
-else — including your cover art — untouched.
+consistent. `/retag` only changes fields that are wrong and leaves the rest, including cover art, as is.
 
 Versions before 3.0.2 wrote titles like `Song (Remix) ((Remix))`. To repair an existing library,
 from the directory that holds `compose.yaml`:
@@ -270,7 +204,7 @@ Without `--apply` it only lists what it would change.
 
 ## Contributing
 
-Issues and PRs are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for the dev setup and
+Issues and PRs are welcome. [CONTRIBUTING.md](CONTRIBUTING.md) covers the dev setup and
 guidelines. The test suite runs fully offline (slskd and all network calls are stubbed), so
 `uv run pytest` needs no credentials and no containers. For anything bigger than a fix, open an
 issue first.
@@ -278,10 +212,10 @@ issue first.
 ## Legal
 
 Soulseek is a peer-to-peer network, and much of what people share on it is copyrighted. Whether
-downloading any given file is legal depends on the file and on where you live — in most places,
+downloading any given file is legal depends on the file and on where you live. In most places,
 downloading music you haven't bought isn't. This bot only automates [slskd](https://github.com/slskd/slskd);
 what you fetch with it is your responsibility. Use it to preview music before buying, to fill gaps
-in albums you own, or wherever your local law allows — and support the artists you listen to.
+in albums you own, or wherever your local law allows, and support the artists you listen to.
 
 ## License
 
