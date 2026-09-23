@@ -30,7 +30,7 @@ async def test_preseed_auto_pick_makes_zero_searches(monkeypatch):
     assert auto.result.username == "gooduser"
 
 
-async def test_find_album_stops_ladder_on_complete_folder(monkeypatch):
+async def test_find_album_stops_ladder_on_complete_folder(monkeypatch, virtual_clock):
     # The album title carries a combining mark ("й"), so fold fallbacks
     # exist in the ladder — a complete match on the primary must skip them.
     resp = [{

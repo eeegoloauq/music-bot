@@ -53,7 +53,7 @@ def test_no_match_reason_prefers_lossy_over_nothing():
         "files found but none matched this track"
 
 
-async def test_find_track_diag_reports_lossy_only(monkeypatch):
+async def test_find_track_diag_reports_lossy_only(monkeypatch, virtual_clock):
     lossy_peer = [{
         "username": "mp3guy",
         "hasFreeUploadSlot": True,
