@@ -1,8 +1,15 @@
+<div align="center">
+
 # Music Bot
 
+**A Telegram bot that fills your Navidrome library.**
+
+[![Release](https://img.shields.io/github/v/release/eeegoloauq/music-bot?label=release)](https://github.com/eeegoloauq/music-bot/releases/latest)
 [![Tests](https://github.com/eeegoloauq/music-bot/actions/workflows/tests.yml/badge.svg)](https://github.com/eeegoloauq/music-bot/actions/workflows/tests.yml)
 
-A Telegram bot that fills your [Navidrome](https://www.navidrome.org/) library. Paste a link to an
+</div>
+
+Paste a link to an
 album or track from almost any music service and the bot figures out what it is, finds the audio on
 [Soulseek](https://www.slsknet.org/), tags it properly, and drops the files into your library. A
 minute later it's playing in Navidrome.
