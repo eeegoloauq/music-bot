@@ -36,6 +36,24 @@ def slskd_state(monkeypatch):
     monkeypatch.setattr(sc, "SEARCH_MIN_INTERVAL_SECS", 0.0)
 
 
+@pytest.fixture
+def virtual_clock(monkeypatch):
+    clock = types.SimpleNamespace(now=1000.0)
+    real_sleep = asyncio.sleep
+
+    async def sleep(delay):
+        clock.now += delay
+        await real_sleep(0)
+
+    client_asyncio = types.SimpleNamespace(**vars(asyncio))
+    client_asyncio.sleep = sleep
+    client_time = types.SimpleNamespace(**vars(time))
+    client_time.monotonic = lambda: clock.now
+    monkeypatch.setattr(sc, "asyncio", client_asyncio)
+    monkeypatch.setattr(sc, "time", client_time)
+    return client_time
+
+
 def make_fake_searches(script):
     """Build a fake slskd client whose search API is driven by ``script``.
 
@@ -51,7 +69,7 @@ def make_fake_searches(script):
         def search_text(self, searchText, searchTimeout, responseLimit):
             i = calls["n"]
             calls["n"] += 1
-            calls["starts"].append((time.monotonic(), searchText))
+            calls["starts"].append((sc.time.monotonic(), searchText))
             result = script(i)  # may raise
             return {"id": f"s{i}", "_responses": result}
 

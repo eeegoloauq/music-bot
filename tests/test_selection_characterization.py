@@ -311,7 +311,7 @@ def test_group_by_folder():
     assert len(by_dir["M\\Album"].files) == 2
 
 
-async def test_fallback_query_completes_a_known_folder(monkeypatch):
+async def test_fallback_query_completes_a_known_folder(monkeypatch, virtual_clock):
     """F2 (fixed): a fallback query that surfaces more files from an
     already-seen folder completes it — file lists union across the query
     ladder, and the newer response's peer stats win."""

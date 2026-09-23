@@ -7,7 +7,6 @@ raise — ``[]`` always means "ran, genuinely nothing".
 """
 
 import asyncio
-import time
 
 import pytest
 
@@ -17,19 +16,19 @@ from soulseek.client import SearchError, SearchThrottledError
 from conftest import PEER_RESPONSE, http_error, install_fake_client
 
 
-async def test_searches_serialized_and_paced(monkeypatch):
+async def test_searches_serialized_and_paced(monkeypatch, virtual_clock):
     calls = install_fake_client(monkeypatch, lambda i: PEER_RESPONSE)
-    monkeypatch.setattr(sc, "SEARCH_MIN_INTERVAL_SECS", 0.5)
+    monkeypatch.setattr(sc, "SEARCH_MIN_INTERVAL_SECS", 1.5)
 
     await asyncio.gather(sc.search("q1"), sc.search("q2"), sc.search("q3"))
 
     starts = [t for t, _ in calls["starts"]]
     gaps = [b - a for a, b in zip(starts, starts[1:])]
     assert calls["n"] == 3
-    assert all(g >= 0.45 for g in gaps), gaps
+    assert all(g >= 1.45 for g in gaps), gaps
 
 
-async def test_429_backs_off_and_retries_to_success(monkeypatch):
+async def test_429_backs_off_and_retries_to_success(monkeypatch, virtual_clock):
     def script(i):
         if i < 2:
             raise http_error(429)
@@ -38,9 +37,9 @@ async def test_429_backs_off_and_retries_to_success(monkeypatch):
     calls = install_fake_client(monkeypatch, script)
     monkeypatch.setattr(sc, "_HTTP_429_BACKOFFS_SECS", (0.2, 0.2, 0.2))
 
-    t0 = time.monotonic()
+    t0 = virtual_clock.monotonic()
     responses = await sc.search("q")
-    elapsed = time.monotonic() - t0
+    elapsed = virtual_clock.monotonic() - t0
 
     assert len(responses) == 1
     assert calls["n"] == 3
@@ -59,7 +58,7 @@ async def test_persistent_429_raises_throttled_never_empty(monkeypatch):
     assert calls["n"] == 3  # attempts = backoffs + 1
 
 
-async def test_zero_burst_cooldown_probe_recovers(monkeypatch):
+async def test_zero_burst_cooldown_probe_recovers(monkeypatch, virtual_clock):
     # Calls 0..2 come back empty (the suspicious burst); call 3 is the
     # post-cooldown probe of the same query — this time peers answer.
     def script(i):
@@ -70,9 +69,9 @@ async def test_zero_burst_cooldown_probe_recovers(monkeypatch):
 
     r1 = await sc.search("a")
     r2 = await sc.search("b")
-    t0 = time.monotonic()
+    t0 = virtual_clock.monotonic()
     r3 = await sc.search("c")
-    elapsed = time.monotonic() - t0
+    elapsed = virtual_clock.monotonic() - t0
 
     assert r1 == [] and r2 == []
     assert len(r3) == 1  # recovered via the probe
@@ -81,7 +80,7 @@ async def test_zero_burst_cooldown_probe_recovers(monkeypatch):
     assert sc._zero_streak == 0  # streak reset after the hit
 
 
-async def test_zero_burst_probe_confirms_emptiness(monkeypatch):
+async def test_zero_burst_probe_confirms_emptiness(monkeypatch, virtual_clock):
     calls = install_fake_client(monkeypatch, lambda i: [])
     monkeypatch.setattr(sc, "_ZERO_BURST_COOLDOWN_SECS", 0.2)
 
@@ -93,7 +92,7 @@ async def test_zero_burst_probe_confirms_emptiness(monkeypatch):
     await sc.search("d")
     await sc.search("e")
     assert calls["n"] == 6
-    assert sc._zero_verified_until > time.monotonic()
+    assert sc._zero_verified_until > virtual_clock.monotonic()
 
 
 async def test_non_429_api_error_raises_search_error(monkeypatch):
