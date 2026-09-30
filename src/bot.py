@@ -57,15 +57,15 @@ logger = logging.getLogger(__name__)
 # Words that force re-download (delete existing + download fresh)
 _FORCE_RE = re.compile(r"\b(re|force|redownload)\b", re.IGNORECASE)
 # Music platform URLs accepted as download triggers. metadata.resolve_link
-# handles them via platform-direct paths (Tidal/Spotify/Apple HTML scrape,
-# iTunes Lookup) with Odesli as the long-tail fallback.
+# handles Tidal/Spotify/Apple/YouTube directly; for the rest the bot replies
+# with a hint to search by name.
 _MUSIC_LINK_RE = re.compile(
     r"https?://(?:"
     r"(?:listen\.|www\.)?tidal\.com"
     r"|open\.spotify\.com|spotify\.link"
     r"|music\.apple\.com"
     r"|(?:www\.)?deezer\.com"
-    r"|music\.youtube\.com"
+    r"|(?:music\.|www\.|m\.)?youtube\.com|youtu\.be"
     r"|(?:www\.)?song\.link|(?:www\.)?odesli\.co|(?:www\.)?album\.link"
     r"|soundcloud\.com"
     r"|music\.amazon\.com"
@@ -892,12 +892,13 @@ async def _resolve_and_download(update: Update, url: str, force: bool = False):
     try:
         result = await metadata.resolve_link(url)
     except Exception as e:
-        logger.error("Odesli resolve failed for %s: %s", url, e)
+        logger.error("Resolve failed for %s: %s", url, e)
         await status_msg.edit_text(f"❌ Failed to resolve link: {_short(e)}")
         return
 
     if result is None:
-        await status_msg.edit_text("❌ Could not resolve link.")
+        await status_msg.edit_text(
+            f"❌ Could not resolve link. Search by name instead: @{update.get_bot().username} artist title")
         return
 
     link_type, album_or_track_id = result

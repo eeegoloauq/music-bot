@@ -6,11 +6,9 @@ Strategy (in order — first that succeeds wins):
   3. Tidal URL  → scrape ``og:title``     → Deezer search
   4. Spotify URL → embed page JSON        → Deezer search
   5. Apple Music URL → iTunes Lookup API  → Deezer search
-  6. Last resort: Odesli (song.link) — covers YouTube Music, SoundCloud,
-     Bandcamp, Pandora, Anghami, etc. Used here mostly for the long tail;
-     Odesli's anonymous tier is rate-limited and sometimes mis-maps to
-     Deezer, so we prefer platform-direct paths whenever we can.
+  6. YouTube / YouTube Music video → oEmbed title → Deezer search
 
+Anything else resolves to ``None``; the bot then suggests searching by name.
 Each resolver returns ``("album"|"track", deezer_id)`` or ``None``.
 """
 
@@ -21,7 +19,7 @@ import re
 
 import aiohttp
 
-from metadata.client import ODESLI_URL, _get_session
+from metadata.client import _get_session
 from metadata import deezer
 
 logger = logging.getLogger(__name__)
@@ -37,6 +35,17 @@ _SPOTIFY_RE = re.compile(
 # Apple URL: /album/<slug>/<album_id>(?i=<track_id>)?
 _APPLE_RE = re.compile(
     r"music\.apple\.com/[a-z]{2}/album/[^/]+/(\d+)(?:\?i=(\d+))?",
+    re.IGNORECASE,
+)
+# Apple song URL: /song/(<slug>/)?<track_id> — also what Shazam links map to
+_APPLE_SONG_RE = re.compile(r"music\.apple\.com/[a-z]{2}/song/(?:[^/?]+/)?(\d+)", re.IGNORECASE)
+_YOUTUBE_RE = re.compile(
+    r"(?:youtube\.com/watch\?(?:\S*?&)?v=|youtu\.be/)([\w-]{11})", re.IGNORECASE,
+)
+# "(Official Music Video)", "[4K Remaster]", "(Lyrics)" and the like
+_YT_TITLE_JUNK_RE = re.compile(
+    r"\s*[(\[][^)\]]*\b(?:official|video|audio|lyrics?|visuali[sz]er|remaster(?:ed)?|hd|4k|mv)\b"
+    r"[^)\]]*[)\]]",
     re.IGNORECASE,
 )
 _SHAZAM_SONG_RE = re.compile(r"shazam\.com/(?:[a-z]{2}(?:-[a-z]{2})?/)?song/(\d+)")
@@ -103,7 +112,6 @@ async def _resolve_tidal(url: str) -> tuple[str, str] | None:
             html = await r.text()
     except (asyncio.TimeoutError, aiohttp.ClientError):
         # Tidal sometimes times out / refuses non-browser TLS fingerprints.
-        # Quiet log — the Odesli fallback at the bottom of the chain handles it.
         logger.debug("Tidal scrape timed out for %s; falling through", url)
         return None
     except Exception as e:
@@ -179,9 +187,13 @@ async def _resolve_spotify(url: str) -> tuple[str, str] | None:
 
 async def _resolve_apple(url: str) -> tuple[str, str] | None:
     m = _APPLE_RE.search(url)
-    if not m:
+    song = _APPLE_SONG_RE.search(url)
+    if m:
+        album_id, track_id = m.group(1), m.group(2)
+    elif song:
+        album_id, track_id = None, song.group(1)
+    else:
         return None
-    album_id, track_id = m.group(1), m.group(2)
     session = await _get_session()
     target_id = track_id or album_id
     entity = "song" if track_id else "album"
@@ -214,70 +226,41 @@ async def _resolve_apple(url: str) -> tuple[str, str] | None:
     return ("album", deezer_id) if deezer_id else None
 
 
-# --- Odesli (last resort) --------------------------------------------------
-
-async def _query_odesli(url: str) -> dict | None:
+async def _resolve_youtube(url: str) -> tuple[str, str] | None:
+    """A YouTube video → Deezer track. Topic channels ("Artist - Topic") carry
+    the bare song title; music videos put "Artist - Song (Official Video)" in
+    the title. Playlists (albums) have no artist in oEmbed and stay unresolved."""
+    m = _YOUTUBE_RE.search(url)
+    if not m:
+        return None
     session = await _get_session()
-    headers = {
-        "User-Agent": _BROWSER_UA,
-        "Accept": "application/json",
-    }
-    for attempt in (1, 2):
-        try:
-            async with session.get(
-                ODESLI_URL,
-                params={"url": url},
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(connect=5, total=12),
-            ) as resp:
-                if resp.status == 429 and attempt == 1:
-                    wait = resp.headers.get("Retry-After", "")
-                    try:
-                        delay = max(5, min(int(wait), 60))
-                    except (TypeError, ValueError):
-                        delay = 30
-                    logger.info("Odesli 429 — backing off %ds before retry", delay)
-                    await asyncio.sleep(delay)
-                    continue
-                if resp.status != 200:
-                    logger.warning("Odesli HTTP %d for %s", resp.status, url)
-                    return None
-                return await resp.json(content_type=None)
-        except asyncio.TimeoutError:
-            logger.warning("Odesli timed out for %s", url)
-            return None
-        except Exception as e:
-            logger.warning("Odesli request failed: %s", e)
-            return None
-    return None
-
-
-async def _resolve_via_odesli(url: str) -> tuple[str, str] | None:
-    data = await _query_odesli(url)
-    if not data:
+    try:
+        async with session.get(
+            "https://www.youtube.com/oembed",
+            params={"format": "json", "url": f"https://www.youtube.com/watch?v={m.group(1)}"},
+            timeout=aiohttp.ClientTimeout(total=8),
+        ) as r:
+            if r.status != 200:
+                logger.warning("YouTube oEmbed returned HTTP %d for %s", r.status, url)
+                return None
+            data = await r.json(content_type=None)
+    except Exception as e:
+        logger.warning("YouTube oEmbed failed: %s", e)
         return None
-    deezer_link = (data.get("linksByPlatform") or {}).get("deezer", {}).get("url", "")
-    if deezer_link:
-        m = _DEEZER_ALBUM_RE.search(deezer_link)
-        if m:
-            return ("album", m.group(1))
-        m = _DEEZER_TRACK_RE.search(deezer_link)
-        if m:
-            return ("track", m.group(1))
-    entity = next(
-        (v for v in (data.get("entitiesByUniqueId") or {}).values()
-         if v.get("type") in ("album", "song")),
-        None,
-    )
-    if not entity:
-        return None
-    artist = entity.get("artistName") or ""
-    title = entity.get("title") or ""
+    author = (data.get("author_name") or "").strip()
+    title = _YT_TITLE_JUNK_RE.sub("", data.get("title") or "").strip()
+    if author.endswith(" - Topic"):
+        artist = author[: -len(" - Topic")]
+    elif " - " in title:
+        artist, _, title = title.partition(" - ")
+    elif author.endswith("VEVO"):
+        # VEVO channels glue the name together: "TomWaitsVEVO" → "Tom Waits"
+        artist = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", author.removesuffix("VEVO"))
+    else:
+        artist = author
+    artist, title = artist.strip(), title.strip()
     if not (artist and title):
         return None
-    if entity["type"] == "album":
-        deezer_id = await deezer.find_album_id(artist, title)
-        return ("album", deezer_id) if deezer_id else None
     deezer_id = await deezer.find_track_id(artist, title)
     return ("track", deezer_id) if deezer_id else None
 
@@ -296,11 +279,9 @@ async def resolve_link(url: str) -> tuple[str, str] | None:
     # 2) Shazam → Apple Music URL
     url = await _shazam_to_apple(url)
 
-    # 3..5) platform-direct resolvers (no Odesli needed)
-    for resolver in (_resolve_tidal, _resolve_spotify, _resolve_apple):
+    # 3..6) platform-direct resolvers
+    for resolver in (_resolve_tidal, _resolve_spotify, _resolve_apple, _resolve_youtube):
         result = await resolver(url)
         if result:
             return result
-
-    # 6) last-resort Odesli for everything else (YouTube Music, SoundCloud, ...)
-    return await _resolve_via_odesli(url)
+    return None

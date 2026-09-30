@@ -35,8 +35,9 @@ from your Navidrome, <code>l</code> the lyrics.</sub></p>
 
 ## What it can do
 
-- Paste a link from Tidal, Spotify, Apple Music, Deezer, YouTube
-  Music, SoundCloud, Amazon Music, or Shazam. You get FLAC with full metadata in your library.
+- Paste a link from Tidal, Spotify, Apple Music, Deezer, Shazam, or a YouTube / YouTube Music
+  track. You get FLAC with full metadata in your library. For other services, search by name
+  with `@yourbot`.
 - If no peer has a lossless copy, the bot offers you an mp3 (≥ 256 kbps) or
   m4a with a tap. It never downgrades quality without asking.
 - Every candidate file is duration-checked against Deezer track by track and
