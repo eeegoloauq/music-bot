@@ -4,7 +4,7 @@ Strategy (in order — first that succeeds wins):
   1. Direct Deezer URL → parse the ID, zero network
   2. Shazam → Apple Music URL preprocess
   3. Tidal URL  → scrape ``og:title``     → Deezer search
-  4. Spotify URL → scrape ``og:title``    → Deezer search
+  4. Spotify URL → embed page JSON        → Deezer search
   5. Apple Music URL → iTunes Lookup API  → Deezer search
   6. Last resort: Odesli (song.link) — covers YouTube Music, SoundCloud,
      Bandcamp, Pandora, Anghami, etc. Used here mostly for the long tail;
@@ -15,6 +15,7 @@ Each resolver returns ``("album"|"track", deezer_id)`` or ``None``.
 """
 
 import asyncio
+import json
 import logging
 import re
 
@@ -44,8 +45,6 @@ _SHAZAM_DISCOVERY_URL = "https://www.shazam.com/discovery/v5/en-US/US/web/-/trac
 
 # og:title formats we parse:
 #   Tidal   — "Artist - Album"  (sometimes "Artist & Co - Album")
-#   Spotify — "Album - Album by Artist | Spotify" /
-#             "Track - song and lyrics by Artist | Spotify"
 def _og_meta(html: str, prop: str) -> str | None:
     """Return the ``content`` of ``<meta property="og:{prop}" content="...">``,
     or None. One helper for the og:title / og:description scrapes below."""
@@ -123,45 +122,55 @@ async def _resolve_tidal(url: str) -> tuple[str, str] | None:
     return (typ, deezer_id) if deezer_id else None
 
 
+_NEXT_DATA_RE = re.compile(
+    r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', re.DOTALL,
+)
+
+
+def _spotify_embed_artist_title(html: str) -> tuple[str, str]:
+    """``(artist, title)`` from a Spotify embed page, or ``("", "")``.
+    Tracks list their artists; albums carry the artist in ``subtitle``."""
+    m = _NEXT_DATA_RE.search(html)
+    if not m:
+        return "", ""
+    try:
+        entity = json.loads(m.group(1))["props"]["pageProps"]["state"]["data"]["entity"]
+    except (ValueError, KeyError, TypeError):
+        return "", ""
+    title = (entity.get("name") or entity.get("title") or "").strip()
+    artists = entity.get("artists") or []
+    artist = (artists[0].get("name") if artists else None) or entity.get("subtitle") or ""
+    return artist.strip(), title
+
+
 async def _resolve_spotify(url: str) -> tuple[str, str] | None:
     m = _SPOTIFY_RE.search(url)
     if not m:
         return None
-    typ = m.group(1).lower()
-    # Spotify HTML page has: og:title="<Title> - Album by <Artist> | Spotify"
-    # for albums, og:description="<Artist> · album · <Year> · <N> songs"
+    typ, spotify_id = m.group(1).lower(), m.group(2)
+    # open.spotify.com renders og: tags only for non-browser user agents; with
+    # a browser UA like ours it serves the JS app shell and no metadata at all,
+    # so the og: scrape came back empty for every link. The embed player page
+    # ships the entity as JSON in __NEXT_DATA__ whatever the user agent.
+    embed_url = f"https://open.spotify.com/embed/{typ}/{spotify_id}"
     session = await _get_session()
     try:
         async with session.get(
-            url,
+            embed_url,
             headers={"User-Agent": _BROWSER_UA, "Accept": "text/html"},
             timeout=aiohttp.ClientTimeout(total=8),
         ) as r:
             if r.status != 200:
+                logger.warning("Spotify embed returned HTTP %d for %s", r.status, url)
                 return None
             html = await r.text()
     except Exception as e:
-        logger.warning("Spotify scrape failed: %s", e)
+        logger.warning("Spotify embed fetch failed: %s", e)
         return None
 
-    # og:title → "Blonde - Album by Frank Ocean | Spotify"
-    # og:description → "Frank Ocean · album · 2016 · 17 songs"
-    title_full = _og_meta(html, "title")
-    desc = _og_meta(html, "description")
-    if not title_full or not desc:
-        return None
-    title_full = title_full.strip()
-    desc = desc.strip()
-    # Title parsing: "Blonde - Album by Frank Ocean | Spotify"
-    #                "Pyramids - song and lyrics by Frank Ocean | Spotify"
-    title_match = re.match(
-        r"^(.+?)\s*-\s*(?:Album|Single|EP|song(?:\s+and\s+lyrics)?)\s+by\s+",
-        title_full, re.IGNORECASE,
-    )
-    title = title_match.group(1).strip() if title_match else title_full.split(" - ", 1)[0].strip()
-    # Artist from description: "<Artist> · album · ..."  →  before the first " · "
-    artist = desc.split(" · ", 1)[0].strip() if " · " in desc else ""
+    artist, title = _spotify_embed_artist_title(html)
     if not (artist and title):
+        logger.warning("Spotify embed: no artist/title for %s", url)
         return None
     finder = deezer.find_album_id if typ == "album" else deezer.find_track_id
     deezer_id = await finder(artist, title)
