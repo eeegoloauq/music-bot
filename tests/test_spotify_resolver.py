@@ -71,6 +71,8 @@ async def test_album_artist_comes_from_subtitle(monkeypatch, session):
 @pytest.mark.parametrize("status,html", [
     (200, APP_SHELL),
     (200, embed_page({"type": "track", "name": "No Artist"})),
+    (200, embed_page(None)),
+    (200, embed_page({"type": "track", "name": "Song", "artists": [None]})),
     (200, '<script id="__NEXT_DATA__" type="application/json">{not json</script>'),
     (404, embed_page(TRACK)),
 ])

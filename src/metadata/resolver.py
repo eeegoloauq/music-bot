@@ -135,12 +135,12 @@ def _spotify_embed_artist_title(html: str) -> tuple[str, str]:
         return "", ""
     try:
         entity = json.loads(m.group(1))["props"]["pageProps"]["state"]["data"]["entity"]
-    except (ValueError, KeyError, TypeError):
+        title = (entity.get("name") or entity.get("title") or "").strip()
+        artists = entity.get("artists") or []
+        artist = (artists[0].get("name") if artists else None) or entity.get("subtitle") or ""
+        return artist.strip(), title
+    except (ValueError, KeyError, TypeError, AttributeError, IndexError):
         return "", ""
-    title = (entity.get("name") or entity.get("title") or "").strip()
-    artists = entity.get("artists") or []
-    artist = (artists[0].get("name") if artists else None) or entity.get("subtitle") or ""
-    return artist.strip(), title
 
 
 async def _resolve_spotify(url: str) -> tuple[str, str] | None:
