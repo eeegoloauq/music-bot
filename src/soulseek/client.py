@@ -615,6 +615,12 @@ async def get_active_download_state(username: str, filename: str) -> str | None:
 
 _QUEUE_POSITION_INTERVAL_SECS = 30.0
 _QUEUE_HEARTBEAT_SECS = 5.0
+# A transfer that has left the queue but moved no bytes for this long is
+# given up on, so the caller moves to the next peer instead of holding the
+# slot until the per-attempt timeout (15 min by default). 0 disables it.
+# Waiting in a peer's queue never counts — that stays with the timeout.
+TRANSFER_STALL_SECS = int(os.environ.get("SLSKD_STALL_SECS", "120"))
+STALLED_STATE = "Stalled, ClientSide"
 
 
 async def _get_queue_position(username: str, transfer_id: str) -> int | None:
@@ -644,6 +650,7 @@ async def wait_for_files(
     poll_interval: float = 2.0,
     progress_cb=None,
     state_cb=None,
+    stall_secs: int | None = None,
 ) -> dict[str, str]:
     """Poll slskd until each target filename reports completed or failed.
 
@@ -653,8 +660,12 @@ async def wait_for_files(
     queued_seconds)`` on state changes and while remotely queued.
 
     Returns ``{filename: state}`` for every requested file. ``state`` is
-    "Completed, Succeeded" on success or whatever slskd reports otherwise.
+    "Completed, Succeeded" on success or whatever slskd reports otherwise —
+    or ``STALLED_STATE`` when a started transfer moved no bytes for
+    ``stall_secs`` (default ``TRANSFER_STALL_SECS``; 0 disables the check).
     """
+    if stall_secs is None:
+        stall_secs = TRANSFER_STALL_SECS
     pending = set(target_filenames)
     states: dict[str, str] = {}
     start = time.monotonic()
@@ -665,6 +676,8 @@ async def wait_for_files(
     queue_positions: dict[str, int | None] = {}
     last_lookup: dict[str, float] = {}
     position_tasks: dict[str, asyncio.Task] = {}
+    best_bytes: dict[str, int] = {}
+    last_gain: dict[str, float] = {}
 
     try:
         while pending and (time.monotonic() - start) < timeout_secs:
@@ -731,6 +744,22 @@ async def wait_for_files(
 
                 if _state_is_complete(state) or _state_is_failed(state):
                     states[fname] = state
+                    pending.discard(fname)
+                    continue
+
+                # Stall guard: only once the peer has started sending. The
+                # clock restarts whenever the byte count grows, so a slow but
+                # moving transfer is never cut off.
+                if not stall_secs or "queued" in state.lower():
+                    last_gain.pop(fname, None)
+                elif fname not in last_gain or bytes_done > best_bytes[fname]:
+                    best_bytes[fname] = bytes_done
+                    last_gain[fname] = now
+                elif now - last_gain[fname] >= stall_secs:
+                    logger.info("Transfer of %s from %s stalled: no bytes for %ds "
+                                "at %.0f%% — giving up on this peer",
+                                fname, username, stall_secs, pct)
+                    states[fname] = STALLED_STATE
                     pending.discard(fname)
             await asyncio.sleep(poll_interval)
     finally:
