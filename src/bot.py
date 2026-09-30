@@ -384,8 +384,11 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=_inline_shortcuts(),
     )
     # Pinned, the shortcut buttons stay one tap away at the top of the chat.
+    # Only once: every pin also posts a "pinned" service line.
     with contextlib.suppress(TelegramError):
-        await msg.pin(disable_notification=True)
+        pinned = (await context.bot.get_chat(msg.chat_id)).pinned_message
+        if not (pinned and pinned.from_user and pinned.from_user.id == context.bot.id):
+            await msg.pin(disable_notification=True)
 
 
 def _inline_shortcuts() -> InlineKeyboardMarkup:

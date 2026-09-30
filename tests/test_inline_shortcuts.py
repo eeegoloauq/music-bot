@@ -39,3 +39,19 @@ async def test_button_query_reaches_its_mode(monkeypatch, query, handler):
 
 def test_send_to_chat_button_shares_now_playing():
     assert _buttons()[-1].switch_inline_query == "np"
+
+
+@pytest.mark.parametrize("pinned_by,pins", [(None, 1), (42, 0), (7, 1)])
+async def test_start_pins_the_shortcuts_only_once(monkeypatch, pinned_by, pins):
+    monkeypatch.setattr(bot, "ALLOWED_USERS", [1])
+    msg = types.SimpleNamespace(chat_id=1, pin=AsyncMock())
+    pinned = (types.SimpleNamespace(from_user=types.SimpleNamespace(id=pinned_by))
+              if pinned_by else None)
+    fake_bot = types.SimpleNamespace(
+        id=42, get_me=AsyncMock(return_value=types.SimpleNamespace(username="b")),
+        get_chat=AsyncMock(return_value=types.SimpleNamespace(pinned_message=pinned)))
+    update = types.SimpleNamespace(
+        effective_user=types.SimpleNamespace(id=1),
+        message=types.SimpleNamespace(reply_text=AsyncMock(return_value=msg)))
+    await bot.cmd_start(update, types.SimpleNamespace(bot=fake_bot, args=[]))
+    assert msg.pin.await_count == pins
