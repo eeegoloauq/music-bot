@@ -10,5 +10,3 @@ Larger work that shouldn't be done in passing. Remove an item when it ships.
 - **Auth for the upload page.** `upload_web.py` has no auth and binds `0.0.0.0`; it's safe only
   while its port stays unpublished in `compose.yaml`. Add a token or bind to loopback before anyone
   exposes it.
-- **Stale upload docs.** `.env.example` and the `uploads.py` docstring still say uploads only land in
-  a temp dir; the bot now identifies and imports them.
