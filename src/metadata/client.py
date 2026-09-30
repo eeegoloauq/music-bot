@@ -8,7 +8,6 @@ import aiohttp
 logger = logging.getLogger(__name__)
 
 LRCLIB_URL = "https://lrclib.net/api/get"
-ODESLI_URL = "https://api.song.link/v1-alpha.1/links"
 DEEZER_API = "https://api.deezer.com"
 
 _session: aiohttp.ClientSession | None = None
@@ -28,7 +27,7 @@ async def _get_session() -> aiohttp.ClientSession:
         # trust_env=True so HTTP_PROXY / HTTPS_PROXY / NO_PROXY are respected
         # (aiohttp's default is False — env vars get ignored without this).
         # Operators whose proxy gets throttled by a specific upstream
-        # (Odesli, Deezer, lrclib) add that host to NO_PROXY to send those
+        # (Deezer, lrclib) add that host to NO_PROXY to send those
         # requests direct while keeping the proxy for everything else.
         _session = aiohttp.ClientSession(trust_env=True)
     return _session

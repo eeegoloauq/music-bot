@@ -8,7 +8,7 @@ library. Python 3.12, `uv`, `python-telegram-bot`, `aiohttp`, `mutagen`, slskd (
 ```
 bot.py                  URL detect, auth (ALLOWED_USERS), force-mode, dispatch; inline.py = inline search
   → metadata/           any link → Deezer (type, id) → canonical album/track JSON
-                        (Tidal/Spotify/Apple scrape + iTunes; Odesli = long-tail fallback)
+                        (Tidal/Spotify/Apple scrape + iTunes, YouTube oEmbed)
   → soulseek/           search/enqueue/monitor via slskd; scorer.py ranks, selection.py = all policy
                         (docs/source-selection.md)
   → library/            files.py = path sanitise + tag-based dedup; tagger.py = FLAC/M4A/MP3 tags
