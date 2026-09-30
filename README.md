@@ -159,9 +159,10 @@ tags library-wide; shows a preview first, then `/retag confirm` to apply).
   <img src=".github/screenshots/upload-page.png" width="440" alt="Upload page">
 </p>
 
-Music you already have can go in through the same tagging/dedup pipeline: drop a `.zip` (or a
-folder of tracks) on the upload page (set `UPLOAD_HTTP_PORT` in `.env` and uncomment the
-`ports:` lines in `compose.yaml`) or into `./bot-data/uploads/` (Samba or SFTP work too).
+Music you already have goes through the same tagging and dedup pipeline. Drop a `.zip` or a
+folder of tracks into `./bot-data/uploads/`; this works without any setting, over Samba or SFTP too.
+To upload from a browser, enable the upload page: set `UPLOAD_HTTP_PORT` in `.env` and uncomment
+the `ports:` lines in `compose.yaml`.
 The release is identified from the files' own tags (embedded streaming URL, ISRC/UPC,
 artist+album) or the zip name; if nothing matches, the bot says so and files nothing. Results
 report to Telegram like any download.

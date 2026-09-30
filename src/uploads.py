@@ -2,14 +2,14 @@
 
 The owner drops a ``.zip`` (or a plain folder of tracks, or a loose audio
 file) into ``UPLOAD_DIR``; the poll loop notices it, stages the audio under
-``UPLOAD_DIR/.extracted/<uuid>/`` and reports what it found. Phase 1 stops
-there — no tagging, no ``/music`` writes yet (see docs/local-upload-plan.md).
+``UPLOAD_DIR/.extracted/<uuid>/`` and hands it to ``handle``, the bot's
+import that identifies, tags and files the release.
 
 Anything that can't be staged (bad zip, size caps, no audio inside) is moved
 to ``UPLOAD_DIR/.rejected/`` so the watcher never chews the same entry twice.
 A plain poll loop is used instead of a filesystem-watch dependency: an entry
 counts as "done copying" once its size is stable across two ticks (uploads
-via the web endpoint will sidestep this with rename-on-complete).
+via the web page sidestep this with rename-on-complete).
 """
 
 import asyncio
