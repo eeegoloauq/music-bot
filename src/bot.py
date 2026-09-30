@@ -372,15 +372,35 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.args and context.args[0] == "help":
         return await cmd_help(update, context)
     bot_me = await context.bot.get_me()
-    await update.message.reply_text(
+    msg = await update.message.reply_text(
         f"<b>Commands:</b>\n"
         f"/help — show all features\n"
         f"/scan — trigger Navidrome library rescan\n"
         f"/sharescan — trigger heavy slskd share rescan\n\n"
-        f"Send a music link (Tidal, Spotify, Apple Music, Deezer, etc.) to download.\n"
-        f"Type <code>@{bot_me.username}</code> in any chat for inline mode.",
+        f"Send a music link (Tidal, Spotify, Apple Music, Deezer, YouTube) to download.\n"
+        f"Type <code>@{bot_me.username}</code> in any chat for inline mode, "
+        f"or use the buttons below.",
         parse_mode="HTML",
+        reply_markup=_inline_shortcuts(),
     )
+    # Pinned, the shortcut buttons stay one tap away at the top of the chat.
+    with contextlib.suppress(TelegramError):
+        await msg.pin(disable_notification=True)
+
+
+def _inline_shortcuts() -> InlineKeyboardMarkup:
+    """Buttons that put ``@bot <mode>`` into the input field, so inline modes
+    don't have to be typed. The last one opens a chat picker instead."""
+    b = InlineKeyboardButton
+    return InlineKeyboardMarkup([
+        [b("🔎 Search", switch_inline_query_current_chat=""),
+         b("📚 Library", switch_inline_query_current_chat="lib "),
+         b("🗑 Delete", switch_inline_query_current_chat="del ")],
+        [b("▶️ Playing", switch_inline_query_current_chat="np"),
+         b("📝 Lyrics", switch_inline_query_current_chat="l"),
+         b("🔗 Share", switch_inline_query_current_chat="s")],
+        [b("📤 Send playing to…", switch_inline_query="np")],
+    ])
 
 
 @authorized
@@ -388,7 +408,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bot_me = await context.bot.get_me()
     await update.message.reply_text(
         "<b>Download</b>\n"
-        "Send a music link from Tidal, Spotify, Apple Music, Deezer, Shazam, etc.\n"
+        "Send a music link from Tidal, Spotify, Apple Music, Deezer, Shazam or YouTube. "
+        "For other services, search by name.\n"
         "Add <b>re</b> after the link to force re-download.\n"
         "Every download and upload import carries a ✖ Cancel button until it "
         "finishes — tap it at any stage; tracks already saved stay.\n\n"
@@ -406,6 +427,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/retag — refresh tags on every album from Deezer + Last.fm "
         "(dry-run, then <code>/retag confirm</code>)",
         parse_mode="HTML",
+        reply_markup=_inline_shortcuts(),
     )
 
 
