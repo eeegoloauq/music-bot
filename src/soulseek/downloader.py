@@ -57,6 +57,11 @@ SLSKD_DOWNLOAD_DIR = os.environ.get("SLSKD_DOWNLOAD_DIR", "/music/.slskd-downloa
 # shared 15-minute window, not separate queue and transfer timeouts.
 DOWNLOAD_TIMEOUT_SECS = int(os.environ.get("SLSKD_DOWNLOAD_TIMEOUT", "900"))
 
+# How many peers a single-track download tries before giving up. Album tracks
+# already try every candidate; this is the cap for one pasted track, where a
+# popular release often has more good copies than the first three.
+MAX_PEER_ATTEMPTS = max(1, int(os.environ.get("SLSKD_MAX_PEER_ATTEMPTS", "3")))
+
 # How long after enqueue before we give up if a peer never starts the transfer.
 ENQUEUE_GRACE_SECS = 60
 
@@ -397,7 +402,7 @@ async def _try_candidates(
     lyrics_task: asyncio.Task | None,
     on_progress=None,
     on_state=None,
-    max_attempts: int = 3,
+    max_attempts: int | None = None,
     failed_keys: set[tuple[str, str]] | None = None,
 ) -> tuple[str, int, str, SearchResult] | None:
     """Try peers in order; return on first success. Only ``PeerTransferError``
@@ -408,7 +413,11 @@ async def _try_candidates(
     ``failed_keys`` (optional) is a (username, filename) set shared across an
     album's phases: candidates that already failed there are skipped, and new
     failures are recorded — so the per-track fallback retries *other* peers
-    instead of re-waiting on the one that just errored."""
+    instead of re-waiting on the one that just errored.
+
+    ``max_attempts`` defaults to ``MAX_PEER_ATTEMPTS``."""
+    if max_attempts is None:
+        max_attempts = MAX_PEER_ATTEMPTS
     seen: set[tuple[str, str]] = set(failed_keys or ())
     last_err: str | None = None
     attempts = 0
