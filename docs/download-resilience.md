@@ -122,6 +122,12 @@ On startup, after `post_init`:
   transfer monitoring or retry behavior. Each peer attempt currently has one
   15-minute total cap shared by queueing and downloading, not separate timeout
   allowances for those phases.
+- **Stalled transfers.** Once a transfer has left the queue, `wait_for_files`
+  gives up on it after `SLSKD_STALL_SECS` (default 120) without a single new
+  byte and reports it as stalled; the downloader then cancels it in slskd and
+  moves on to the next peer like any other failed attempt. The clock restarts
+  on every byte, so a slow transfer that keeps moving is left alone, and
+  queue time is still governed by the per-attempt cap above.
 - **Force is not resumed.** A resumed force re-run would re-stage the
   half-written fresh copy over the original's backup in
   `.redownload-backup`; a plain resume just fills what's missing.
