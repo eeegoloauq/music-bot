@@ -20,6 +20,7 @@ from mutagen.flac import FLAC
 from mutagen.mp4 import MP4
 
 from config import ALLOWED_USERS, MUSIC_DIR
+from library.files import _title_from_filename
 import metadata
 import navidrome
 
@@ -181,10 +182,6 @@ def _search_local_albums(query: str, limit: int = 5) -> list[dict]:
     return results
 
 
-# Leading track number in library file names: "01 Song", "01 - Song", "1. Song"
-_TRACK_NO_RE = re.compile(r"^\d{1,3}[.\-_ ]+")
-
-
 def _search_local_tracks(query: str, limit: int = 10) -> list[dict]:
     """Search local music library for single tracks matching query — against
     "artist title", so both "song" and "artist song" find it.
@@ -201,11 +198,10 @@ def _search_local_tracks(query: str, limit: int = 10) -> list[dict]:
                 if not album_entry.is_dir():
                     continue
                 for f in os.scandir(album_entry.path):
-                    stem, ext = os.path.splitext(f.name)
-                    ext = ext.lower()
+                    ext = os.path.splitext(f.name)[1].lower()
                     if not f.is_file() or ext not in _AUDIO_EXTS:
                         continue
-                    title = _TRACK_NO_RE.sub("", stem)
+                    title = _title_from_filename(f.name)
                     if query_lower not in f"{artist_entry.name} {title}".lower():
                         continue
                     try:

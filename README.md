@@ -149,7 +149,7 @@ button until the download is done — tracks already saved stay.
 | `s` | Share link for the current track |
 | `l` | Lyrics for the current track |
 | `lib name` | Search your own Navidrome library |
-| `del name` | Remove an album or a single track from your library |
+| `del name` | Remove an album or a single track from your library (asks first) |
 
 **Commands** — `/help`, `/scan` (rescan Navidrome), `/stats` (library size), and `/retag` (refresh
 tags library-wide; shows a preview first, then `/retag confirm` to apply).

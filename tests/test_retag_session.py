@@ -75,9 +75,8 @@ async def test_delete_invalidates_retag_session(monkeypatch, tmp_path):
     monkeypatch.setattr(bot, "MUSIC_DIR", str(tmp_path))
     monkeypatch.setattr(bot, "_trigger_scan", fake_scan)
     monkeypatch.setattr(bot.asyncio, "to_thread", inline_to_thread)
-    message = RecordingMessage()
 
-    await bot._handle_delete(SimpleNamespace(message=message), "Artist/Album")
+    await bot._delete_album(str(album))
 
     assert not album.exists()
     assert bot._retag_session is None
