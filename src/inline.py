@@ -15,6 +15,7 @@ from telegram import (
     Update,
 )
 from telegram.ext import ContextTypes
+import mutagen
 from mutagen.flac import FLAC
 from mutagen.mp4 import MP4
 
@@ -125,6 +126,21 @@ async def _get_now_playing_cached() -> list[dict] | None:
         return None
 
 
+def _album_pid(path: str, ext: str) -> str:
+    """Deezer/Tidal album ID from the file's comment tag, or ``""``."""
+    try:
+        if ext == ".flac":
+            comment = next(iter(FLAC(path).get("comment") or []), "")
+        elif ext == ".m4a":
+            comment = next(iter(MP4(path).get("\xa9cmt") or []), "")
+        else:
+            comment = ""
+        m = _ALBUM_URL_RE.search(comment)
+        return m.group(1) if m else ""
+    except Exception:
+        return ""
+
+
 def _search_local_albums(query: str, limit: int = 5) -> list[dict]:
     """Search local music library for albums matching query.
 
@@ -150,24 +166,60 @@ def _search_local_albums(query: str, limit: int = 5) -> list[dict]:
                         if ext in _AUDIO_EXTS:
                             track_count += 1
                             if not album_pid:
-                                try:
-                                    if ext == ".flac":
-                                        comment = next(iter(FLAC(f.path).get("comment") or []), "")
-                                    elif ext == ".m4a":
-                                        comment = next(iter(MP4(f.path).get("\xa9cmt") or []), "")
-                                    else:
-                                        comment = ""
-                                    m = _ALBUM_URL_RE.search(comment)
-                                    if m:
-                                        album_pid = m.group(1)
-                                except Exception:
-                                    pass
+                                album_pid = _album_pid(f.path, ext)
                     results.append({
                         "artist": artist_entry.name,
                         "album": album_entry.name,
                         "path": album_entry.path,
                         "tracks": track_count,
                         "album_pid": album_pid,
+                    })
+                    if len(results) >= limit:
+                        return results
+    except OSError:
+        pass
+    return results
+
+
+# Leading track number in library file names: "01 Song", "01 - Song", "1. Song"
+_TRACK_NO_RE = re.compile(r"^\d{1,3}[.\-_ ]+")
+
+
+def _search_local_tracks(query: str, limit: int = 10) -> list[dict]:
+    """Search local music library for single tracks matching query — against
+    "artist title", so both "song" and "artist song" find it.
+
+    Returns list of {artist, album, title, path, duration, album_pid}.
+    """
+    query_lower = query.lower()
+    results = []
+    try:
+        for artist_entry in os.scandir(MUSIC_DIR):
+            if not artist_entry.is_dir() or artist_entry.name.startswith((".", "lost")):
+                continue
+            for album_entry in os.scandir(artist_entry.path):
+                if not album_entry.is_dir():
+                    continue
+                for f in os.scandir(album_entry.path):
+                    stem, ext = os.path.splitext(f.name)
+                    ext = ext.lower()
+                    if not f.is_file() or ext not in _AUDIO_EXTS:
+                        continue
+                    title = _TRACK_NO_RE.sub("", stem)
+                    if query_lower not in f"{artist_entry.name} {title}".lower():
+                        continue
+                    try:
+                        audio = mutagen.File(f.path)
+                        duration = int(audio.info.length) if audio else 0
+                    except Exception:
+                        duration = 0
+                    results.append({
+                        "artist": artist_entry.name,
+                        "album": album_entry.name,
+                        "title": title,
+                        "path": f.path,
+                        "duration": duration,
+                        "album_pid": _album_pid(f.path, ext),
                     })
                     if len(results) >= limit:
                         return results
@@ -344,26 +396,36 @@ def _track_result(title: str, artist: str, album: str, duration: int,
 
 
 async def _inline_delete(update: Update, del_query: str):
-    """Search local library and show albums for deletion."""
+    """Search local library and show albums, then single tracks, for deletion.
+    Picking either sends the same ``delete:<path>`` message."""
     if len(del_query) < 2:
         await update.inline_query.answer([], cache_time=5, is_personal=True)
         return
-    local = await asyncio.to_thread(_search_local_albums, del_query)
-    if not local:
+    albums, tracks = await asyncio.gather(
+        asyncio.to_thread(_search_local_albums, del_query),
+        asyncio.to_thread(_search_local_tracks, del_query),
+    )
+    if not albums and not tracks:
         await update.inline_query.answer([], cache_time=5, is_personal=True)
         return
 
-    cover_urls = await _fetch_album_covers([
-        (item["path"], item["album_pid"])
-        for item in local if item["album_pid"]
-    ])
+    # One cover per album, shared by its tracks.
+    pids = list(dict.fromkeys(i["album_pid"] for i in (*albums, *tracks) if i["album_pid"]))
+    cover_urls = await _fetch_album_covers([(pid, pid) for pid in pids])
 
     results = []
-    for item in local:
+    for item in albums:
         rel_path = os.path.relpath(item["path"], MUSIC_DIR)
         results.append(_album_result(
             item["album"], item["artist"], item["tracks"],
-            cover_urls.get(item["path"]),
+            cover_urls.get(item["album_pid"]),
+            f"{_DELETE_PREFIX}{rel_path}",
+        ))
+    for item in tracks:
+        rel_path = os.path.relpath(item["path"], MUSIC_DIR)
+        results.append(_track_result(
+            item["title"], item["artist"], item["album"], item["duration"],
+            cover_urls.get(item["album_pid"]),
             f"{_DELETE_PREFIX}{rel_path}",
         ))
     await update.inline_query.answer(results, cache_time=5, is_personal=True)

@@ -43,7 +43,7 @@ import retagger
 import uploads
 import upload_import
 import upload_web
-from inline import handle_inline_query, _DELETE_PREFIX
+from inline import handle_inline_query, _AUDIO_EXTS, _DELETE_PREFIX, _TRACK_NO_RE
 from library.files import _sanitize, _find_existing_track, _locate_existing_album
 
 logging.basicConfig(
@@ -422,7 +422,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"<code>@{bot_me.username} s</code> — share link for current track\n"
         f"<code>@{bot_me.username} l</code> — lyrics for current track\n"
         f"<code>@{bot_me.username} lib name</code> — search library\n"
-        f"<code>@{bot_me.username} del name</code> — delete album\n\n"
+        f"<code>@{bot_me.username} del name</code> — delete an album or a track\n\n"
         "<b>Commands</b>\n"
         "/scan — trigger Navidrome library rescan\n"
         "/sharescan — trigger heavy slskd share rescan\n"
@@ -833,8 +833,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await _resolve_and_download(update, url, force=force)
 
 
+def _remove_if_empty(d: str) -> bool:
+    try:
+        if not os.listdir(d):
+            os.rmdir(d)
+            return True
+    except OSError:
+        pass
+    return False
+
+
 async def _handle_delete(update: Update, rel_path: str):
-    """Delete a local album folder and trigger rescan."""
+    """Delete a local album folder or a single track and trigger rescan."""
     full_path = os.path.normpath(os.path.join(MUSIC_DIR, rel_path))
     # Resolve symlinks so a planted link like /music/X -> /etc can't escape the check.
     real_path = os.path.realpath(full_path)
@@ -848,8 +858,13 @@ async def _handle_delete(update: Update, rel_path: str):
         await update.message.reply_text("Cannot delete top-level directories.")
         return
 
-    if os.path.islink(full_path) or not os.path.isdir(full_path):
+    is_track = (os.path.isfile(full_path)
+                and os.path.splitext(full_path)[1].lower() in _AUDIO_EXTS)
+    if os.path.islink(full_path) or not (os.path.isdir(full_path) or is_track):
         await update.message.reply_text(f"Not found: {rel_path}")
+        return
+    if is_track:
+        await _delete_track(update, full_path, tidy_parents=depth >= 2)
         return
 
     artist_dir = os.path.dirname(full_path)
@@ -860,20 +875,42 @@ async def _handle_delete(update: Update, rel_path: str):
     logger.info("Deleted album: %s/%s", artist_name, album_name)
     _invalidate_retag_session("album deleted")
 
-    def _remove_if_empty(d: str) -> bool:
-        try:
-            if not os.listdir(d):
-                os.rmdir(d)
-                return True
-        except OSError:
-            pass
-        return False
-
     if await asyncio.to_thread(_remove_if_empty, artist_dir):
         logger.info("Removed empty artist folder: %s", artist_name)
 
     scan_note = await _trigger_scan(slskd_mode="scheduled")
     await update.message.reply_text(f"Deleted: {artist_name} — {album_name}\n{scan_note}")
+
+
+async def _delete_track(update: Update, full_path: str, tidy_parents: bool):
+    """Delete one track. When it was the album's last audio file, the album
+    folder (cover, lyrics leftovers) and an emptied artist folder go too —
+    only for the usual Artist/Album/track layout (``tidy_parents``), never
+    climbing up to the library root."""
+    album_dir = os.path.dirname(full_path)
+    artist_dir = os.path.dirname(album_dir)
+    artist_name = os.path.basename(artist_dir if tidy_parents else album_dir)
+    title = _TRACK_NO_RE.sub("", os.path.splitext(os.path.basename(full_path))[0])
+
+    def _remove() -> bool:
+        os.remove(full_path)
+        if not tidy_parents or any(
+                os.path.splitext(n)[1].lower() in _AUDIO_EXTS for n in os.listdir(album_dir)):
+            return False
+        shutil.rmtree(album_dir)
+        return True
+
+    album_gone = await asyncio.to_thread(_remove)
+    logger.info("Deleted track: %s", os.path.relpath(full_path, MUSIC_DIR))
+    _invalidate_retag_session("track deleted")
+    if album_gone:
+        logger.info("Removed album folder with no audio left: %s",
+                    os.path.relpath(album_dir, MUSIC_DIR))
+        if await asyncio.to_thread(_remove_if_empty, artist_dir):
+            logger.info("Removed empty artist folder: %s", artist_name)
+
+    scan_note = await _trigger_scan(slskd_mode="scheduled")
+    await update.message.reply_text(f"Deleted: {artist_name} — {title}\n{scan_note}")
 
 
 async def _trigger_scan(*, slskd_mode: str = "none") -> str:
