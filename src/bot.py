@@ -43,8 +43,10 @@ import retagger
 import uploads
 import upload_import
 import upload_web
-from inline import handle_inline_query, _DELETE_PREFIX
-from library.files import _sanitize, _find_existing_track, _locate_existing_album
+from inline import handle_inline_query, _AUDIO_EXTS, _DELETE_PREFIX
+from library.files import (
+    _sanitize, _find_existing_track, _locate_existing_album, _title_from_filename,
+)
 
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
@@ -87,6 +89,9 @@ _in_flight: set[str] = set()
 # stale prompt from auto-downloading hours later if the user finally taps.
 _LOSSY_PROMPT_TTL = 300  # seconds
 _pending_lossy: dict[str, dict] = {}
+# Delete prompt id -> (path relative to MUSIC_DIR, is a folder), until a
+# button is tapped.
+_pending_deletes: dict[str, tuple[str, bool]] = {}
 
 # Every album/track download, upload import and lossy prompt in flight,
 # keyed by the short id in its ✖ Cancel button (docs/cancel.md).
@@ -422,7 +427,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"<code>@{bot_me.username} s</code> — share link for current track\n"
         f"<code>@{bot_me.username} l</code> — lyrics for current track\n"
         f"<code>@{bot_me.username} lib name</code> — search library\n"
-        f"<code>@{bot_me.username} del name</code> — delete album\n\n"
+        f"<code>@{bot_me.username} del name</code> — delete an album or a track\n\n"
         "<b>Commands</b>\n"
         "/scan — trigger Navidrome library rescan\n"
         "/sharescan — trigger heavy slskd share rescan\n"
@@ -833,47 +838,155 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await _resolve_and_download(update, url, force=force)
 
 
-async def _handle_delete(update: Update, rel_path: str):
-    """Delete a local album folder and trigger rescan."""
+def _remove_if_empty(d: str) -> bool:
+    try:
+        if not os.listdir(d):
+            os.rmdir(d)
+            return True
+    except OSError:
+        pass
+    return False
+
+
+# What a track delete may take along with the emptied album folder. Anything
+# else keeps the folder: the audio extension lists differ across the code
+# (uploads take .wav, the inline search does not), so audio is not what we
+# test for.
+_ALBUM_LEFTOVER_EXTS = frozenset({
+    ".jpg", ".jpeg", ".png", ".webp", ".lrc", ".txt", ".nfo", ".cue", ".log",
+    ".m3u", ".m3u8", ".json", ".db", ".ini", ".url",
+})
+
+
+def _only_leftovers(d: str) -> bool:
+    return all(os.path.splitext(n)[1].lower() in _ALBUM_LEFTOVER_EXTS
+               for _, _, files in os.walk(d) for n in files)
+
+
+def _count_audio(d: str) -> int:
+    return sum(os.path.splitext(n)[1].lower() in _AUDIO_EXTS
+               for _, _, files in os.walk(d) for n in files)
+
+
+def _check_delete_path(rel_path: str) -> tuple[str, str]:
+    """``(full path, "")`` for an album folder or an audio track inside
+    MUSIC_DIR, else ``("", reason for the user)``."""
     full_path = os.path.normpath(os.path.join(MUSIC_DIR, rel_path))
     # Resolve symlinks so a planted link like /music/X -> /etc can't escape the check.
     real_path = os.path.realpath(full_path)
     real_music_dir = os.path.realpath(MUSIC_DIR)
 
     if not real_path.startswith(real_music_dir + os.sep):
-        await update.message.reply_text("Invalid path.")
-        return
-    depth = os.path.relpath(real_path, real_music_dir).count(os.sep)
-    if depth < 1:
-        await update.message.reply_text("Cannot delete top-level directories.")
-        return
+        return "", "Invalid path."
+    if os.path.relpath(real_path, real_music_dir).count(os.sep) < 1:
+        return "", "Cannot delete top-level directories."
+    is_track = (os.path.isfile(full_path)
+                and os.path.splitext(full_path)[1].lower() in _AUDIO_EXTS)
+    if os.path.islink(full_path) or not (os.path.isdir(full_path) or is_track):
+        return "", f"Not found: {rel_path}"
+    return full_path, ""
 
-    if os.path.islink(full_path) or not os.path.isdir(full_path):
-        await update.message.reply_text(f"Not found: {rel_path}")
-        return
 
+def _delete_label(full_path: str) -> str:
+    """"Artist — Album" for a folder, "Artist — Album — Title" for a track."""
+    parts = os.path.relpath(full_path, MUSIC_DIR).split(os.sep)
+    if os.path.isfile(full_path):
+        parts[-1] = _title_from_filename(parts[-1])
+    return " — ".join(parts)
+
+
+async def _handle_delete(update: Update, rel_path: str):
+    """Ask before deleting an album folder or a single track: one tap in the
+    inline list sends the ``delete:`` message, and a mistap must not cost files."""
+    full_path, error = _check_delete_path(rel_path)
+    if error:
+        await update.message.reply_text(error)
+        return
+    is_dir = os.path.isdir(full_path)
+    question = f"Delete {_delete_label(full_path)}"
+    if is_dir:
+        question += f" ({await asyncio.to_thread(_count_audio, full_path)} tracks)"
+    cid = uuid.uuid4().hex[:12]
+    _pending_deletes[cid] = (rel_path, is_dir)
+    await update.message.reply_text(f"{question}?", reply_markup=InlineKeyboardMarkup([[
+        InlineKeyboardButton("🗑 Delete", callback_data=f"rm:yes:{cid}"),
+        InlineKeyboardButton("✖ Cancel", callback_data=f"rm:no:{cid}"),
+    ]]))
+
+
+async def _handle_delete_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not query or not query.data:
+        return
+    user_id = query.from_user.id if query.from_user else None
+    if user_id not in ALLOWED_USERS:
+        await query.answer("Not allowed.", show_alert=False)
+        return
+    _, action, cid = query.data.split(":", 2)
+    # Popped, so a second tap on the same prompt finds nothing to delete.
+    pending = _pending_deletes.pop(cid, None)
+    if pending is None:
+        await query.answer("Prompt expired.", show_alert=False)
+        with contextlib.suppress(TelegramError):
+            await query.edit_message_reply_markup(reply_markup=None)
+        return
+    with contextlib.suppress(TelegramError):
+        await query.answer()
+    rel_path, was_dir = pending
+    if action != "yes":
+        text = "Cancelled."
+    else:
+        # Checked again: the library may have changed since the question,
+        # and a track prompt must never delete a folder.
+        full_path, text = _check_delete_path(rel_path)
+        if full_path and os.path.isdir(full_path) != was_dir:
+            text = f"Changed since the question, not deleted: {rel_path}"
+        elif full_path:
+            text = await (_delete_album if was_dir else _delete_track)(full_path)
+    with contextlib.suppress(TelegramError):
+        await query.edit_message_text(text)
+
+
+async def _delete_album(full_path: str) -> str:
+    label = _delete_label(full_path)
     artist_dir = os.path.dirname(full_path)
-    album_name = os.path.basename(full_path)
-    artist_name = os.path.basename(artist_dir)
-
     await asyncio.to_thread(shutil.rmtree, full_path)
-    logger.info("Deleted album: %s/%s", artist_name, album_name)
+    logger.info("Deleted album: %s", os.path.relpath(full_path, MUSIC_DIR))
     _invalidate_retag_session("album deleted")
-
-    def _remove_if_empty(d: str) -> bool:
-        try:
-            if not os.listdir(d):
-                os.rmdir(d)
-                return True
-        except OSError:
-            pass
-        return False
-
     if await asyncio.to_thread(_remove_if_empty, artist_dir):
-        logger.info("Removed empty artist folder: %s", artist_name)
-
+        logger.info("Removed empty artist folder: %s", os.path.basename(artist_dir))
     scan_note = await _trigger_scan(slskd_mode="scheduled")
-    await update.message.reply_text(f"Deleted: {artist_name} — {album_name}\n{scan_note}")
+    return f"Deleted: {label}\n{scan_note}"
+
+
+async def _delete_track(full_path: str) -> str:
+    """Delete one track. When only covers, lyrics and the like are left in its
+    album folder, the folder and an emptied artist folder go too — only for
+    the usual Artist/Album/track layout, so it never climbs to the library root."""
+    label = _delete_label(full_path)
+    album_dir = os.path.dirname(full_path)
+    tidy = (os.path.relpath(full_path, MUSIC_DIR).count(os.sep) == 2
+            and not os.path.islink(album_dir))  # rmtree refuses links
+
+    def _remove() -> bool:
+        os.remove(full_path)
+        # Walked, not listed: files in a nested CD1/ folder count too.
+        if not tidy or not _only_leftovers(album_dir):
+            return False
+        shutil.rmtree(album_dir)
+        return True
+
+    album_gone = await asyncio.to_thread(_remove)
+    logger.info("Deleted track: %s", os.path.relpath(full_path, MUSIC_DIR))
+    _invalidate_retag_session("track deleted")
+    if album_gone:
+        logger.info("Removed album folder with no audio left: %s",
+                    os.path.relpath(album_dir, MUSIC_DIR))
+        artist_dir = os.path.dirname(album_dir)
+        if await asyncio.to_thread(_remove_if_empty, artist_dir):
+            logger.info("Removed empty artist folder: %s", os.path.basename(artist_dir))
+    scan_note = await _trigger_scan(slskd_mode="scheduled")
+    return f"Deleted: {label}\n{scan_note}"
 
 
 async def _trigger_scan(*, slskd_mode: str = "none") -> str:
@@ -1875,6 +1988,7 @@ def _build_app() -> Application:
     app.add_handler(InlineQueryHandler(handle_inline_query))
     app.add_handler(CallbackQueryHandler(_handle_lossy_callback, pattern=r"^lossy:"))
     app.add_handler(CallbackQueryHandler(_handle_cancel_callback, pattern=r"^cancel:"))
+    app.add_handler(CallbackQueryHandler(_handle_delete_callback, pattern=r"^rm:(yes|no):"))
     app.add_error_handler(_error_handler)
     return app
 
