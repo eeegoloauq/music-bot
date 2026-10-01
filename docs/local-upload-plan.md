@@ -95,7 +95,7 @@ accepted (staged as a folder-of-one); anything unstageable is parked in
   `/data/uploads/.extracted/<uuid>/`.
   - **Zip-slip guard**: reject/skip any member whose resolved path escapes the
     target dir (mirror the realpath containment check in
-    `bot.py::_handle_delete`).
+    `bot.py::_check_delete_path`).
   - **Size caps**: cap total uncompressed bytes and per-file bytes (reuse the
     spirit of `MAX_FILE_BYTES`); refuse zip bombs.
   - Extract only audio + cover-art members (`.flac .m4a .mp3 .ogg .opus .wav`

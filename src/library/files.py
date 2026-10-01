@@ -213,6 +213,13 @@ _FNAME_RE = re.compile(
     r"^(?:(?P<disc>\d{1,2})-(?=\d))?(?:(?P<num>\d{1,3})[.\s-]+)?(?P<rest>.+)$")
 
 
+def _title_from_filename(fname: str) -> str:
+    """Display title of a library file: "1-02 Title.flac" -> "Title"."""
+    stem = os.path.splitext(fname)[0].strip()
+    m = _FNAME_RE.match(stem)
+    return m.group("rest").strip() if m else stem
+
+
 def _guess_from_filename(fname: str) -> tuple[str, set[str]]:
     """(tracknumber, candidate normalized titles) read off a filename, for
     files that carry no tags at all (rips and zips from the wild). Every
