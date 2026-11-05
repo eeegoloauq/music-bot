@@ -18,10 +18,17 @@ Larger work that shouldn't be done in passing. Remove an item when it ships.
   Soulseek/slskd setup guide, an optional Compose override and an environment example; support
   connecting to an existing slskd instance. Keep installation snippets in the guide and link
   to it from the bot. Do not queue a download until a provider is available and the user retries.
-- **Library-focused introduction and screenshots.** Keep the README and primary screenshots
-  aligned with the standalone mode: show local archive import, identification, tagging and
-  library browsing with fictional or appropriately licensed demo material. Document Soulseek
-  in the optional provider guide and describe the actual capabilities accurately.
+- **Library maintenance by field.** Add album-level and library-wide actions to fetch missing
+  synced lyrics from LRCLIB, refresh genres from Deezer and Last.fm, and update cover art and
+  track names from a matched release. Let users choose the fields, review changes and explicitly
+  opt into replacing existing lyrics or artwork. Keep bulk lyrics and artwork updates separate
+  from the current retag flow, which preserves both.
+- **Import purchased albums.** Handle album ZIPs such as Bandcamp downloads without requiring
+  a Deezer match. Offer to keep the files' own tags and artwork, or let the user select a release
+  manually when identification fails. Preserve supplied artwork and useful sidecar files.
+- **Send a selected library track.** Extend audio-file sharing beyond now playing: select a track
+  from library search and send it to a Telegram chat. Keep audio files, Navidrome share links and
+  lyrics as separate actions.
 - **Retag a selected album.** Open an album from the library and preview tag changes for that
   release only, then confirm or discard them. Reuse the existing retag planner and writer.
 - **Share links on request.** Keep library search read-only; create a public Navidrome share only

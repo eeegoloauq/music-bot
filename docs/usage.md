@@ -2,18 +2,21 @@
 
 Manage the library from your private Telegram bot. Only users listed in `ALLOWED_USERS` can use it.
 
-## Import an album
+## Share music
 
-Drop a ZIP or a folder of tracks into `bot-data/uploads/`, or use the optional
-[browser upload page](setup.md#local-imports).
+Enable inline mode in [BotFather](https://t.me/BotFather), then type `@yourbot` in any Telegram chat:
 
-The bot identifies the release from embedded links, ISRC/UPC, artist and album tags, or the
-archive name. Metadata comes from Deezer, with optional Last.fm genre tags and LRCLIB lyrics.
-If no release matches, the files remain in staging and the bot reports what failed.
+| Query | Action |
+|---|---|
+| `np` | Send the playing track as an audio file |
+| `s` | Share a Navidrome link to the playing track |
+| `l` | Send the lyrics of the playing track |
+| `lib name` | Find a library track or album and share a link |
+| `del name` | Delete an album or track, with confirmation |
+| `song name` | Search Deezer for a download |
 
-Matched tracks are tagged and moved into the library. Existing tracks are kept; redundant uploaded
-copies are removed. Unmatched tracks stay in staging. The Cancel button stops the import while
-keeping tracks already saved. FLAC, M4A and MP3 support tag writing.
+The bot sends existing MP3/M4A files when available; other formats are requested as MP3 from
+Navidrome. Configure [Navidrome sharing](setup.md#inline-mode-and-share-links) for public links.
 
 ## Commands
 
@@ -28,23 +31,26 @@ keeping tracks already saved. FLAC, M4A and MP3 support tag writing.
 | `/retag stop` | Discard the pending preview |
 | `/sharescan` | Request a full slskd share rescan |
 
-Retagging updates changed fields and preserves audio and embedded cover art. A preview expires
+Retagging refreshes track metadata from [Deezer](https://www.deezer.com/) and adds genres from
+[Last.fm](https://www.last.fm/api) when an API key is configured. It preserves audio, existing
+lyrics and embedded cover art. Synced lyrics from [LRCLIB](https://lrclib.net/) are fetched during
+import; library-wide lyrics and artwork updates are on the [roadmap](../ROADMAP.md). A preview expires
 after two hours and is invalidated by library changes made through the bot.
 
-## Inline mode
+## Import an album
 
-Enable inline mode in [BotFather](https://t.me/BotFather), then type `@yourbot` followed by:
+Album downloads from [Bandcamp](https://get.bandcamp.help/en/articles/15263311-how-do-i-unzip-my-album-download)
+arrive as ZIP files. Drop an album ZIP or a folder of tracks into `bot-data/uploads/`, or use the optional
+[browser upload page](setup.md#local-imports).
 
-| Query | Action |
-|---|---|
-| `lib name` | Find albums and tracks in Navidrome, with share links when configured |
-| `np` | Send the playing track as audio |
-| `s` | Send a Navidrome share link for the playing track |
-| `l` | Show lyrics for the playing track |
-| `del name` | Find an album or track to delete, with confirmation |
-| `song name` | Search the external Deezer catalogue for a download |
+The bot identifies the release from embedded links, ISRC/UPC, artist and album tags, or the
+archive name. Metadata comes from Deezer, with optional Last.fm genre tags and LRCLIB lyrics.
+The current importer requires a Deezer match. If no release matches, the files remain in staging
+and the bot reports what failed. Importing with the original tags is on the [roadmap](../ROADMAP.md).
 
-Use [share-link configuration](setup.md#inline-mode-and-share-links) to enable public Navidrome links.
+Matched tracks are tagged and moved into the library. Existing tracks are kept; redundant uploaded
+copies are removed. Unmatched tracks stay in staging. The Cancel button stops the import while
+keeping tracks already saved. FLAC, M4A and MP3 support tag writing.
 
 ## Downloads
 

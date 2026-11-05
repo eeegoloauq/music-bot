@@ -1,33 +1,42 @@
 # Music Bot
 
-A Telegram bot for importing music, maintaining tags and managing your [Navidrome](https://www.navidrome.org/) library.
+A Telegram bot for managing your [Navidrome](https://www.navidrome.org/) music library.
 
 [![Release](https://img.shields.io/github/v/release/eeegoloauq/music-bot?label=release)](https://github.com/eeegoloauq/music-bot/releases/latest)
 [![Tests](https://github.com/eeegoloauq/music-bot/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/eeegoloauq/music-bot/actions/workflows/tests.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-![Local album upload](.github/screenshots/upload-page.png)
+- Send the track you're playing as an audio file to any Telegram chat.
+- Share Navidrome links to tracks and albums, or send the lyrics of the playing track.
+- Add albums from ZIP files or folders; delete albums or individual tracks remotely.
+- Update library tags from [Deezer](https://www.deezer.com/) and add genres from
+  [Last.fm](https://www.last.fm/api) with your API key.
+- Fetch synced lyrics from [LRCLIB](https://lrclib.net/) when importing music.
 
 ## Setup
 
 1. Save [compose.yaml](compose.yaml) and [.env.example](.env.example) in one directory. Rename
    `.env.example` to `.env`.
 2. Follow the [setup guide](docs/setup.md) to fill in credentials, connect your library and prepare
-   writable directories. The current stack requires slskd.
+   writable directories.
 3. Run `docker compose up -d`, then send `/start` to your bot.
 
 ## Usage
 
-Drop an album ZIP or a folder of tracks into `bot-data/uploads/`. The bot identifies the release,
-adds tags and lyrics, files the tracks and asks Navidrome to rescan. Progress arrives in Telegram.
-An optional browser upload page feeds the same folder.
+Enable inline mode in [BotFather](https://t.me/BotFather), then type `@yourbot` in any chat:
 
-- `/retag` previews tag updates across the library; `/retag confirm` applies them.
-- `/scan` starts a Navidrome rescan; `/stats` shows library counts and size.
-- Inline mode finds library entries, sends the playing track, shares links and shows lyrics.
-- Delete an album or track from inline search, with confirmation.
+| Query | Action |
+|---|---|
+| `np` | Send the playing track as an audio file |
+| `s` | Share a Navidrome link to the playing track |
+| `l` | Send the lyrics of the playing track |
+| `lib name` | Find a track or album in your library to share a link |
+| `del name` | Delete a track or album, with confirmation |
 
-[Usage and inline shortcuts](docs/usage.md) · [Configuration](.env.example) · [Roadmap](ROADMAP.md)
+Use `/retag` to update library tags and genres, `/scan` to rescan Navidrome, and `/stats` for
+library counts and size. `/retag` lists the changes first; `/retag confirm` applies them.
+
+[Importing music and other actions](docs/usage.md) · [Configuration](.env.example) · [Roadmap](ROADMAP.md)
 
 ## Development
 
