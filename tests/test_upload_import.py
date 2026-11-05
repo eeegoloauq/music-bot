@@ -304,7 +304,7 @@ def quiet_pipeline(monkeypatch):
 
     monkeypatch.setattr(upload_import, "_download_cover", no_cover)
     monkeypatch.setattr(upload_import.metadata, "fetch_lyrics", no_lyrics)
-    monkeypatch.setattr(upload_import, "_write_tags_force",
+    monkeypatch.setattr(upload_import, "write_import_tags",
                         lambda *a, **k: None)
 
 

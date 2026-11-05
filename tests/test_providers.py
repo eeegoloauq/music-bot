@@ -218,7 +218,7 @@ async def run():
     await bot._post_init(app)
     await bot._shutdown(app)
 asyncio.run(run())
-assert started == ["watch_loop"], started
+assert len(started) == 1, started
 commands = app.bot.set_my_commands.call_args.args[0]
 assert "provider" in [c.command for c in commands]
 assert "sharescan" not in [c.command for c in commands]

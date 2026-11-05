@@ -46,19 +46,33 @@ All base options and defaults are in [.env.example](../.env.example). Keep `.env
 
 ## Local imports
 
-Drop an album ZIP, a folder of tracks or an individual audio file into `bot-data/uploads/`. This folder is created
-by the bot and can also receive files over Samba or SFTP. Results are reported in Telegram.
-The current importer requires a matching Deezer release; see [usage](usage.md#import-an-album).
-
 The optional browser page accepts ZIP archives and individual audio files, including MP3, M4A
 and FLAC. It feeds the same importer and reports results in Telegram. It runs inside Music Bot
 and needs no separate download provider or container.
 
 For browser uploads, set `UPLOAD_HTTP_PORT` in `.env`, enable the commented port mapping under
-`music-bot` in [compose.yaml](../compose.yaml), then recreate the service. The upload page has no
-built-in authentication; keep access private or protect it with an authenticated reverse proxy.
-Open the server's address and the configured port in your browser. The bot's upload size limits
-apply; Telegram's cloud file-download limit does not apply to this page.
+`music-bot` in [compose.yaml](../compose.yaml), and set `UPLOAD_WEB_URL` to the address users can
+open from their devices. For example:
+
+```dotenv
+UPLOAD_HTTP_PORT=8080
+UPLOAD_WEB_URL=http://music.example.com:8080
+```
+
+Replace the example address with your LAN/VPN address or authenticated proxy URL, then recreate
+the service. **Upload page** appears in `/start`, `/help`, `/upload` and import suggestions.
+`UPLOAD_WEB_URL` controls the Telegram link; `UPLOAD_HTTP_PORT` starts the server. The bot cannot
+infer a user-reachable address from the listen port. The page has no built-in authentication;
+keep access private or protect it with an authenticated reverse proxy. The bot's upload size
+limits apply; Telegram's cloud file-download limit does not apply to this page.
+
+Alternatively, copy an album ZIP, a folder of tracks or an individual audio file into
+`bot-data/uploads/`. The bot creates this folder; Samba and SFTP work too. Without a page URL,
+`/upload` and **Import files** open short instructions and a setup link.
+
+After upload, choose **Keep original files** or **Identify release** in Telegram. Keeping originals
+requires no metadata lookup; release identification applies matching Deezer metadata.
+See [import choices](usage.md#import-an-album).
 
 ## Inline mode and share links
 

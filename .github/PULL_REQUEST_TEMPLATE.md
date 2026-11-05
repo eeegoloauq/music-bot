@@ -5,7 +5,7 @@
 
 ## How I tested it
 
-<!-- e.g. new/updated tests in tests/, or a real download against your own slskd -->
+<!-- e.g. offline tests, a local import, or a download through an optional provider -->
 
-- [ ] `uv run pytest` passes (the suite is offline — no credentials needed)
+- [ ] `uv run --no-sync pytest` passes after `uv sync --frozen --extra soulseek`
 - [ ] Behavior changes come with a test

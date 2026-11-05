@@ -8,8 +8,9 @@ A Telegram bot for managing your [Navidrome](https://www.navidrome.org/) music l
 
 - Send the track you're playing as an audio file to any Telegram chat.
 - Share Navidrome links to tracks and albums, or send the lyrics of the playing track.
-- Import ZIP archives and individual audio files through an optional upload page or watched folder.
-- Download albums and tracks through a [provider you configure](docs/providers).
+- Import ZIP archives and audio files through the [upload page](docs/setup.md#local-imports)
+  or a server folder. Keep originals or identify and tag a release.
+- Download albums and tracks through optional [providers](docs/providers).
 - Delete albums or individual tracks remotely.
 - Update library tags from [Deezer](https://www.deezer.com/) and add genres from
   [Last.fm](https://www.last.fm/api) with your API key.
@@ -39,9 +40,9 @@ Use `/retag` to update library tags and genres, `/scan` to rescan Navidrome, and
 library counts and size. `/retag` lists the changes first; `/retag confirm` applies them.
 Local imports and library management work without a download provider.
 
-To add your music, upload an album ZIP or an MP3/M4A/FLAC file through the optional
-[upload page](docs/setup.md#local-imports), or drop files into `bot-data/uploads/` on the server.
-Import results appear in Telegram.
+Use `/upload` or **Upload page** in `/start` to add an album ZIP or audio file through the
+configured [upload page](docs/setup.md#local-imports). You can also copy files into
+`bot-data/uploads/` on the server. Choose how to import them in Telegram.
 
 Music links identify a release and check your library. If tracks are missing, import your files
 or configure an [optional download provider](docs/providers).

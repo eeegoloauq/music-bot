@@ -16,6 +16,7 @@ import asyncio
 import logging
 import os
 import shutil
+import stat
 import uuid
 import zipfile
 from dataclasses import dataclass, field
@@ -25,7 +26,9 @@ from config import MAX_FILE_BYTES, UPLOAD_DIR, UPLOAD_MAX_TOTAL_BYTES
 logger = logging.getLogger(__name__)
 
 AUDIO_EXTS = {".flac", ".m4a", ".mp3", ".ogg", ".opus", ".wav"}
-ART_EXTS = {".jpg", ".jpeg", ".png"}
+ART_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
+SIDECAR_EXTS = {".txt", ".pdf", ".nfo", ".cue", ".log", ".lrc",
+                ".m3u", ".m3u8", ".ffp", ".sfv", ".md", ".accurip"}
 
 _EXTRACTED = ".extracted"
 _REJECTED = ".rejected"
@@ -41,12 +44,13 @@ class IntakeReport:
     staging_dir: str | None = None           # set on success
     audio: list[str] = field(default_factory=list)    # staged, relative paths
     art: list[str] = field(default_factory=list)
+    sidecars: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)  # "member (reason)"
     error: str | None = None                 # set → entry was rejected
 
 
 def _classify(name: str) -> str:
-    """'audio' | 'art' | 'skip' for a member/file name."""
+    """'audio' | 'art' | 'sidecar' | 'skip' for a member/file name."""
     base = os.path.basename(name)
     if base.startswith("."):  # dotfiles, AppleDouble ._track.flac droppings
         return "skip"
@@ -55,6 +59,8 @@ def _classify(name: str) -> str:
         return "audio"
     if ext in ART_EXTS:
         return "art"
+    if ext in SIDECAR_EXTS:
+        return "sidecar"
     return "skip"
 
 
@@ -72,14 +78,15 @@ def _unpack_zip(zip_path: str, staging_dir: str) -> IntakeReport:
         for info in zf.infolist():
             if info.is_dir():
                 continue
+            dest = os.path.realpath(os.path.join(staging_dir, info.filename))
+            if (not dest.startswith(os.path.realpath(staging_dir) + os.sep)
+                    or stat.S_ISLNK(info.external_attr >> 16)):
+                report.error = f"unsafe path in zip: {info.filename}"
+                return report
             kind = _classify(info.filename)
             if kind == "skip":
                 report.skipped.append(info.filename)
                 continue
-            dest = os.path.realpath(os.path.join(staging_dir, info.filename))
-            if not dest.startswith(os.path.realpath(staging_dir) + os.sep):
-                report.error = f"unsafe path in zip: {info.filename}"
-                return report
             limit = min(MAX_FILE_BYTES or UPLOAD_MAX_TOTAL_BYTES,
                         UPLOAD_MAX_TOTAL_BYTES - total)
             os.makedirs(os.path.dirname(dest), exist_ok=True)
@@ -92,14 +99,17 @@ def _unpack_zip(zip_path: str, staging_dir: str) -> IntakeReport:
                         return report
                     out.write(chunk)
             total += written
-            (report.audio if kind == "audio" else report.art).append(info.filename)
+            getattr(report, {"audio": "audio", "art": "art", "sidecar": "sidecars"}[kind]).append(info.filename)
     return report
 
 
 def _inventory_tree(src_dir: str, report: IntakeReport) -> bool:
     """Fill ``report`` from an already-on-disk tree; False on cap violation."""
     total = 0
-    for root, _dirs, files in os.walk(src_dir):
+    for root, dirs, files in os.walk(src_dir):
+        if any(os.path.islink(os.path.join(root, name)) for name in dirs + files):
+            report.error = "symlinks are not accepted in uploads"
+            return False
         for f in files:
             rel = os.path.relpath(os.path.join(root, f), src_dir)
             kind = _classify(f)
@@ -111,7 +121,7 @@ def _inventory_tree(src_dir: str, report: IntakeReport) -> bool:
             if (MAX_FILE_BYTES and size > MAX_FILE_BYTES) or total > UPLOAD_MAX_TOTAL_BYTES:
                 report.error = f"size cap exceeded at {rel}"
                 return False
-            (report.audio if kind == "audio" else report.art).append(rel)
+            getattr(report, {"audio": "audio", "art": "art", "sidecar": "sidecars"}[kind]).append(rel)
     return True
 
 
@@ -123,7 +133,9 @@ def _process_entry(path: str, upload_dir: str) -> IntakeReport:
     staging = os.path.join(upload_dir, _EXTRACTED, uuid.uuid4().hex[:12])
 
     try:
-        if os.path.isdir(path):
+        if os.path.islink(path):
+            report = IntakeReport(name=name, error="symlinks are not accepted in uploads")
+        elif os.path.isdir(path):
             report = IntakeReport(name=name)
             if _inventory_tree(path, report) and report.audio:
                 os.makedirs(os.path.dirname(staging), exist_ok=True)
@@ -155,6 +167,10 @@ def _process_entry(path: str, upload_dir: str) -> IntakeReport:
     except Exception as e:  # bad zip, fs error — reject, don't kill the loop
         logger.exception("Upload intake failed for %s", name)
         report = IntakeReport(name=name, error=str(e))
+
+    if report.staging_dir and not report.error:
+        with open(os.path.join(report.staging_dir, ".upload-name"), "w") as marker:
+            marker.write(name)
 
     if report.error and os.path.exists(path):
         try:
@@ -229,3 +245,24 @@ async def watch_loop(handle) -> None:
         except Exception:
             logger.exception("Upload watch tick failed")
         await asyncio.sleep(POLL_SECS)
+
+
+def staged_reports(upload_dir: str) -> list[IntakeReport]:
+    """Recover unfinished imports after a restart without reading audio contents."""
+    base = os.path.join(upload_dir, _EXTRACTED)
+    if not os.path.isdir(base):
+        return []
+    reports = []
+    for entry in sorted(os.scandir(base), key=lambda e: e.name):
+        if not entry.is_dir(follow_symlinks=False):
+            continue
+        name = entry.name
+        try:
+            with open(os.path.join(entry.path, ".upload-name")) as marker:
+                name = marker.read(1024)
+        except OSError:
+            pass
+        report = IntakeReport(name=name, staging_dir=entry.path)
+        if _inventory_tree(entry.path, report) and report.audio:
+            reports.append(report)
+    return reports

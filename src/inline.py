@@ -11,6 +11,8 @@ from telegram import (
     InlineQueryResultArticle,
     InlineQueryResultCachedAudio,
     InlineQueryResultsButton,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
     InputTextMessageContent,
     Update,
 )
@@ -40,6 +42,8 @@ _UPLOAD_FAILED_TTL = 3600  # seconds
 _TG_MAX_AUDIO_BYTES = 50 * 1024 * 1024  # Telegram bot upload limit
 # entry_id -> share URL
 _share_url_cache: OrderedDict[str, str] = OrderedDict()
+# Selection tokens hold only metadata; searching never uploads audio.
+_audio_choices: OrderedDict[str, tuple[int, dict]] = OrderedDict()
 
 
 def _cache_set(cache: OrderedDict, key: str, value) -> None:
@@ -630,6 +634,39 @@ async def _inline_now_playing(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.inline_query.answer([], cache_time=5, is_personal=True)
 
 
+async def _inline_audio_search(update: Update, query: str):
+    """Select a library track before requesting its audio from Navidrome."""
+    try:
+        found = await navidrome.search(query, album_count=0, song_count=20)
+    except Exception as exc:
+        logger.warning("Library audio search failed: %s", exc)
+        return await update.inline_query.answer([], cache_time=5, is_personal=True)
+    results = []
+    for song in found.get("song") or []:
+        if not isinstance(song, dict) or not song.get("id"):
+            continue
+        token = uuid4().hex[:16]
+        entry = dict(song, songId=song["id"], coverArtId=song.get("coverArt", ""))
+        _cache_set(_audio_choices, token, (update.effective_user.id, entry))
+        results.append(InlineQueryResultArticle(
+            id=token,
+            title=song.get("title", "Unknown"),
+            description=f"{song.get('artist', '')} — {song.get('album', '')} · select to send audio",
+            input_message_content=InputTextMessageContent(
+                f"{song.get('artist', '')} — {song.get('title', '')}"),
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
+                "Send audio here", switch_inline_query_current_chat=f"send {token}")]]),
+        ))
+    await update.inline_query.answer(results, cache_time=0, is_personal=True)
+
+
+async def _inline_selected_audio(update: Update, context, token: str):
+    choice = _audio_choices.get(token)
+    if choice is None or choice[0] != update.effective_user.id:
+        return await update.inline_query.answer([], cache_time=0, is_personal=True)
+    await _inline_now_playing(update, context, [choice[1]])
+
+
 async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id if update.effective_user else None
     if user_id not in ALLOWED_USERS:
@@ -637,6 +674,14 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     query = (update.inline_query.query or "").strip()
     query_lower = query.lower()
+
+    if query_lower.startswith("send "):
+        return await _inline_selected_audio(update, context, query[5:].strip())
+    if query_lower == "audio" or query_lower.startswith("audio "):
+        term = query[5:].strip()
+        if len(term) >= 2:
+            return await _inline_audio_search(update, term)
+        return await update.inline_query.answer([], cache_time=0, is_personal=True)
 
     # Prefix modes (space-delimited, checked first)
     if query_lower == "del" or query_lower.startswith("del "):

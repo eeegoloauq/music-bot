@@ -6,12 +6,14 @@ import errno
 import logging
 import os
 import shutil
+from copy import deepcopy
 
 import aiohttp
 
 from metadata.client import _get_session
 from library.files import _cover_url
 from library.tagger import _write_tags, _write_m4a_tags, _write_mp3_tags
+from mutagen import File as MutagenFile
 
 logger = logging.getLogger(__name__)
 
@@ -85,15 +87,23 @@ def _move_into_library(src: str, dest: str) -> None:
     a partial file, then renames into place.
     """
     tmp = dest + ".importing"
+    relocated = False
     try:
         _relocate(src, tmp)
+        relocated = True
         os.replace(tmp, dest)
     except BaseException:
         if os.path.exists(tmp):
-            try:
-                os.remove(tmp)
-            except OSError:
-                pass
+            if relocated:
+                # A failed final rename must not discard the user's only copy.
+                try:
+                    if not os.path.exists(src):
+                        _relocate(tmp, src)
+                except OSError:
+                    logger.exception("Could not restore staged file; retained at %s", tmp)
+            else:
+                with contextlib.suppress(OSError):
+                    os.remove(tmp)
         raise
 
 
@@ -108,6 +118,39 @@ def _write_tags_force(filepath: str, track: dict, album: dict,
         _write_mp3_tags(filepath, track, album, None, cover_data, lyrics, force=True)
     else:
         _write_tags(filepath, track, album, None, cover_data, lyrics, force=True)
+
+
+def write_import_tags(filepath: str, track: dict, album: dict,
+                      cover_data: bytes | None, lyrics: dict | None, ext: str):
+    """Apply release tags while retaining supplied artwork and lyric fields."""
+    def is_media(key):
+        key = str(key).casefold()
+        return (key in {"covr", "©lyr", "lyrics", "syncedlyrics", "unsyncedlyrics"}
+                or key.startswith(("apic", "uslt", "sylt"))
+                or "syncedlyrics" in key)
+
+    original = MutagenFile(filepath)
+    saved = {key: deepcopy(value) for key, value in (original.tags or {}).items()
+             if is_media(key)}
+    pictures = deepcopy(getattr(original, "pictures", []))
+    has_art = pictures or any(str(key).casefold() == "covr" or str(key).casefold().startswith("apic")
+                              for key in saved)
+    has_lyrics = any(str(key).casefold() != "covr" and not str(key).casefold().startswith("apic")
+                     for key in saved)
+    _write_tags_force(filepath, track, album, None if has_art else cover_data,
+                      None if has_lyrics else lyrics, ext)
+    if not saved and not pictures:
+        return
+    updated = MutagenFile(filepath)
+    if updated.tags is None:
+        updated.add_tags()
+    for key, value in saved.items():
+        updated.tags[key] = value
+    if pictures:
+        updated.clear_pictures()
+        for picture in pictures:
+            updated.add_picture(picture)
+    updated.save()
 
 
 def _result_dict(album_dir, downloaded, skipped, failed, total, fmt, with_lyrics,

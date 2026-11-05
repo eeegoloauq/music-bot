@@ -1,4 +1,5 @@
 import os
+from urllib.parse import urlsplit
 from dotenv import load_dotenv
 
 # Read mounted .env directly — bypasses Docker's $ interpolation
@@ -51,3 +52,11 @@ UPLOAD_DIR = os.getenv("UPLOAD_DIR", "/data/uploads")
 UPLOAD_MAX_TOTAL_BYTES = int(os.getenv("UPLOAD_MAX_TOTAL_BYTES", str(10 * 1024**3)))
 # Port for the one-page upload site (upload_web.py). Unset/0 = server off.
 UPLOAD_HTTP_PORT = int(os.getenv("UPLOAD_HTTP_PORT", "0"))
+# User-reachable page address for Telegram buttons; may be a LAN or proxy URL.
+# This advertises the page independently of the server's internal listen port.
+UPLOAD_WEB_URL = os.getenv("UPLOAD_WEB_URL", "").strip().rstrip("/")
+if UPLOAD_WEB_URL:
+    _upload_url = urlsplit(UPLOAD_WEB_URL)
+    if (_upload_url.scheme not in {"http", "https"} or not _upload_url.hostname
+            or _upload_url.username is not None or _upload_url.password is not None):
+        raise ValueError("UPLOAD_WEB_URL must be an HTTP(S) URL without credentials")

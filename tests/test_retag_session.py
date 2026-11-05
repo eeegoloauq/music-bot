@@ -90,6 +90,8 @@ async def test_confirm_reports_invalidation_reason(monkeypatch):
     update = SimpleNamespace(
         effective_user=SimpleNamespace(id=1),
         message=message,
+        effective_message=message,
+        effective_chat=SimpleNamespace(id=1),
     )
 
     await bot.cmd_retag(update, SimpleNamespace(args=["confirm"]))

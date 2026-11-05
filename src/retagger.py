@@ -147,14 +147,11 @@ def scan_albums(music_dir: str) -> list[tuple[str, str, str]]:
 
 
 def _list_audio_files(folder: str) -> list[str]:
-    out: list[str] = []
-    try:
-        for fname in sorted(os.listdir(folder)):
-            if fname.lower().endswith(_AUDIO_EXTS):
-                out.append(os.path.join(folder, fname))
-    except OSError:
-        pass
-    return out
+    # Original imports can retain disc subdirectories. Never follow symlinks.
+    return sorted(os.path.join(root, name)
+                  for root, _dirs, files in os.walk(folder)
+                  for name in files if name.lower().endswith(_AUDIO_EXTS)
+                  and not os.path.islink(os.path.join(root, name)))
 
 
 # --- identify --------------------------------------------------------------
@@ -504,6 +501,7 @@ def _compute_changes(folder: str, artist: str, album: str,
 
     n_missing_artists = 0
     n_display_artist = 0
+    changed_titles = []
     for summary in files_summary:
         track = _match_track(summary, fresh_meta.get("tracks") or [])
         if not track:
@@ -513,10 +511,15 @@ def _compute_changes(folder: str, artist: str, album: str,
         canonical_artist = _format_artist(track, fresh_meta)
         if canonical_artist and summary["artist"] != canonical_artist:
             n_display_artist += 1
+        if summary.get("title") != _format_title(track):
+            changed_titles.append(f"{summary.get('title', '')!r} → {_format_title(track)!r}")
     if n_missing_artists:
         changes.append(f"artists: {n_missing_artists}/{n_files} missing")
     if n_display_artist:
         changes.append(f"track artist: {n_display_artist}/{n_files} differs")
+    if changed_titles:
+        changes.append(f"track titles: {len(changed_titles)}/{n_files} differs")
+        changes.extend(changed_titles[:8])
 
     return (
         changes,
@@ -1124,14 +1127,22 @@ ProgressCb = Callable[[int, int, AlbumPlan], Awaitable[None]] | None
 
 
 async def run_dry_run(
-    music_dir: str, progress: ProgressCb = None,
+    music_dir: str, progress: ProgressCb = None, *,
+    albums: list[tuple[str, str, str]] | None = None,
 ) -> tuple[list[AlbumPlan], RetagSummary]:
-    albums = scan_albums(music_dir)
+    selected = albums is not None
+    albums = scan_albums(music_dir) if albums is None else albums
     summary = RetagSummary(total=len(albums))
     plans: list[AlbumPlan] = []
 
     async def _one(idx: int, folder: str, artist: str, album: str) -> AlbumPlan:
         plan = await plan_album(folder, artist, album)
+        if selected:
+            # An album action must never rename the shared artist directory.
+            # Keep paths stable and reuse only the tag writer for this scope.
+            plan.canonical_artist_dir = plan.canonical_album_dir = None
+            plan.changes = [c for c in plan.changes
+                            if not c.startswith(("folder:", "artist folder:"))]
         if progress is not None:
             try:
                 await progress(idx + 1, len(albums), plan)

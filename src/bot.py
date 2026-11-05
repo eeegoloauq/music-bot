@@ -31,7 +31,7 @@ from telegram.request import HTTPXRequest
 
 from config import (
     TG_TOKEN, ALLOWED_USERS, MUSIC_DIR, NAVI_LOGIN, NAVI_PASS, NAVI_PUBLIC_URL,
-    UPLOAD_HTTP_PORT,
+    UPLOAD_HTTP_PORT, UPLOAD_WEB_URL,
 )
 import journal
 import metadata
@@ -43,6 +43,7 @@ import retagger
 import uploads
 import upload_import
 import upload_web
+from upload_choices import UploadChoices
 from inline import handle_inline_query, _AUDIO_EXTS, _DELETE_PREFIX
 from library.files import (
     _sanitize, _find_existing_track, _locate_existing_album, _title_from_filename,
@@ -186,7 +187,7 @@ class _QueryMessage:
     async def delete(self, *args, **kwargs):
         return await self._q.delete_message()
 
-# Re-tagger session state. One global slot — single-user bot. The session is
+# Re-tagger session state. One owner-bound global preview slot. The session is
 # a library snapshot, so library changes make it stale; the timer is only a
 # safety net.
 _RETAG_SESSION_TTL = 7200  # 2 hours
@@ -381,13 +382,14 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"<b>Commands:</b>\n"
         f"/help — show all features\n"
         f"/scan — trigger Navidrome library rescan\n"
+        f"/upload — import your music\n"
         f"/provider — download provider status and setup\n\n"
         f"Send a music link to identify a release and check your library.\n"
-        f"Import album ZIPs or folders; optional providers can download missing music.\n"
+        f"Import album ZIPs or audio files with /upload.\n"
         f"Type <code>@{bot_me.username}</code> in any chat for inline mode, "
         f"or use the buttons below.",
         parse_mode="HTML",
-        reply_markup=_inline_shortcuts(),
+        reply_markup=_chat_shortcuts(update),
     )
     # Pinned, the shortcut buttons stay one tap away at the top of the chat.
     # Only once: every pin also posts a "pinned" service line.
@@ -408,8 +410,18 @@ def _inline_shortcuts() -> InlineKeyboardMarkup:
         [b("▶️ Playing", switch_inline_query_current_chat="np"),
          b("📝 Lyrics", switch_inline_query_current_chat="l"),
          b("🔗 Share", switch_inline_query_current_chat="s")],
+        [b("🎵 Send library audio", switch_inline_query_current_chat="audio ")],
         [b("📤 Send playing to…", switch_inline_query="np")],
     ])
+
+
+def _chat_shortcuts(update: Update) -> InlineKeyboardMarkup:
+    markup = _inline_shortcuts()
+    rows = [[_import_button()]]
+    chat = getattr(update, "effective_chat", None)
+    if ALLOWED_USERS and chat and chat.id == ALLOWED_USERS[0]:
+        rows.append([InlineKeyboardButton("📦 Pending uploads", callback_data="uploads:pending")])
+    return InlineKeyboardMarkup([*rows, *markup.inline_keyboard])
 
 
 @authorized
@@ -417,7 +429,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bot_me = await context.bot.get_me()
     await update.message.reply_text(
         "<b>Import and identify</b>\n"
-        "Drop an album ZIP or folder into the watched upload folder.\n"
+        "Use /upload to import an album ZIP or audio files.\n"
         "Send a music link from Tidal, Spotify, Apple Music, Deezer, Shazam or YouTube. "
         "For other services, search by name. The bot checks your library first.\n"
         "Downloads require a configured, available provider. "
@@ -429,16 +441,20 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"<code>@{bot_me.username} np</code> — now playing as audio\n"
         f"<code>@{bot_me.username} s</code> — share link for current track\n"
         f"<code>@{bot_me.username} l</code> — lyrics for current track\n"
-        f"<code>@{bot_me.username} lib name</code> — search library\n"
+        f"<code>@{bot_me.username} lib name</code> — search library links\n"
+        f"<code>@{bot_me.username} audio name</code> — select and send library audio\n"
         f"<code>@{bot_me.username} del name</code> — delete an album or a track\n\n"
         "<b>Commands</b>\n"
         "/scan — trigger Navidrome library rescan\n"
+        "/upload — import your music\n"
         "/provider — download provider status and setup\n"
         "/stats — library statistics\n"
+        "/library name — open an album and preview its tag changes\n"
+        "/import ID release — manually select an upload release\n"
         "/retag — refresh tags on every album from Deezer + Last.fm "
         "(dry-run, then <code>/retag confirm</code>)",
         parse_mode="HTML",
-        reply_markup=_inline_shortcuts(),
+        reply_markup=_chat_shortcuts(update),
     )
 
 
@@ -454,13 +470,19 @@ async def cmd_share_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(note)
 
 
-_PROVIDER_GUIDE = "https://github.com/eeegoloauq/music-bot/tree/dev/docs/providers"
+_PROVIDER_GUIDE = "https://github.com/eeegoloauq/music-bot/tree/main/docs/providers"
+_UPLOAD_GUIDE = "https://github.com/eeegoloauq/music-bot/blob/main/docs/setup.md#local-imports"
+
+
+def _import_button() -> InlineKeyboardButton:
+    if UPLOAD_WEB_URL:
+        return InlineKeyboardButton("🌐 Upload page", url=UPLOAD_WEB_URL)
+    return InlineKeyboardButton("📥 Import files", callback_data="import:help")
 
 
 def _provider_actions() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📥 Import files", callback_data="import:help"),
-         InlineKeyboardButton("Provider setup", url=_PROVIDER_GUIDE)],
+        [_import_button(), InlineKeyboardButton("Providers", url=_PROVIDER_GUIDE)],
     ])
 
 
@@ -473,11 +495,23 @@ async def cmd_provider(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @authorized
 async def _handle_import_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
-    await update.callback_query.message.reply_text(
-        "Drop an album ZIP or a folder of audio files into the bot's watched upload folder. "
-        "With the default Docker setup, this is bot-data/uploads on the server. "
-        "The bot identifies, tags and imports matching tracks, then reports here. "
-        "You can also use the upload page if your administrator enabled it.")
+    await _send_import_help(update.callback_query.message)
+
+
+@authorized
+async def cmd_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await _send_import_help(update.message)
+
+
+async def _send_import_help(message):
+    if UPLOAD_WEB_URL:
+        text = "Upload an album ZIP or audio file. Choose how to import it here."
+        button = _import_button()
+    else:
+        text = ("Copy an album ZIP or audio files to the server's upload folder. "
+                "Import choices appear here.")
+        button = InlineKeyboardButton("Upload setup", url=_UPLOAD_GUIDE)
+    await message.reply_text(text, reply_markup=InlineKeyboardMarkup([[button]]))
 
 
 async def _prepare_download(io: "ChatIO", kind: str, release_id: str,
@@ -512,7 +546,7 @@ async def _prepare_download(io: "ChatIO", kind: str, release_id: str,
     count = f"\nIn library: {present}/{len(tracks)} tracks." if tracks else ""
     await io.reply_text(
         f"{label}{count}\n{status.message}\n"
-        "Import your files, or finish provider setup and send the link again.",
+        "Import files or check Providers, then send the link again.",
         reply_markup=_provider_actions())
     return False
 
@@ -669,7 +703,7 @@ def _format_retag_summary(plans: list, summary, elapsed: float, sample_n: int = 
         tag = ", ".join(clean_labels)
         if len(p.changes) > 4:
             tag += "…"
-        sample_lines.append(f"  {head} — {tag}")
+        sample_lines.append(f"  {reporting.esc(head)} — {reporting.esc(tag)}")
 
     failed = [p for p in plans if p.error]
     failed_lines = []
@@ -724,53 +758,151 @@ def _format_retag_summary(plans: list, summary, elapsed: float, sample_n: int = 
     return "\n".join(out)
 
 
+def _retag_snapshot(plans: list) -> tuple:
+    """Detect file additions, edits and replacements between preview and apply."""
+    entries = []
+    for plan in plans:
+        for root, dirs, files in os.walk(plan.folder):
+            dirs.sort()
+            for name in sorted(files):
+                path = os.path.join(root, name)
+                try:
+                    stat = os.stat(path)
+                except OSError:
+                    entries.append((path, "unavailable"))
+                else:
+                    entries.append((path, stat.st_ino, stat.st_size, stat.st_mtime_ns))
+    return tuple(entries)
+
+
+@authorized
+async def cmd_library(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    term = " ".join(context.args or []).casefold()
+    albums = await asyncio.to_thread(retagger.scan_albums, MUSIC_DIR)
+    matches = [(path, artist, album) for path, artist, album in albums
+               if term in f"{artist} {album}".casefold()][:20]
+    choices = {}
+    buttons = []
+    for path, artist, album in matches:
+        if not _safe_library_album(path):
+            continue
+        token = uuid.uuid4().hex[:12]
+        choices[token] = (path, update.effective_chat.id)
+        buttons.append([InlineKeyboardButton(f"{artist} — {album}"[:100],
+                                            callback_data=f"album:open:{token}")])
+    context.user_data["library_albums"] = choices
+    await update.message.reply_text(
+        "Select an album. Use /library <name> to narrow the search (up to 20 results)."
+        if buttons else "No albums found.",
+        reply_markup=InlineKeyboardMarkup(buttons) if buttons else None)
+
+
+def _safe_library_album(path: str) -> bool:
+    root = os.path.realpath(MUSIC_DIR)
+    return (os.path.realpath(path).startswith(root + os.sep)
+            and os.path.isdir(path)
+            and not os.path.islink(path)
+            and not os.path.islink(os.path.dirname(path)))
+
+
+@authorized
+async def _handle_album_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    _prefix, action, token = query.data.split(":", 2)
+    await query.answer()
+    choice = context.user_data.get("library_albums", {}).get(token)
+    if not choice or choice[1] != update.effective_chat.id or not _safe_library_album(choice[0]):
+        await query.message.reply_text("Album selection expired. Use /library again.")
+        return
+    folder = choice[0]
+    if action == "preview":
+        await _retag_command(update, [], folder=folder)
+    elif action == "open":
+        files = await asyncio.to_thread(retagger._list_audio_files, folder)
+        title = f"{os.path.basename(os.path.dirname(folder))} — {os.path.basename(folder)}"
+        await query.message.reply_text(
+            title + f"\n{len(files)} tracks\n\n" + "\n".join(os.path.relpath(f, folder) for f in files)[:3000],
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
+                "Preview tag changes", callback_data=f"album:preview:{token}")]]))
+
+
+@authorized
+async def _handle_retag_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    _prefix, action, token = query.data.split(":", 2)
+    await query.answer()
+    if not _retag_session or _retag_session.get("token") != token:
+        await query.message.reply_text("This preview is no longer available.")
+        return
+    await _retag_command(update, [action])
+
+
 @authorized
 async def cmd_retag(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global _retag_session, _retag_invalidated_reason, _retag_in_progress
+    await _retag_command(update, context.args or [])
 
-    args = (context.args or [])
+
+async def _retag_command(update: Update, args: list[str], folder: str | None = None):
+    global _retag_session, _retag_invalidated_reason, _retag_in_progress
+    message = update.effective_message
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    if args and args[0].lower() in {"confirm", "stop"} and _retag_session:
+        if (_retag_session.get("owner", user_id) != user_id
+                or _retag_session.get("chat", chat_id) != chat_id):
+            await message.reply_text("This preview belongs to another user or chat.")
+            return
     sub = args[0].lower() if args else ""
 
     if sub == "stop":
         if _retag_session is None:
-            await update.message.reply_text("No re-tag session pending.")
+            await message.reply_text("No re-tag session pending.")
         else:
             _retag_session = None
-            await update.message.reply_text("Re-tag session dropped.")
+            await message.reply_text("Re-tag session dropped.")
         _retag_invalidated_reason = None
         return
 
     if sub == "confirm":
         if _retag_session is None:
             if _retag_invalidated_reason:
-                await update.message.reply_text(
+                await message.reply_text(
                     "Library changed since the scan "
                     f"({_retag_invalidated_reason}) — run /retag again."
                 )
             else:
-                await update.message.reply_text(
+                await message.reply_text(
                     "No re-tag session to confirm. Run /retag first."
                 )
             return
         if time.monotonic() > _retag_session["expire_at"]:
             _retag_session = None
             _retag_invalidated_reason = None
-            await update.message.reply_text(
+            await message.reply_text(
                 "Re-tag session expired (2 hours). Run /retag again."
             )
             return
         if _retag_in_progress:
-            await update.message.reply_text("Re-tag already running.")
+            await message.reply_text("Re-tag already running.")
+            return
+        snapshot = _retag_session.get("snapshot")
+        if snapshot is not None and snapshot != await asyncio.to_thread(
+                _retag_snapshot, _retag_session["plans"]):
+            _invalidate_retag_session("album files changed")
+            await message.reply_text("Album files changed since the preview. Run /retag again.")
             return
         plans = _retag_session["plans"]
         await _do_retag_apply(update, plans)
         return
 
     if _retag_in_progress:
-        await update.message.reply_text("Re-tag already running.")
+        await message.reply_text("Re-tag already running.")
         return
 
-    status_msg = await safe_send(update.message, "Scanning library…")
+    if _retag_session is not None:
+        await message.reply_text("A preview is pending. Confirm it or use /retag stop first.")
+        return
+    status_msg = await safe_send(message, "Previewing album…" if folder else "Scanning library…")
     last_edit = [time.monotonic()]
     started = time.monotonic()
     tally = {"changed": 0, "lastfm": 0, "skipped": 0}
@@ -798,7 +930,13 @@ async def cmd_retag(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _retag_in_progress = True
     try:
         try:
-            plans, summary = await retagger.run_dry_run(MUSIC_DIR, progress=progress)
+            options = {}
+            if folder is not None:
+                options["albums"] = [(folder, os.path.basename(os.path.dirname(folder)),
+                                      os.path.basename(folder))]
+            async with _download_semaphore:
+                plans, summary = await retagger.run_dry_run(MUSIC_DIR, progress=progress, **options)
+                snapshot = await asyncio.to_thread(_retag_snapshot, plans)
         except Exception as e:
             logger.exception("Re-tag dry-run failed")
             await safe_edit(status_msg, f"Re-tag failed: {_short(e)}", final=True)
@@ -808,21 +946,38 @@ async def cmd_retag(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elapsed = time.monotonic() - started
     _retag_session = {
+        "owner": user_id,
+        "chat": chat_id,
+        "token": uuid.uuid4().hex[:12],
+        "snapshot": snapshot,
         "plans": plans,
         "summary": summary,
         "expire_at": time.monotonic() + _RETAG_SESSION_TTL,
     }
     _retag_invalidated_reason = None
     text = _format_retag_summary(plans, summary, elapsed)
-    if not await safe_edit(status_msg, text, final=True, parse_mode="HTML"):
-        await _tg_call(lambda: update.message.reply_text(text, parse_mode="HTML"),
+    if folder:
+        details = [reporting.esc(change) for plan in plans for change in plan.changes]
+        if details:
+            text += "\n\n" + "\n".join(details)
+        if len(text) > 3900:
+            text = _format_retag_summary(plans, summary, elapsed)
+    token = _retag_session["token"]
+    markup = InlineKeyboardMarkup([[
+        InlineKeyboardButton("Confirm", callback_data=f"retag:confirm:{token}"),
+        InlineKeyboardButton("Discard", callback_data=f"retag:stop:{token}"),
+    ]]) if any(p.needs_apply for p in plans) else None
+    if markup is None:
+        _retag_session = None
+    if not await safe_edit(status_msg, text, final=True, parse_mode="HTML", reply_markup=markup):
+        await _tg_call(lambda: message.reply_text(text, parse_mode="HTML", reply_markup=markup),
                        "re-tag summary", final=True)
 
 
 async def _do_retag_apply(update: Update, plans: list):
     global _retag_session, _retag_in_progress
     _retag_in_progress = True
-    status_msg = await safe_send(update.message, "Applying re-tag…")
+    status_msg = await safe_send(update.effective_message, "Applying re-tag…")
     last_edit = [time.monotonic()]
     started = time.monotonic()
     written_total = [0]
@@ -847,7 +1002,13 @@ async def _do_retag_apply(update: Update, plans: list):
 
     try:
         try:
-            stats = await retagger.run_apply(plans, progress=progress)
+            async with _download_semaphore:
+                session = _retag_session
+                if session is None or (session.get("snapshot") is not None
+                        and session["snapshot"] != await asyncio.to_thread(_retag_snapshot, plans)):
+                    await safe_edit(status_msg, "Library changed since the preview. Run /retag again.", final=True)
+                    return
+                stats = await retagger.run_apply(plans, progress=progress)
         except Exception as e:
             logger.exception("Re-tag apply failed")
             await safe_edit(status_msg, f"Apply failed: {_short(e)}", final=True)
@@ -879,7 +1040,7 @@ async def _do_retag_apply(update: Update, plans: list):
     out.append(await _trigger_scan(slskd_mode="scheduled"))
     text = "\n".join(out)
     if not await safe_edit(status_msg, text, final=True, parse_mode="HTML"):
-        await _tg_call(lambda: update.message.reply_text(text, parse_mode="HTML"),
+        await _tg_call(lambda: update.effective_message.reply_text(text, parse_mode="HTML"),
                        "re-tag apply summary", final=True)
 
 
@@ -1407,7 +1568,8 @@ async def _do_download_album(io: ChatIO, status_msg, album_id: str, force: bool 
         await _send_result(io, status_msg, done_text, result["album_dir"])
 
 
-async def _handle_upload(io: ChatIO, report: uploads.IntakeReport) -> None:
+async def _handle_upload(io: ChatIO, report: uploads.IntakeReport,
+                         mode: str = "match", album_id: str | None = None) -> None:
     """Drive a staged local upload through the same metadata → tag → file →
     scan → report path a Soulseek download takes (docs/local-upload-plan.md)."""
     if report.error:
@@ -1419,35 +1581,41 @@ async def _handle_upload(io: ChatIO, report: uploads.IntakeReport) -> None:
     status_msg = None
     try:
         status_msg = RunStatus(await safe_send(
-            io, f"📦 {report.name}: {len(report.audio)} audio file(s) received. "
-            "Identifying release…", reply_markup=run.markup), run)
-        await _import_upload(io, status_msg, report, run)
+            io, f"📦 {report.name}: {len(report.audio)} audio file(s) received. " +
+            ("Keeping original files…" if mode == "original" else "Identifying release…"),
+            reply_markup=run.markup), run)
+        await _import_upload(io, status_msg, report, run, mode=mode, album_id=album_id)
     except asyncio.CancelledError:
         if not run.cancel_requested:
             raise
         # Staged files are the user's own — a cancel leaves them where a
         # failed import would: in uploads staging, nothing deleted.
         asyncio.current_task().uncancel()
+        if run.saved_fn and run.saved_fn():
+            _invalidate_retag_session("upload partially imported")
+            await _trigger_scan()
         await _report_cancelled(status_msg, run, io)
     finally:
         run.close()
 
 
 async def _import_upload(io: ChatIO, status_msg, report: uploads.IntakeReport,
-                         run: ActiveRun) -> None:
-    album_id = None
+                         run: ActiveRun, mode: str = "match",
+                         album_id: str | None = None) -> None:
     diag: dict = {}
     try:
-        album_id = await upload_import.identify_album(
-            report.staging_dir, report.name, diag=diag)
+        if mode != "original" and not album_id:
+            album_id = await upload_import.identify_album(
+                report.staging_dir, report.name, diag=diag)
     except Exception as e:
         logger.error("Upload identify failed for %s: %s", report.name, e)
-    if not album_id:
+    if mode != "original" and not album_id:
         await safe_edit(
             status_msg,
             f"❓ {report.name}: couldn't match this to a release — "
             f"{upload_import.describe_identify_failure(diag)}. Files are "
-            "kept in uploads staging; nothing was filed.", final=True)
+            "kept for you. Choose how to import them below.", final=True)
+        await _upload_choices.offer(io, report)
         return
 
     if _download_semaphore.locked():
@@ -1462,19 +1630,26 @@ async def _import_upload(io: ChatIO, status_msg, report: uploads.IntakeReport,
     run.saved_fn = lambda: progress["saved"]
     async with _download_semaphore:
         try:
-            album = await metadata.fetch_album(album_id)
-            await metadata.enrich_genres(album)
-            run.total = len(album["tracks"])
-            # Cosmetic edit inside the critical path — safe_edit, never a
-            # bare edit_text: a network blip here once aborted the whole
-            # import before a single file was filed.
-            await safe_edit(
-                status_msg,
-                f"📦 Importing upload: {album['artist']} — {album['title']}…")
-            result = await upload_import.import_staged_album(
-                album, report.staging_dir, MUSIC_DIR, progress=progress)
+            if mode == "original":
+                run.total = len(report.audio)
+                album, result = await upload_import.import_original(report, MUSIC_DIR, progress)
+            else:
+                album = await metadata.fetch_album(album_id)
+                await metadata.enrich_genres(album)
+                run.total = len(album["tracks"])
+                # Cosmetic edit inside the critical path — safe_edit, never a
+                # bare edit_text: a network blip here once aborted the whole
+                # import before a single file was filed.
+                await safe_edit(
+                    status_msg,
+                    f"📦 Importing upload: {album['artist']} — {album['title']}…")
+                result = await upload_import.import_staged_album(
+                    album, report.staging_dir, MUSIC_DIR, progress=progress)
         except Exception as e:
             logger.exception("Upload import failed for %s", report.name)
+            if progress["saved"]:
+                _invalidate_retag_session("upload partially imported")
+                await _trigger_scan()
             await safe_edit(
                 status_msg,
                 f"❌ Upload import failed: {_short(e)}. Files kept in staging.",
@@ -1486,8 +1661,7 @@ async def _import_upload(io: ChatIO, status_msg, report: uploads.IntakeReport,
     if result["downloaded"]:
         _invalidate_retag_session("upload imported")
         scan_note = await _trigger_scan()
-    share_url = await _try_share_album(
-        album["artist"], album["title"], skip_delay=result["downloaded"] == 0)
+    share_url = None
 
     if result["downloaded"] == 0 and not result["failed"]:
         done_text = (
@@ -1509,6 +1683,8 @@ async def _import_upload(io: ChatIO, status_msg, report: uploads.IntakeReport,
         done_text += f"\n\n⚠️ Didn't match any track, left in staging: {shown}{more}"
     await _send_result(io, status_msg, done_text, result["album_dir"])
 
+
+_upload_choices = UploadChoices(_handle_upload, ChatIO)
 
 async def _download_track(update: Update, track_id: str, force: bool = False):
     io = ChatIO.from_update(update)
@@ -2012,8 +2188,11 @@ async def _post_init(app: Application) -> None:
     commands = [
         BotCommand("help", "Show all features"),
         BotCommand("scan", "Trigger Navidrome library rescan"),
+        BotCommand("upload", "Import your music"),
         BotCommand("provider", "Download provider status and setup"),
         BotCommand("stats", "Library statistics"),
+        BotCommand("library", "Browse albums and preview tag changes"),
+        BotCommand("import", "Select an upload release manually"),
         BotCommand("retag", "Re-tag library from current Deezer + Last.fm metadata"),
     ]
     if providers.sharing_enabled():
@@ -2037,9 +2216,14 @@ async def _post_init(app: Application) -> None:
 
         async def _on_upload(report: uploads.IntakeReport) -> None:
             with contextlib.suppress(TelegramError):
-                await _await_in_own_task(_handle_upload(owner_io, report))
+                await _upload_choices.offer(owner_io, report)
 
-        _spawn_background(uploads.watch_loop(_on_upload))
+        async def _watch_uploads() -> None:
+            # Re-offer unfinished uploads before intake starts to avoid duplicate prompts.
+            await _upload_choices.restore(owner_io)
+            await uploads.watch_loop(_on_upload)
+
+        _spawn_background(_watch_uploads())
     # One-page upload site feeding the same watched folder (off unless
     # UPLOAD_HTTP_PORT is set).
     if UPLOAD_HTTP_PORT:
@@ -2070,10 +2254,17 @@ def _build_app() -> Application:
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("provider", cmd_provider))
+    app.add_handler(CommandHandler("upload", cmd_upload))
     app.add_handler(CommandHandler("scan", cmd_scan))
     app.add_handler(CommandHandler("sharescan", cmd_share_scan))
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("retag", cmd_retag))
+    app.add_handler(CommandHandler("library", cmd_library))
+    app.add_handler(CallbackQueryHandler(_handle_album_callback, pattern=r"^album:(open|preview):"))
+    app.add_handler(CallbackQueryHandler(_handle_retag_callback, pattern=r"^retag:(confirm|stop):"))
+    app.add_handler(CallbackQueryHandler(_upload_choices.list_pending, pattern=r"^uploads:pending$"))
+    app.add_handler(CommandHandler("import", _upload_choices.manual))
+    app.add_handler(CallbackQueryHandler(_upload_choices.callback, pattern=r"^import:(original|match):[a-f0-9]{12}$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(InlineQueryHandler(handle_inline_query))
     app.add_handler(CallbackQueryHandler(_handle_lossy_callback, pattern=r"^lossy:"))

@@ -6,8 +6,8 @@ report, a smarter source-selection idea, or a typo fix, it all helps.
 ## Reporting bugs
 
 Open a [bug report](https://github.com/eeegoloauq/music-bot/issues/new/choose).
-The most useful thing you can include is the link you pasted and the bot's
-final status message — that's usually enough to reproduce a download problem.
+Include the action you tried and the bot's final status message. For imports, include the input
+format and chosen mode; for downloads, include the music link and configured provider.
 
 If the bot picked the wrong release or the tags came out wrong, use the
 dedicated **Wrong match / bad tags** form instead — those aren't crashes, and
@@ -49,7 +49,7 @@ Most logic changes can be developed against the offline test suite alone.
 - Keep changes small and focused — one topic per PR.
 - Behavior changes need a test. The suite is offline by design, so stub any
   new network interaction the way the existing tests do (`tests/`).
-- `uv run pytest` must pass.
+- `uv run --no-sync pytest` must pass after the frozen development sync above.
 - For anything bigger than a fix, link the issue where we discussed it.
 
 ## What to expect

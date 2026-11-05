@@ -3,8 +3,9 @@
 The audio is already on disk (``uploads.py`` staged it under
 ``/data/uploads/.extracted/<id>/``); this module figures out *which release*
 it is, then runs the exact downstream path a Soulseek download takes:
-canonical Deezer metadata, force-retag, canonical filenames, tag-based
-dedup, into the library.
+The owner can keep supplied files unchanged, identify a release, or select
+one manually. Release mode applies canonical Deezer tags and filenames with
+tag-based dedup, preserving supplied artwork, lyrics and useful sidecars.
 
 Identification ladder (docs/local-upload-plan.md), first rung that
 resolves wins:
@@ -25,6 +26,8 @@ A miss at every rung is logged at WARNING with everything that was tried;
 
 import asyncio
 import contextlib
+import hashlib
+import json
 import logging
 import os
 import re
@@ -41,10 +44,10 @@ from library.files import (
 )
 from library.tagger import _patch_missing_tags
 from library.importing import (
-    _download_cover, _move_into_library, _result_dict, _write_tags_force,
+    _download_cover, _move_into_library, _result_dict, write_import_tags,
     run_to_completion,
 )
-from uploads import AUDIO_EXTS
+from uploads import AUDIO_EXTS, ART_EXTS, SIDECAR_EXTS, IntakeReport, _inventory_tree
 
 logger = logging.getLogger(__name__)
 
@@ -333,10 +336,35 @@ def _file_track(src: str, dest: str, track: dict, album: dict,
     finished library file, never a moved-but-untagged one. The saved count
     is bumped here, by the thread, so it stays right even when the awaiting
     coroutine was cancelled meanwhile."""
-    _move_into_library(src, dest)
     if ext in ("flac", "m4a", "mp3"):
-        _write_tags_force(dest, track, album, cover_data, lyrics, ext)
+        write_import_tags(src, track, album, cover_data, lyrics, ext)
+    _move_into_library(src, dest)
     progress["saved"] = progress.get("saved", 0) + 1
+
+
+def _preserve_extras(staging_dir: str, album_dir: str) -> None:
+    """Copy supplied art and sidecars before staging can be removed."""
+    files = [os.path.join(root, f) for root, _dirs, names in os.walk(staging_dir)
+             for f in names if not f.startswith(".")
+             and os.path.splitext(f)[1].lower() in ART_EXTS | SIDECAR_EXTS]
+    audio = _staged_audio(staging_dir)
+    if not files:
+        return
+    common = os.path.commonpath([os.path.dirname(f) for f in files + audio])
+    for src in files:
+        dest = os.path.join(album_dir, os.path.relpath(src, common))
+        if not os.path.realpath(dest).startswith(os.path.realpath(album_dir) + os.sep):
+            raise ValueError("Sidecar destination escapes the album directory")
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        # Preserve both copies when a library sidecar already has this name.
+        if os.path.exists(dest):
+            with open(src, "rb") as stream:
+                digest = hashlib.file_digest(stream, "sha256").hexdigest()[:12]
+            stem, ext = os.path.splitext(dest)
+            dest = f"{stem}-{digest}{ext}"
+        if not os.path.exists(dest):
+            with open(src, "rb") as source, open(dest, "xb") as target:
+                shutil.copyfileobj(source, target)
 
 
 async def import_staged_album(album: dict, staging_dir: str, dest_dir: str,
@@ -353,6 +381,7 @@ async def import_staged_album(album: dict, staging_dir: str, dest_dir: str,
     existing_dir = await asyncio.to_thread(_locate_existing_album, dest_dir, album)
     album_dir = existing_dir or _ensure_album_dir(
         dest_dir, _sanitize(album["artist"]), _sanitize(album["title"]))
+    await run_to_completion(asyncio.to_thread(_preserve_extras, staging_dir, album_dir))
     cover_data = await _download_cover(album.get("cover_uuid", ""), album_dir)
 
     skipped = with_lyrics = 0
@@ -402,8 +431,13 @@ async def import_staged_album(album: dict, staging_dir: str, dest_dir: str,
     downloaded = progress["saved"]
     leftovers = await asyncio.to_thread(_staged_audio, staging_dir)
     if not leftovers:
-        # nothing worth keeping — art/playlists go with the staging dir
-        await asyncio.to_thread(shutil.rmtree, staging_dir, ignore_errors=True)
+        # Keep unsupported extras recoverable; supported sidecars were copied.
+        remaining = [os.path.join(root, f)
+                     for root, _dirs, files in os.walk(staging_dir) for f in files
+                     if not f.startswith(".")
+                     and os.path.splitext(f)[1].lower() not in ART_EXTS | SIDECAR_EXTS]
+        if not remaining:
+            await asyncio.to_thread(shutil.rmtree, staging_dir, ignore_errors=True)
 
     result = _result_dict(
         album_dir, downloaded, skipped, failed, total, format_label, with_lyrics,
@@ -412,3 +446,125 @@ async def import_staged_album(album: dict, staging_dir: str, dest_dir: str,
     )
     result["leftover_files"] = [os.path.relpath(p, staging_dir) for p in leftovers]
     return result
+
+
+def describe_album(report: IntakeReport) -> dict:
+    """Use supplied album tags for placement, with a filename fallback."""
+    artists, albums = [], set()
+    for rel in report.audio:
+        try:
+            audio = MutagenFile(os.path.join(report.staging_dir, rel), easy=True)
+            tags = audio.tags if audio is not None else None
+            if tags:
+                artist = next(iter(tags.get("albumartist") or tags.get("artist") or []), "")
+                album = next(iter(tags.get("album") or []), "")
+                if artist:
+                    artists.append(str(artist))
+                if album:
+                    albums.add(str(album))
+        except Exception:
+            continue
+    if len({a.casefold() for a in albums}) > 1:
+        raise ValueError("Upload contains several albums; supply one album at a time")
+    name = os.path.splitext(report.name)[0] if report.name.lower().endswith(".zip") else report.name
+    artist = "Unknown Artist"
+    if artists:
+        artist = artists[0] if len({a.casefold() for a in artists}) == 1 else "Various Artists"
+    return {"artist": artist, "title": next(iter(sorted(albums)), name) or "Untitled Album"}
+
+
+def _new_album_dir(dest_dir: str, album: dict) -> str:
+    """Reserve a separate directory; an import never overwrites another edition."""
+    root = os.path.realpath(dest_dir)
+    artist = os.path.join(root, _sanitize(album["artist"]) or "Unknown Artist")
+    if not os.path.realpath(artist).startswith(root + os.sep):
+        raise ValueError("Artist directory escapes the library")
+    os.makedirs(artist, exist_ok=True)
+    title = _sanitize(album["title"]) or "Untitled Album"
+    for index in range(1, 10000):
+        target = os.path.join(artist, title if index == 1 else f"{title} ({index})")
+        try:
+            os.mkdir(target)
+            return target
+        except FileExistsError:
+            continue
+    raise ValueError("Too many copies of this album")
+
+
+def _file_original(src: str, dest: str, progress: dict, audio: bool) -> None:
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    if audio:
+        if os.path.exists(dest):
+            raise FileExistsError(f"Import destination already exists: {dest}")
+        _move_into_library(src, dest)
+        progress["saved"] += 1
+    else:
+        # Keep sidecars in staging too, so a cancelled import can resume.
+        temporary = dest + ".importing"
+        with open(src, "rb") as source, open(temporary, "wb") as target:
+            shutil.copyfileobj(source, target)
+        os.replace(temporary, dest)
+
+
+def _original_state(report: IntakeReport, dest_dir: str, inventory: IntakeReport) -> dict:
+    # Store state outside the uploaded tree so an archive cannot supply it.
+    state_path = report.staging_dir + ".original.json"
+    if os.path.exists(state_path):
+        with open(state_path) as stream:
+            state = json.load(stream)
+        root = os.path.realpath(dest_dir)
+        if not os.path.realpath(state["target"]).startswith(root + os.sep):
+            raise ValueError("Previous import destination escapes the library")
+        return state
+    album = describe_album(inventory)
+    files = inventory.audio + inventory.art + inventory.sidecars
+    state = {"album": album, "target": _new_album_dir(dest_dir, album),
+             "common": os.path.commonpath([os.path.dirname(f) for f in files])}
+    with open(state_path + ".tmp", "w") as stream:
+        json.dump(state, stream)
+    os.replace(state_path + ".tmp", state_path)
+    return state
+
+
+async def import_original(report: IntakeReport, dest_dir: str,
+                          progress: dict | None = None) -> tuple[dict, dict]:
+    """Keep audio bytes, filenames, embedded art, lyrics and supported sidecars.
+
+    Existing editions get a new folder. Cancellation leaves the remaining
+    files in staging and finishes the current file before returning.
+    """
+    started = time.monotonic()
+    progress = progress if progress is not None else {}
+    progress.setdefault("saved", 0)
+    inventory = IntakeReport(name=report.name, staging_dir=report.staging_dir)
+    if not await asyncio.to_thread(_inventory_tree, report.staging_dir, inventory):
+        raise ValueError(inventory.error)
+    if not inventory.audio:
+        raise ValueError("No audio left in staging")
+    state = await asyncio.to_thread(_original_state, report, dest_dir, inventory)
+    album, target, common = state["album"], state["target"], state["common"]
+    # Copy art first. State keeps the same destination and archive wrapper on retry.
+    files = inventory.art + inventory.sidecars + inventory.audio
+    for rel in files:
+        dest = os.path.join(target, os.path.relpath(rel, common or "."))
+        if not os.path.realpath(dest).startswith(os.path.realpath(target) + os.sep):
+            raise ValueError("Import destination escapes the album")
+        await run_to_completion(asyncio.to_thread(
+            _file_original, os.path.join(report.staging_dir, rel), dest,
+            progress, rel in inventory.audio))
+    # Sidecars are now in the library. Unsupported extras remain recoverable.
+    for rel in inventory.art + inventory.sidecars:
+        os.remove(os.path.join(report.staging_dir, rel))
+    os.remove(report.staging_dir + ".original.json")
+    for root, dirs, _files in os.walk(report.staging_dir, topdown=False):
+        for directory in dirs:
+            path = os.path.join(root, directory)
+            if not os.listdir(path):
+                os.rmdir(path)
+    remaining = [f for f in os.listdir(report.staging_dir) if f != ".upload-name"]
+    if not remaining:
+        await asyncio.to_thread(shutil.rmtree, report.staging_dir)
+    result = _result_dict(target, progress["saved"], 0, [], len(inventory.audio),
+                          "Original files", 0, time.monotonic() - started,
+                          {"local upload": progress["saved"]})
+    return album, result

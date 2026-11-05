@@ -24,7 +24,7 @@ def make_zip(path, members):
 def staged_files(report):
     out = []
     for root, _dirs, files in os.walk(report.staging_dir):
-        out += [os.path.relpath(os.path.join(root, f), report.staging_dir) for f in files]
+        out += [os.path.relpath(os.path.join(root, f), report.staging_dir) for f in files if f != ".upload-name"]
     return sorted(out)
 
 
@@ -40,10 +40,12 @@ def test_happy_zip_unpack(tmp_path):
     assert r.error is None
     assert r.audio == ["Album - Artist/01 - Song.flac"]
     assert r.art == ["Album - Artist/cover.jpg"]
-    assert r.skipped == ["Album - Artist/playlist.m3u"]
+    assert r.skipped == []
+    assert r.sidecars == ["Album - Artist/playlist.m3u"]
     assert not zip_path.exists()  # consumed
     assert staged_files(r) == [os.path.join("Album - Artist", "01 - Song.flac"),
-                               os.path.join("Album - Artist", "cover.jpg")]
+                               os.path.join("Album - Artist", "cover.jpg"),
+                               os.path.join("Album - Artist", "playlist.m3u")]
 
 
 def test_zip_slip_rejected(tmp_path):
