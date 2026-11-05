@@ -454,7 +454,7 @@ async def cmd_share_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(note)
 
 
-_PROVIDER_GUIDE = "https://github.com/eeegoloauq/music-bot/blob/dev/docs/providers/soulseek.md"
+_PROVIDER_GUIDE = "https://github.com/eeegoloauq/music-bot/tree/dev/docs/providers"
 
 
 def _provider_actions() -> InlineKeyboardMarkup:

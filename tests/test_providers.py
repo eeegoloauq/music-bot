@@ -125,7 +125,7 @@ async def test_missing_provider_does_not_queue_or_move_force_backup(monkeypatch,
     assert "Artist" in text and "1/1" in text and "send the link again" in text
     actions = io.reply_text.call_args.kwargs["reply_markup"].inline_keyboard[0]
     assert actions[0].callback_data == "import:help"
-    assert actions[1].url.endswith("docs/providers/soulseek.md")
+    assert actions[1].url.endswith("docs/providers")
 
 
 @pytest.mark.parametrize("kind,id", [("album", "1"), ("track", "2")])

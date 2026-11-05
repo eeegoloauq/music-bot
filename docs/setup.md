@@ -70,8 +70,8 @@ For Navidrome share links, set `NAVIDROME_PUBLIC_URL` and enable sharing in Navi
 
 ## Optional downloads
 
-Follow the [Soulseek provider guide](providers/soulseek.md) for an optional local slskd daemon or
-an existing instance. Download providers and library sharing are explicitly configured separately.
+Choose a [download provider](providers) and follow its setup guide.
+Download providers and library sharing are explicitly configured separately.
 A link with no available provider still identifies the release and checks the library, then offers
 import and setup instructions. It does not queue a future download.
 
