@@ -19,6 +19,15 @@ MUSIC_DIR = os.getenv("MUSIC_DIR", "/music")
 STREAM_BITRATE = os.getenv("STREAM_BITRATE", "320")
 NAVI_PUBLIC_URL = os.getenv("NAVIDROME_PUBLIC_URL", "").rstrip("/") or ""
 
+# Downloads and Soulseek library sharing are separate opt-ins.
+DOWNLOAD_PROVIDER = os.getenv("DOWNLOAD_PROVIDER", "none").strip().lower()
+if DOWNLOAD_PROVIDER not in {"none", "soulseek"}:
+    raise ValueError("DOWNLOAD_PROVIDER must be 'none' or 'soulseek'")
+SLSKD_HOST = os.getenv("SLSKD_HOST", "").rstrip("/")
+SLSKD_API_KEY = os.getenv("SLSKD_API_KEY", "")
+SOULSEEK_SHARE_SCAN_ENABLED = os.getenv(
+    "SOULSEEK_SHARE_SCAN_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
+
 # Soulseek peer quality cap — files above either limit are excluded from
 # scoring. Defaults cover all reasonable hi-res masters; set 16 / 44100 for
 # redbook-only. 0 disables the cap on that dimension.

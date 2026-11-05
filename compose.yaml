@@ -1,45 +1,4 @@
 services:
-  slskd:
-    # Pinned, not :latest — an unpinned tag is only re-resolved on an explicit
-    # pull, so the host silently sat on 0.25.1 for months while upstream moved.
-    image: slskd/slskd:0.26.0
-    container_name: slskd
-    user: "${MUSICBOT_UID:-1000}:${MUSICBOT_GID:-1000}"
-    restart: unless-stopped
-    environment:
-      SLSKD_SLSK_USERNAME: ${SOULSEEK_USERNAME}
-      SLSKD_SLSK_PASSWORD: ${SOULSEEK_PASSWORD}
-      # Peer-listen port. Override SLSKD_LISTEN_PORT in .env if 50300 is taken
-      # or you've forwarded a different port on your router.
-      SLSKD_SLSK_LISTEN_PORT: ${SLSKD_LISTEN_PORT:-50300}
-      # Filesystem layout is canonical here so the staging contract with
-      # music-bot can't drift. Works because the auto-generated slskd.yml
-      # keeps `directories:` commented out — in slskd, yml beats env, not
-      # the other way around.
-      SLSKD_DOWNLOADS_DIR: /downloads
-      SLSKD_INCOMPLETE_DIR: /downloads/.incomplete
-      SLSKD_NO_AUTH: "true"
-      SLSKD_UMASK: "0002"
-    volumes:
-      - ./slskd-config:/app
-      - ${MUSIC_LIBRARY_DIR:-/media/music}/.slskd-downloads:/downloads
-      - ${MUSIC_LIBRARY_DIR:-/media/music}:/shared:ro
-    ports:
-      - 127.0.0.1:5030:5030
-      - ${SLSKD_LISTEN_PORT:-50300}:${SLSKD_LISTEN_PORT:-50300}
-    # Ready when slskd has finished logging into the Soulseek network.
-    # Until then `/api/v0/searches` returns 503 — the bot's `depends_on`
-    # below uses this to gate startup so first-message searches don't
-    # see empty pools.
-    healthcheck:
-      test:
-        - CMD-SHELL
-        - wget -qO- http://localhost:5030/api/v0/server | grep -q
-          '"isLoggedIn":true' || exit 1
-      interval: 5s
-      timeout: 3s
-      retries: 30
-      start_period: 15s
   music-bot:
     image: ${MUSICBOT_IMAGE:-ghcr.io/eeegoloauq/music-bot}:${MUSICBOT_TAG:-latest}
     container_name: music-bot
@@ -47,11 +6,8 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
-      SLSKD_HOST: http://slskd:5030
-      SLSKD_DOWNLOAD_DIR: /music/.slskd-downloads
-      # Quality cap. 24/96 covers reasonable hi-res; 16/44100 for redbook-only.
-      MAX_BIT_DEPTH: ${MAX_BIT_DEPTH:-24}
-      MAX_SAMPLE_RATE_HZ: ${MAX_SAMPLE_RATE_HZ:-96000}
+      # Library path inside this container; MUSIC_LIBRARY_DIR is the host path.
+      MUSIC_DIR: /music
     volumes:
       - ${MUSIC_LIBRARY_DIR:-/media/music}:/music
       # Crash ledger for in-flight downloads (journal.py) — must outlive
@@ -70,7 +26,4 @@ services:
     stop_grace_period: 30s
     extra_hosts:
       - host.docker.internal:host-gateway
-    depends_on:
-      slskd:
-        condition: service_healthy
 networks: {}

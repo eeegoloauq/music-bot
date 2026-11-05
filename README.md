@@ -8,7 +8,8 @@ A Telegram bot for managing your [Navidrome](https://www.navidrome.org/) music l
 
 - Send the track you're playing as an audio file to any Telegram chat.
 - Share Navidrome links to tracks and albums, or send the lyrics of the playing track.
-- Add albums from ZIP files or folders; delete albums or individual tracks remotely.
+- Import ZIP archives and individual audio files through an optional upload page or watched folder.
+- Delete albums or individual tracks remotely.
 - Update library tags from [Deezer](https://www.deezer.com/) and add genres from
   [Last.fm](https://www.last.fm/api) with your API key.
 - Fetch synced lyrics from [LRCLIB](https://lrclib.net/) when importing music.
@@ -35,12 +36,21 @@ Enable inline mode in [BotFather](https://t.me/BotFather), then type `@yourbot` 
 
 Use `/retag` to update library tags and genres, `/scan` to rescan Navidrome, and `/stats` for
 library counts and size. `/retag` lists the changes first; `/retag confirm` applies them.
+Local imports and library management work without a download provider.
+
+To add your music, upload an album ZIP or an MP3/M4A/FLAC file through the optional
+[upload page](docs/setup.md#local-imports), or drop files into `bot-data/uploads/` on the server.
+Import results appear in Telegram.
+
+Music links identify a release and check your library. If tracks are missing, import your files
+or explicitly configure an [optional download provider](docs/providers/soulseek.md).
+Use `/provider` to check its status.
 
 [Importing music and other actions](docs/usage.md) · [Configuration](.env.example) · [Roadmap](ROADMAP.md)
 
 ## Development
 
-Python 3.12+, [uv](https://docs.astral.sh/uv/), `uv sync --frozen`, then `uv run pytest`.
+Python 3.12+, [uv](https://docs.astral.sh/uv/), `uv sync --frozen --extra soulseek`, then `uv run --no-sync pytest`.
 Tests use stubbed services and run offline. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License

@@ -4,7 +4,10 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 # Зависимости из uv.lock (--frozen = строго по локу + проверка хешей)
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
 COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen
+ARG MUSICBOT_EXTRAS=""
+RUN if [ "$MUSICBOT_EXTRAS" = "soulseek" ]; then \
+      uv sync --frozen --no-dev --extra soulseek; \
+    else uv sync --frozen --no-dev; fi
 ENV PATH="/app/.venv/bin:$PATH"
 COPY src/ .
 # Do not run as root: /app stays root-owned and read-only to the bot, which

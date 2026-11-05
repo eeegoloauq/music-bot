@@ -50,7 +50,7 @@ async def test_successful_track_download_invalidates_retag_session(
     monkeypatch.setattr(bot, "_download_semaphore", asyncio.Semaphore(1))
     monkeypatch.setattr(bot.metadata, "fetch_single_track", fake_fetch)
     monkeypatch.setattr(bot.metadata, "enrich_genres", no_op)
-    monkeypatch.setattr(bot.soulseek, "download_single_track", fake_download)
+    monkeypatch.setattr(bot.providers, "download_single_track", fake_download)
     monkeypatch.setattr(bot, "_trigger_scan", no_op)
     monkeypatch.setattr(bot, "_try_share_album", fake_share)
     monkeypatch.setattr(bot, "_send_result", no_op)

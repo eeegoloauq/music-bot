@@ -9,11 +9,15 @@ import journal
 from journal import PendingDownload
 
 import bot
+import providers
 
 
 @pytest.fixture(autouse=True)
 def journal_path(tmp_path, monkeypatch):
     monkeypatch.setattr(journal, "JOURNAL_PATH", str(tmp_path / "pending.json"))
+    async def ready():
+        return providers.ProviderStatus("ready", "Ready")
+    monkeypatch.setattr(providers, "check", ready)
 
 
 class FakeBot:

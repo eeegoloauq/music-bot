@@ -3,7 +3,7 @@ name = "music-bot"
 # Not a package (tool.uv.package = false): the release version is the git
 # tag, and the image is tagged from it in .github/workflows/release.yml.
 version = "0.0.0"
-description = "Telegram bot for Soulseek music downloads via slskd"
+description = "Telegram bot for managing a Navidrome music library"
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.12"
@@ -12,8 +12,10 @@ dependencies = [
     "aiohttp>=3.14",
     "mutagen>=1.47",
     "python-dotenv>=1.0",
-    "slskd-api>=0.1.4",
 ]
+
+[project.optional-dependencies]
+soulseek = ["slskd-api>=0.1.4"]
 
 [dependency-groups]
 dev = [

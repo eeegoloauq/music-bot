@@ -20,7 +20,7 @@ jobs:
       - uses: astral-sh/setup-uv@v10.0.1
       - name: Run tests
         run: |
-          uv sync --frozen
+          uv sync --frozen --extra soulseek
           uv run --no-sync pytest -q
 
   release:
@@ -62,6 +62,29 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Soulseek image tags
+        id: soulseek-meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/eeegoloauq/music-bot
+          flavor: suffix=-soulseek,onlatest=true
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+
+      - name: Build and push optional Soulseek image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: MUSICBOT_EXTRAS=soulseek
+          tags: ${{ steps.soulseek-meta.outputs.tags }}
+          labels: ${{ steps.soulseek-meta.outputs.labels }}
+          cache-from: type=gha,scope=soulseek
+          cache-to: type=gha,mode=max,scope=soulseek
 
       # The release notes are the message of the annotated tag; the generated
       # commit list is appended after them.

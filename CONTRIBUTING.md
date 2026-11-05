@@ -32,18 +32,17 @@ You need Python 3.12+ and [uv](https://docs.astral.sh/uv/):
 
 ```sh
 git clone https://github.com/eeegoloauq/music-bot && cd music-bot
-uv sync
-uv run pytest
+uv sync --frozen --extra soulseek
+uv run --no-sync pytest
 ```
 
 The test suite runs **fully offline** — slskd and every network call are
 stubbed — so it needs no credentials, no containers, and finishes in seconds.
 If it's green locally, CI will agree.
 
-To run the bot for real you need the two-container setup from the
-[setup guide](docs/setup.md): slskd + the bot, configured through `.env`.
-That's only necessary for testing end-to-end download behavior; most logic
-changes can be developed against the test suite alone.
+The [setup guide](docs/setup.md) runs the base bot without a download provider.
+For end-to-end download checks, configure the [optional provider](docs/providers/soulseek.md).
+Most logic changes can be developed against the offline test suite alone.
 
 ## Pull requests
 

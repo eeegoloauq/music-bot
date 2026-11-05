@@ -25,5 +25,5 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Run pytest
         run: |
-          uv sync --frozen
+          uv sync --frozen --extra soulseek
           uv run --no-sync pytest -q

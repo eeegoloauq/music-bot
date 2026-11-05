@@ -36,8 +36,8 @@ from config import (
 import journal
 import metadata
 import reporting
-import soulseek
-from soulseek.downloader import run_to_completion
+import providers
+from library.importing import run_to_completion
 import navidrome
 import retagger
 import uploads
@@ -381,8 +381,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"<b>Commands:</b>\n"
         f"/help — show all features\n"
         f"/scan — trigger Navidrome library rescan\n"
-        f"/sharescan — trigger heavy slskd share rescan\n\n"
-        f"Send a music link (Tidal, Spotify, Apple Music, Deezer, YouTube) to download.\n"
+        f"/provider — download provider status and setup\n\n"
+        f"Send a music link to identify a release and check your library.\n"
+        f"Import album ZIPs or folders; optional providers can download missing music.\n"
         f"Type <code>@{bot_me.username}</code> in any chat for inline mode, "
         f"or use the buttons below.",
         parse_mode="HTML",
@@ -415,9 +416,11 @@ def _inline_shortcuts() -> InlineKeyboardMarkup:
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bot_me = await context.bot.get_me()
     await update.message.reply_text(
-        "<b>Download</b>\n"
+        "<b>Import and identify</b>\n"
+        "Drop an album ZIP or folder into the watched upload folder.\n"
         "Send a music link from Tidal, Spotify, Apple Music, Deezer, Shazam or YouTube. "
-        "For other services, search by name.\n"
+        "For other services, search by name. The bot checks your library first.\n"
+        "Downloads require a configured, available provider. "
         "Add <b>re</b> after the link to force re-download.\n"
         "Every download and upload import carries a ✖ Cancel button until it "
         "finishes — tap it at any stage; tracks already saved stay.\n\n"
@@ -430,7 +433,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"<code>@{bot_me.username} del name</code> — delete an album or a track\n\n"
         "<b>Commands</b>\n"
         "/scan — trigger Navidrome library rescan\n"
-        "/sharescan — trigger heavy slskd share rescan\n"
+        "/provider — download provider status and setup\n"
         "/stats — library statistics\n"
         "/retag — refresh tags on every album from Deezer + Last.fm "
         "(dry-run, then <code>/retag confirm</code>)",
@@ -449,6 +452,69 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_share_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     note = await _trigger_scan(slskd_mode="immediate")
     await update.message.reply_text(note)
+
+
+_PROVIDER_GUIDE = "https://github.com/eeegoloauq/music-bot/blob/dev/docs/providers/soulseek.md"
+
+
+def _provider_actions() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📥 Import files", callback_data="import:help"),
+         InlineKeyboardButton("Provider setup", url=_PROVIDER_GUIDE)],
+    ])
+
+
+@authorized
+async def cmd_provider(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    status = await providers.check()
+    await update.message.reply_text(status.message, reply_markup=_provider_actions())
+
+
+@authorized
+async def _handle_import_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    await update.callback_query.message.reply_text(
+        "Drop an album ZIP or a folder of audio files into the bot's watched upload folder. "
+        "With the default Docker setup, this is bot-data/uploads on the server. "
+        "The bot identifies, tags and imports matching tracks, then reports here. "
+        "You can also use the upload page if your administrator enabled it.")
+
+
+async def _prepare_download(io: "ChatIO", kind: str, release_id: str,
+                            force: bool = False) -> bool:
+    """Identify and check local files before accepting any provider work."""
+    try:
+        if kind == "album":
+            album = await metadata.fetch_album(release_id)
+            tracks = album.get("tracks", [])
+            artist, title = album["artist"], album["title"]
+        else:
+            track, album = await metadata.fetch_single_track(release_id)
+            tracks = [track]
+            artist, title = track["artist"], track["title"]
+
+        def local_count():
+            album_dir = _locate_existing_album(MUSIC_DIR, album or {}, canonicalize=False)
+            return sum(bool(_find_existing_track(album_dir, t)) for t in tracks) if album_dir else 0
+
+        present = await asyncio.to_thread(local_count)
+    except Exception as exc:
+        logger.warning("Release lookup failed for %s %s: %s", kind, release_id, exc)
+        await io.reply_text(f"❌ Failed to identify release: {_short(exc)}")
+        return False
+    label = f"{artist} — {title}"
+    if tracks and present == len(tracks) and not force:
+        await io.reply_text(f"{label}\nAlready in library.")
+        return False
+    status = await providers.check()
+    if status.ready:
+        return True
+    count = f"\nIn library: {present}/{len(tracks)} tracks." if tracks else ""
+    await io.reply_text(
+        f"{label}{count}\n{status.message}\n"
+        "Import your files, or finish provider setup and send the link again.",
+        reply_markup=_provider_actions())
+    return False
 
 
 def _collect_stats() -> dict:
@@ -998,11 +1064,13 @@ async def _trigger_scan(*, slskd_mode: str = "none") -> str:
     /sharescan requests an immediate slskd scan.
     Returns a status line for the user.
     """
-    if slskd_mode == "immediate":
-        asyncio.create_task(soulseek.rescan_shares())
+    if slskd_mode != "none" and not providers.sharing_enabled():
+        slskd_note = "Soulseek share scans are disabled." if slskd_mode == "immediate" else ""
+    elif slskd_mode == "immediate":
+        asyncio.create_task(providers.rescan_shares())
         slskd_note = "slskd share scan triggered."
     elif slskd_mode == "scheduled":
-        delay = soulseek.schedule_rescan_shares()
+        delay = providers.schedule_rescan_shares()
         mins = max(1, round(delay / 60))
         slskd_note = f"slskd share scan scheduled in ~{mins}m."
     else:
@@ -1122,6 +1190,8 @@ async def _report_cancelled(status_msg, run: ActiveRun, io: ChatIO | None = None
 
 async def _download_album(update: Update, album_id: str, force: bool = False):
     io = ChatIO.from_update(update)
+    if not await _prepare_download(io, "album", album_id, force):
+        return
     _spawn_run(_run_album(io, album_id, force=force), io, f"album {album_id}")
 
 
@@ -1267,7 +1337,7 @@ async def _do_download_album(io: ChatIO, status_msg, album_id: str, force: bool 
             await live.refresh(force=prog.handle(ev))
 
         try:
-            result = await soulseek.download_album(
+            result = await providers.download_album(
                 album_id, MUSIC_DIR, album=album, on_event=on_event,
             )
         except Exception as e:
@@ -1442,6 +1512,8 @@ async def _import_upload(io: ChatIO, status_msg, report: uploads.IntakeReport,
 
 async def _download_track(update: Update, track_id: str, force: bool = False):
     io = ChatIO.from_update(update)
+    if not await _prepare_download(io, "track", track_id, force):
+        return
     _spawn_run(_run_track(io, track_id, force=force), io, f"track {track_id}")
 
 
@@ -1525,7 +1597,7 @@ async def _do_download_track(io: ChatIO, status_msg, track_id: str, force: bool 
             await live.refresh(force=prog.handle(ev))
 
         try:
-            path, was_downloaded, fmt = await soulseek.download_single_track(
+            path, was_downloaded, fmt = await providers.download_single_track(
                 track, album_ctx, MUSIC_DIR, on_event=on_event,
             )
         except RuntimeError as e:
@@ -1601,12 +1673,12 @@ async def _offer_mp3_fallback(
     """
     _purge_stale_lossy()
     try:
-        candidates = await soulseek.find_lossy_candidates(track, album_ctx)
-    except soulseek.SearchError as e:
+        candidates = await providers.find_lossy_candidates(track, album_ctx)
+    except providers.SearchError as e:
         # Searches are being throttled or slskd is down — "no fallback found"
         # would be a lie. Report the real reason and stop here.
         logger.warning("Lossy fallback search couldn't run: %s", e)
-        reason = "rate-limited" if isinstance(e, soulseek.SearchThrottledError) \
+        reason = "rate-limited" if isinstance(e, providers.SearchThrottledError) \
             else "search error"
         await safe_edit(
             status_msg,
@@ -1712,6 +1784,12 @@ async def _handle_lossy_callback(update: Update, context: ContextTypes.DEFAULT_T
 
 
 async def _run_lossy_download(query, entry: dict) -> None:
+    status = await providers.check()
+    if not status.ready:
+        await query.edit_message_text(
+            f"{status.message}\nSend the link again after setup or recovery.",
+            reply_markup=_provider_actions())
+        return
     track = entry["track"]
     album_ctx = entry["album_ctx"]
     candidates = entry["candidates"]
@@ -1742,7 +1820,7 @@ async def _run_lossy_download(query, entry: dict) -> None:
                 await live.refresh(force=prog.handle(ev))
 
             try:
-                path, was_downloaded, fmt = await soulseek.download_single_track(
+                path, was_downloaded, fmt = await providers.download_single_track(
                     track, album_ctx, MUSIC_DIR,
                     accept_lossy=True,
                     precomputed_candidates=candidates,
@@ -1894,6 +1972,11 @@ async def _resume_pending(app: Application) -> None:
     entries = journal.load()
     if not entries:
         return
+    status = await providers.check()
+    if not status.ready:
+        logger.info("Journal: preserving %d pending downloads; provider %s",
+                    len(entries), status.state)
+        return
     logger.info("Journal: %d pending download(s) to resume", len(entries))
     for entry in sorted(entries, key=lambda e: e.requested_at):
         if entry.resume_attempts >= journal.MAX_RESUME_ATTEMPTS:
@@ -1926,20 +2009,26 @@ async def _resume_pending(app: Application) -> None:
 
 
 async def _post_init(app: Application) -> None:
-    await app.bot.set_my_commands([
+    commands = [
         BotCommand("help", "Show all features"),
         BotCommand("scan", "Trigger Navidrome library rescan"),
-        BotCommand("sharescan", "Trigger heavy slskd share rescan"),
+        BotCommand("provider", "Download provider status and setup"),
         BotCommand("stats", "Library statistics"),
         BotCommand("retag", "Re-tag library from current Deezer + Last.fm metadata"),
-    ])
+    ]
+    if providers.sharing_enabled():
+        commands.append(BotCommand("sharescan", "Trigger Soulseek share rescan"))
+    await app.bot.set_my_commands(commands)
     # Reclaim space from prior failed sessions — partial files left in
     # the slskd staging dir would otherwise pile up forever. Async so the
     # bot is responsive even on a slow fs scan.
-    _spawn_background(soulseek.cleanup_orphan_staging())
-    # Pick up downloads a restart orphaned. Best-effort and serialized on
-    # the download semaphore like any other request.
-    _spawn_background(_resume_pending(app))
+    status = await providers.check()
+    logger.info("Download provider: %s", status.state)
+    if status.ready:
+        _spawn_background(providers.cleanup_orphan_staging())
+        # Pick up downloads a restart orphaned. Unavailable providers leave
+        # the journal untouched, including its resume-attempt counters.
+        _spawn_background(_resume_pending(app))
     # Local-upload intake: watch /data/uploads for dropped zips/folders,
     # then identify/tag/file each one like a normal download, reporting to
     # the owner (first ALLOWED_USERS id).
@@ -1959,7 +2048,7 @@ async def _post_init(app: Application) -> None:
 
 async def _shutdown(app: Application) -> None:
     await metadata.close()
-    await soulseek.close()
+    await providers.close()
     await navidrome.close()
     await upload_web.stop()
 
@@ -1980,6 +2069,7 @@ def _build_app() -> Application:
     )
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("provider", cmd_provider))
     app.add_handler(CommandHandler("scan", cmd_scan))
     app.add_handler(CommandHandler("sharescan", cmd_share_scan))
     app.add_handler(CommandHandler("stats", cmd_stats))
@@ -1987,6 +2077,7 @@ def _build_app() -> Application:
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(InlineQueryHandler(handle_inline_query))
     app.add_handler(CallbackQueryHandler(_handle_lossy_callback, pattern=r"^lossy:"))
+    app.add_handler(CallbackQueryHandler(_handle_import_help, pattern=r"^import:help$"))
     app.add_handler(CallbackQueryHandler(_handle_cancel_callback, pattern=r"^cancel:"))
     app.add_handler(CallbackQueryHandler(_handle_delete_callback, pattern=r"^rm:(yes|no):"))
     app.add_error_handler(_error_handler)

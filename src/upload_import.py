@@ -40,7 +40,7 @@ from library.files import (
     _sanitize, _track_prefix,
 )
 from library.tagger import _patch_missing_tags
-from soulseek.downloader import (
+from library.importing import (
     _download_cover, _move_into_library, _result_dict, _write_tags_force,
     run_to_completion,
 )

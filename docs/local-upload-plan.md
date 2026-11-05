@@ -36,19 +36,18 @@ Two ways to get a file there:
 
 ### Why not "send the zip to the bot in chat"
 
-The cloud Telegram Bot API caps `getFile` (bot-side download) at **20 MB**. A
-FLAC album is 200–500 MB, so Telegram simply won't hand the file to the bot.
-There is no code workaround — it's a server-side limit at `api.telegram.org`.
+The cloud Telegram Bot API caps [`getFile`](https://core.telegram.org/bots/api#getfile)
+(bot-side download) at **20 MB**, including files sent to the bot by a person.
+Many album archives exceed that limit. Direct chat imports are not implemented;
+the upload page and watched folder accept larger archives under the configured import limits.
 
 ### Why not a self-hosted Bot API server
 
-Running the open-source `telegram-bot-api` locally raises the limit to 2 GB and
-would make chat upload work. Rejected as overkill for this feature:
-- adds a sibling container + requires `api_id`/`api_hash` from my.telegram.org,
-- adds onboarding friction for everyone who clones the repo,
-- (note for the record: it does **not** expose the host IP — it's outbound-only,
-  same as the bot today. The user's concern there was unfounded. It was still
-  rejected purely on the friction/weight tradeoff.)
+A [local Bot API server](https://core.telegram.org/bots/api#using-a-local-bot-api-server)
+allows bot-side downloads without a size limit; the documented 2000 MB limit is for
+uploads by the bot. It requires an additional service and Telegram application credentials.
+Music Bot currently uses the cloud Bot API. The web page keeps large-file imports available
+without requiring a local Bot API server.
 
 ## The web upload page
 

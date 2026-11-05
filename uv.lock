@@ -493,6 +493,10 @@ dependencies = [
     { name = "mutagen" },
     { name = "python-dotenv" },
     { name = "python-telegram-bot" },
+]
+
+[package.optional-dependencies]
+soulseek = [
     { name = "slskd-api" },
 ]
 
@@ -508,8 +512,9 @@ requires-dist = [
     { name = "mutagen", specifier = ">=1.47" },
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "python-telegram-bot", specifier = ">=21.0" },
-    { name = "slskd-api", specifier = ">=0.1.4" },
+    { name = "slskd-api", marker = "extra == 'soulseek'", specifier = ">=0.1.4" },
 ]
+provides-extras = ["soulseek"]
 
 [package.metadata.requires-dev]
 dev = [

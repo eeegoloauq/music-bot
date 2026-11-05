@@ -6,18 +6,6 @@ Larger work that shouldn't be done in passing. Remove an item when it ships.
   video per album alongside the audio. Keep static artwork for tags and fallback, select a
   suitable resolution within a configurable size limit, and let imports finish when artwork
   is unavailable. Evaluate source access and reuse terms before choosing a provider.
-- **Standalone library management.** Make local imports, tagging, metadata lookup and Navidrome
-  integration work without a download provider. Move Soulseek dependencies, startup tasks,
-  credentials and service dependencies out of the base installation. Keep providers explicitly
-  enabled; configure library sharing separately.
-- **Provider setup and link handling.** Resolve pasted links and check whether the release is
-  already in the library.
-  If a download needs a provider and none is configured, show the identified release with
-  actions to import files or open provider setup. Distinguish missing configuration from an
-  unavailable provider using application configuration and health checks. Provide a dedicated
-  Soulseek/slskd setup guide, an optional Compose override and an environment example; support
-  connecting to an existing slskd instance. Keep installation snippets in the guide and link
-  to it from the bot. Do not queue a download until a provider is available and the user retries.
 - **Library maintenance by field.** Add album-level and library-wide actions to fetch missing
   synced lyrics from LRCLIB, refresh genres from Deezer and Last.fm, and update cover art and
   track names from a matched release. Let users choose the fields, review changes and explicitly

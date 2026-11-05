@@ -19,8 +19,8 @@ import pytest
 
 import journal
 from library.files import _ensure_album_dir
-from soulseek import downloader
-from soulseek.downloader import _move_into_library
+from library import importing
+from library.importing import _move_into_library
 
 
 @pytest.fixture
@@ -87,8 +87,8 @@ def test_shared_writes_never_chmod(tmp_path, shared_umask, monkeypatch):
     async def _session():
         return _Session()
 
-    monkeypatch.setattr(downloader, "_get_session", _session)
-    assert asyncio.run(downloader._download_cover("https://example.invalid/c", str(album))) == b"cover"
+    monkeypatch.setattr(importing, "_get_session", _session)
+    assert asyncio.run(importing._download_cover("https://example.invalid/c", str(album))) == b"cover"
     assert stat.S_IMODE((album / "cover.jpg").stat().st_mode) == 0o664
 
     monkeypatch.setattr(journal, "JOURNAL_PATH", str(tmp_path / "state" / "pending.json"))
@@ -156,7 +156,7 @@ from pathlib import Path
 sys.path.insert(0, sys.argv[2])
 os.umask(0o002)  # what main() does
 from library.files import _ensure_album_dir
-from soulseek import downloader
+from library import importing
 from mutagen.id3 import ID3, TIT2
 import journal
 
@@ -166,7 +166,7 @@ album = Path(_ensure_album_dir(str(root / "music"), "Artist", "Album"))
 assert album.stat().st_uid == 0
 assert stat.S_IMODE(album.stat().st_mode) == 0o775
 track = album / "track.mp3"
-downloader._move_into_library(str(root / "staging" / "track.mp3"), str(track))
+importing._move_into_library(str(root / "staging" / "track.mp3"), str(track))
 assert track.stat().st_uid == 0  # same-filesystem rename retains foreign owner
 assert stat.S_IMODE(track.stat().st_mode) == 0o664
 tags = ID3(track)
@@ -188,8 +188,8 @@ class Response:
 class Session:
     def get(self, *args, **kwargs): return Response()
 async def session(): return Session()
-downloader._get_session = session
-assert asyncio.run(downloader._download_cover("https://example.invalid/cover", str(album))) == b"cover"
+importing._get_session = session
+assert asyncio.run(importing._download_cover("https://example.invalid/cover", str(album))) == b"cover"
 assert stat.S_IMODE((album / "cover.jpg").stat().st_mode) == 0o664
 uploads = root / "data" / "uploads"
 uploads.mkdir()

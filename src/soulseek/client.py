@@ -25,20 +25,10 @@ from dataclasses import dataclass, field
 import requests
 import slskd_api
 
-from config import MAX_FILE_BYTES
+from config import MAX_FILE_BYTES, SLSKD_HOST, SLSKD_API_KEY
+from providers import SearchError, SearchThrottledError
 
 logger = logging.getLogger(__name__)
-
-
-class SearchError(Exception):
-    """The search could not be executed (slskd unreachable, API error).
-    Distinct from a search that ran and found nothing — callers must not
-    report this as 'no match'."""
-
-
-class SearchThrottledError(SearchError):
-    """slskd (or the Soulseek server behind it) is rate-limiting our
-    searches and backoff didn't clear it."""
 
 
 # LOSSLESS_EXTS is FLAC-only because the tagger has no native WAV/AIFF writer
@@ -120,11 +110,13 @@ _client: slskd_api.SlskdClient | None = None
 def _get_client() -> slskd_api.SlskdClient:
     global _client
     if _client is None:
-        host = os.environ.get("SLSKD_HOST", "http://slskd:5030")
+        host = SLSKD_HOST
+        if not host:
+            raise SearchError("SLSKD_HOST is not configured")
         # When slskd has SLSKD_NO_AUTH=true it ignores the X-API-Key header,
         # but slskd-api's constructor requires *some* non-empty value to pick
         # an auth path. Any string works — slskd lets the request through.
-        api_key = os.environ.get("SLSKD_API_KEY") or "anonymous"
+        api_key = SLSKD_API_KEY or "anonymous"
         # Without a timeout, slskd-api's requests session waits forever — if
         # slskd restarts or a connection dies silently, the to_thread worker
         # running the call blocks permanently, and enough of those exhaust the

@@ -1,6 +1,6 @@
 # Container users and volume permissions
 
-Both containers run as the same non-root user. Configure `MUSICBOT_UID` and
+Music Bot runs as a non-root user. The optional local slskd container uses the same user. Configure `MUSICBOT_UID` and
 `MUSICBOT_GID` in `.env`; both default to 1000. `MUSICBOT_UID` owns the bot's
 own state, and **`MUSICBOT_GID` must be the group that owns the music library**,
 not the user's private group — that single choice is what makes every write land
@@ -28,8 +28,9 @@ start when both are set.
 
 ## A fresh install
 
-Create `bot-data`, `slskd-config` and `$MUSIC_LIBRARY_DIR/.slskd-downloads` with
-`install -d -o UID -g GID -m 2775` using your numeric IDs. The setgid bit is
+Create `bot-data` with `install -d -o UID -g GID -m 2775` using your numeric IDs.
+The optional local Soulseek provider also needs `slskd-config` and
+`$MUSIC_LIBRARY_DIR/.slskd-downloads` created with those permissions. The setgid bit is
 what keeps whatever lands there in the shared group. The library root has
 to be writable and searchable by that user or group.
 

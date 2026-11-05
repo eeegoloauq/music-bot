@@ -1,0 +1,44 @@
+# Optional local provider. Start with both Compose files; see docs/providers/soulseek.md.
+services:
+  music-bot:
+    image: ${MUSICBOT_IMAGE:-ghcr.io/eeegoloauq/music-bot}:${MUSICBOT_TAG:-latest}-soulseek
+    environment:
+      DOWNLOAD_PROVIDER: soulseek
+      SLSKD_HOST: http://slskd:5030
+      SLSKD_DOWNLOAD_DIR: /music/.slskd-downloads
+  slskd:
+    # Keep the daemon version fixed across installations.
+    image: slskd/slskd:0.26.0
+    container_name: slskd
+    user: "${MUSICBOT_UID:-1000}:${MUSICBOT_GID:-1000}"
+    restart: unless-stopped
+    environment:
+      SLSKD_SLSK_USERNAME: ${SOULSEEK_USERNAME}
+      SLSKD_SLSK_PASSWORD: ${SOULSEEK_PASSWORD}
+      # Peer-listen port. Override SLSKD_LISTEN_PORT in .env if 50300 is taken
+      # or you've forwarded a different port on your router.
+      SLSKD_SLSK_LISTEN_PORT: ${SLSKD_LISTEN_PORT:-50300}
+      # Filesystem layout is canonical here so the staging contract with
+      # music-bot can't drift. Works because the auto-generated slskd.yml
+      # keeps `directories:` commented out — in slskd, yml beats env, not
+      # the other way around.
+      SLSKD_DOWNLOADS_DIR: /downloads
+      SLSKD_INCOMPLETE_DIR: /downloads/.incomplete
+      SLSKD_NO_AUTH: "true"
+      SLSKD_UMASK: "0002"
+    volumes:
+      - ./slskd-config:/app
+      - ${MUSIC_LIBRARY_DIR:-/media/music}/.slskd-downloads:/downloads
+    ports:
+      - 127.0.0.1:5030:5030
+      - ${SLSKD_LISTEN_PORT:-50300}:${SLSKD_LISTEN_PORT:-50300}
+    # Provider readiness is checked by the bot before each new download.
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -qO- http://localhost:5030/api/v0/server | grep -q
+          '"isLoggedIn":true' || exit 1
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 15s

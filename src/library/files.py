@@ -162,7 +162,8 @@ def _folder_signals(folder: str) -> tuple[str | None, str | None]:
     return deezer_id, album_tag
 
 
-def _locate_existing_album(music_dir: str, album_meta: dict) -> str | None:
+def _locate_existing_album(music_dir: str, album_meta: dict, *,
+                           canonicalize: bool = True) -> str | None:
     """Find the existing folder for this album under ``music_dir``, if any.
 
     Identity comes from tags, not folder names — the bot's canonical
@@ -175,6 +176,7 @@ def _locate_existing_album(music_dir: str, album_meta: dict) -> str | None:
       2. Folder whose ``album`` tag matches our expected title (NFC +
          casefold). Catches foreign-tooled folders.
 
+    Set ``canonicalize=False`` for a read-only lookup that keeps folder casing.
     Scope is ``<music_dir>/<artist>/*`` only — going wider would conflate
     same-titled compilations across artists ("Greatest Hits" everywhere)."""
     artist = album_meta.get("artist") or ""
@@ -182,7 +184,17 @@ def _locate_existing_album(music_dir: str, album_meta: dict) -> str | None:
     deezer_id = str(album_meta.get("id") or "")
     if not artist or not title:
         return None
-    artist_dir = _resolve_dir_canonical(music_dir, _sanitize(artist))
+    artist_name = _sanitize(artist)
+    if canonicalize:
+        artist_dir = _resolve_dir_canonical(music_dir, artist_name)
+    else:
+        artist_dir = os.path.join(music_dir, artist_name)
+        if not os.path.isdir(artist_dir) and os.path.isdir(music_dir):
+            with os.scandir(music_dir) as entries:
+                matches = sorted(e.path for e in entries
+                                 if e.is_dir() and e.name.casefold() == artist_name.casefold())
+            if matches:
+                artist_dir = matches[0]
     if not os.path.isdir(artist_dir):
         return None
     norm_expected = _normalize_for_compare(title)
