@@ -22,7 +22,7 @@ Security issues don't belong in the issue tracker — see [SECURITY.md](SECURITY
 ## Suggesting features
 
 Open a feature request issue **before** writing code. The bot's scope is
-deliberately narrow — get music from a link into Navidrome, tagged well — so
+focused on importing and managing a Navidrome music library, so
 let's talk it over first; it may save you an evening of work on something
 that doesn't fit.
 
@@ -41,7 +41,7 @@ stubbed — so it needs no credentials, no containers, and finishes in seconds.
 If it's green locally, CI will agree.
 
 To run the bot for real you need the two-container setup from the
-[README](README.md#setup): slskd + the bot, configured through `.env`.
+[setup guide](docs/setup.md): slskd + the bot, configured through `.env`.
 That's only necessary for testing end-to-end download behavior; most logic
 changes can be developed against the test suite alone.
 
