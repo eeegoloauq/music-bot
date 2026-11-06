@@ -50,21 +50,29 @@ The optional browser page accepts ZIP archives and individual audio files, inclu
 and FLAC. It feeds the same importer and reports results in Telegram. It runs inside Music Bot
 and needs no separate download provider or container.
 
-For browser uploads, set `UPLOAD_HTTP_PORT` in `.env`, enable the commented port mapping under
-`music-bot` in [compose.yaml](../compose.yaml), and set `UPLOAD_WEB_URL` to the address users can
-open from their devices. For example:
+For browser uploads, set `UPLOAD_HTTP_PORT` and `UPLOAD_HTTP_TOKEN` in `.env`, enable the
+commented port mapping under `music-bot` in [compose.yaml](../compose.yaml), and set
+`UPLOAD_WEB_URL` to the address users can open from their devices. Generate a token with
+`python3 -c 'import secrets; print(secrets.token_urlsafe(32))'`. For example:
 
 ```dotenv
 UPLOAD_HTTP_PORT=8080
-UPLOAD_WEB_URL=http://music.example.com:8080
+UPLOAD_HTTP_TOKEN=replace-with-your-generated-token
+UPLOAD_WEB_URL=https://music.example.com
 ```
 
-Replace the example address with your LAN/VPN address or authenticated proxy URL, then recreate
-the service. **Upload page** appears in `/start`, `/help`, `/upload` and import suggestions.
+Replace the example address with your HTTPS reverse proxy URL, then recreate the service.
+Compose leaves the port unpublished until enabled; its commented mapping binds the host port
+to loopback. Configure your proxy to reach that host port. HTTPS protects the token and audio
+in transit. **Upload page** appears in `/start`, `/help`, `/upload` and import suggestions.
 `UPLOAD_WEB_URL` controls the Telegram link; `UPLOAD_HTTP_PORT` starts the server. The bot cannot
-infer a user-reachable address from the listen port. The page has no built-in authentication;
-keep access private or protect it with an authenticated reverse proxy. The bot's upload size
-limits apply; Telegram's cloud file-download limit does not apply to this page.
+infer a user-reachable address from the listen port.
+
+The server refuses to start without `UPLOAD_HTTP_TOKEN`. Enter the token on the upload page;
+the browser sends it in the `Authorization` header and keeps it only in the open page. The
+static entry page is public, while uploads require the token before the server parses the body
+or creates files. Do not include the token in `UPLOAD_WEB_URL`. The bot's upload size limits
+apply; Telegram's cloud file-download limit does not apply to this page.
 
 Alternatively, copy an album ZIP, a folder of tracks or an individual audio file into
 `bot-data/uploads/`. The bot creates this folder; Samba and SFTP work too. Without a page URL,

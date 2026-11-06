@@ -8,10 +8,12 @@ and is renamed into place only when complete, so the watcher can never grab
 a half-received file.
 
 Off by default: the server only starts when ``UPLOAD_HTTP_PORT`` is set.
-There is no auth — publish the port to your LAN at most; putting it on the
-internet needs a reverse proxy with auth in front.
+The listener requires ``UPLOAD_HTTP_TOKEN``; uploads use Bearer authentication.
+The public page contains only a token field and upload controls. Use HTTPS for
+remote access so the token and audio remain private in transit.
 """
 
+import hmac
 import logging
 import os
 import uuid
@@ -19,7 +21,7 @@ from urllib.parse import unquote
 
 from aiohttp import web
 
-from config import UPLOAD_DIR, UPLOAD_MAX_TOTAL_BYTES
+from config import UPLOAD_DIR, UPLOAD_HTTP_TOKEN, UPLOAD_MAX_TOTAL_BYTES
 from uploads import AUDIO_EXTS
 
 logger = logging.getLogger(__name__)
@@ -39,6 +41,7 @@ INDEX_HTML = """<!doctype html>
          background: Canvas; color: CanvasText }
   main { width: min(420px, 92vw); text-align: center }
   h1 { font-size: 1.25rem; font-weight: 600 }
+  #token { box-sizing: border-box; width: 100%; margin-bottom: 1rem; padding: .6rem }
   #drop { border: 2px dashed color-mix(in srgb, CanvasText 30%, transparent);
           border-radius: 14px; padding: 3rem 1rem; cursor: pointer;
           transition: border-color .15s, background .15s }
@@ -53,6 +56,8 @@ INDEX_HTML = """<!doctype html>
 </style>
 <main>
   <h1>&#127925; drop an album</h1>
+  <label for="token">Upload token</label>
+  <input id="token" type="password" autocomplete="off" spellcheck="false" required>
   <div id="drop">drop a .zip here<br><small>or click to pick a file</small></div>
   <input id="file" type="file" hidden accept=".zip,audio/*">
   <div id="bar"><div id="fill"></div></div>
@@ -62,7 +67,7 @@ INDEX_HTML = """<!doctype html>
 <script>
   const drop = document.getElementById('drop'), pick = document.getElementById('file'),
         bar = document.getElementById('bar'), fill = document.getElementById('fill'),
-        msg = document.getElementById('msg');
+        msg = document.getElementById('msg'), token = document.getElementById('token');
   drop.onclick = () => pick.click();
   pick.onchange = () => pick.files[0] && send(pick.files[0]);
   ['dragover', 'dragenter'].forEach(t => drop.addEventListener(t, e => {
@@ -76,10 +81,16 @@ INDEX_HTML = """<!doctype html>
     if (f) send(f);
   });
   function send(file) {
+    if (!token.value) {
+      msg.textContent = 'Enter the upload token first.';
+      token.focus();
+      return;
+    }
     const form = new FormData();
     form.append('file', file);
     const xhr = new XMLHttpRequest();
     xhr.open('POST', '/upload');
+    xhr.setRequestHeader('Authorization', 'Bearer ' + token.value);
     bar.style.visibility = 'visible';
     msg.textContent = 'uploading ' + file.name + '…';
     xhr.upload.onprogress = e => {
@@ -102,7 +113,10 @@ INDEX_HTML = """<!doctype html>
 
 
 async def _index(_request: web.Request) -> web.Response:
-    return web.Response(text=INDEX_HTML, content_type="text/html")
+    return web.Response(
+        text=INDEX_HTML, content_type="text/html",
+        headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
+    )
 
 
 async def _upload(request: web.Request) -> web.Response:
@@ -149,15 +163,40 @@ async def _upload(request: web.Request) -> web.Response:
 
 
 def make_app() -> web.Application:
+    if not UPLOAD_HTTP_TOKEN.strip():
+        raise ValueError("UPLOAD_HTTP_TOKEN is required when the upload page is enabled")
+    expected_token = UPLOAD_HTTP_TOKEN.encode("utf-8")
+
+    @web.middleware
+    async def authenticate(request: web.Request, handler):
+        # The static page lets the browser ask for the token. Every other
+        # route is authenticated before multipart parsing or filesystem work.
+        if request.path == "/" and request.method in {"GET", "HEAD"}:
+            return await handler(request)
+        scheme, _, supplied = request.headers.get("Authorization", "").partition(" ")
+        if scheme.lower() != "bearer" or not hmac.compare_digest(
+                supplied.encode("utf-8", errors="surrogateescape"), expected_token):
+            raise web.HTTPUnauthorized(
+                text="valid upload token required",
+                headers={"WWW-Authenticate": "Bearer", "Cache-Control": "no-store"},
+            )
+        return await handler(request)
+
     # our own streaming cap does the real limiting; client_max_size just must
     # not undercut it (aiohttp's default is 1 MiB)
-    app = web.Application(client_max_size=UPLOAD_MAX_TOTAL_BYTES + (1 << 20))
+    app = web.Application(
+        client_max_size=UPLOAD_MAX_TOTAL_BYTES + (1 << 20),
+        middlewares=[authenticate],
+    )
     app.add_routes([web.get("/", _index), web.post("/upload", _upload)])
     return app
 
 
 async def start(port: int) -> None:
     global _runner
+    if not port:
+        return
+    app = make_app()  # Validate credentials before touching the intake folder.
     # partial files from a crashed session would sit in .incoming forever
     incoming = os.path.join(UPLOAD_DIR, _INCOMING)
     if os.path.isdir(incoming):
@@ -166,12 +205,19 @@ async def start(port: int) -> None:
                 os.remove(os.path.join(incoming, stale))
             except OSError:
                 pass
-    _runner = web.AppRunner(make_app())
-    await _runner.setup()
-    await web.TCPSite(_runner, "0.0.0.0", port).start()
+    runner = web.AppRunner(app)
+    await runner.setup()
+    try:
+        await web.TCPSite(runner, "0.0.0.0", port).start()
+    except BaseException:
+        await runner.cleanup()
+        raise
+    _runner = runner
     logger.info("Upload page listening on :%d", port)
 
 
 async def stop() -> None:
+    global _runner
     if _runner is not None:
         await _runner.cleanup()
+        _runner = None

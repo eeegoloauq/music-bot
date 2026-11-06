@@ -14,7 +14,11 @@ import upload_web
 @pytest.fixture
 async def client(tmp_path, monkeypatch):
     monkeypatch.setattr(upload_web, "UPLOAD_DIR", str(tmp_path))
-    c = TestClient(TestServer(upload_web.make_app()))
+    monkeypatch.setattr(upload_web, "UPLOAD_HTTP_TOKEN", "test-upload-token")
+    c = TestClient(
+        TestServer(upload_web.make_app()),
+        headers={"Authorization": "Bearer test-upload-token"},
+    )
     await c.start_server()
     yield c
     await c.close()
@@ -78,3 +82,55 @@ async def test_loose_audio_accepted(client, tmp_path):
     resp = await client.post("/upload", data=form("song.flac", b"F" * 10))
     assert resp.status == 200
     assert (tmp_path / "song.flac").exists()
+
+
+@pytest.mark.parametrize("authorization", [
+    "", "Bearer wrong", "Basic test-upload-token", "Bearer \u2603",
+])
+async def test_unauthorized_upload_rejected_before_body_parsing(client, tmp_path, authorization):
+    # A malformed body would produce 400 if the multipart handler ran.
+    resp = await client.post(
+        "/upload", data=b"not multipart",
+        headers={"Authorization": authorization},
+    )
+    assert resp.status == 401
+    assert resp.headers["WWW-Authenticate"] == "Bearer"
+    assert os.listdir(tmp_path) == []
+
+
+async def test_browser_page_has_token_entry_without_storing_secret(client):
+    resp = await client.get("/", headers={"Authorization": ""})
+    assert resp.status == 200
+    page = await resp.text()
+    assert 'id="token" type="password"' in page
+    assert "xhr.setRequestHeader('Authorization', 'Bearer ' + token.value)" in page
+    assert "test-upload-token" not in page
+    assert "localStorage" not in page
+    assert "sessionStorage" not in page
+    assert resp.headers["Cache-Control"] == "no-store"
+
+
+@pytest.mark.parametrize("token", ["", "  "])
+def test_missing_token_refuses_app(monkeypatch, token):
+    monkeypatch.setattr(upload_web, "UPLOAD_HTTP_TOKEN", token)
+    with pytest.raises(ValueError, match="UPLOAD_HTTP_TOKEN"):
+        upload_web.make_app()
+
+
+async def test_enabled_server_refuses_missing_token_before_cleanup(monkeypatch, tmp_path):
+    incoming = tmp_path / ".incoming"
+    incoming.mkdir()
+    partial = incoming / "partial"
+    partial.write_bytes(b"incomplete")
+    monkeypatch.setattr(upload_web, "UPLOAD_HTTP_TOKEN", "")
+    monkeypatch.setattr(upload_web, "UPLOAD_DIR", str(tmp_path))
+    with pytest.raises(ValueError, match="UPLOAD_HTTP_TOKEN"):
+        await upload_web.start(8080)
+    assert partial.read_bytes() == b"incomplete"
+
+
+async def test_disabled_server_needs_no_token(monkeypatch):
+    monkeypatch.setattr(upload_web, "UPLOAD_HTTP_TOKEN", "")
+    monkeypatch.setattr(upload_web, "_runner", None)
+    await upload_web.start(0)
+    assert upload_web._runner is None

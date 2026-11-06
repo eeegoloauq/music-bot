@@ -52,6 +52,8 @@ UPLOAD_DIR = os.getenv("UPLOAD_DIR", "/data/uploads")
 UPLOAD_MAX_TOTAL_BYTES = int(os.getenv("UPLOAD_MAX_TOTAL_BYTES", str(10 * 1024**3)))
 # Port for the one-page upload site (upload_web.py). Unset/0 = server off.
 UPLOAD_HTTP_PORT = int(os.getenv("UPLOAD_HTTP_PORT", "0"))
+# Shared secret required when the upload page is enabled. Send as a Bearer token.
+UPLOAD_HTTP_TOKEN = os.getenv("UPLOAD_HTTP_TOKEN", "").strip()
 # User-reachable page address for Telegram buttons; may be a LAN or proxy URL.
 # This advertises the page independently of the server's internal listen port.
 UPLOAD_WEB_URL = os.getenv("UPLOAD_WEB_URL", "").strip().rstrip("/")

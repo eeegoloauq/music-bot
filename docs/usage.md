@@ -75,13 +75,17 @@ preview. Updates use the values fetched during preview; failed writes preserve t
 FLAC, MP3 and M4A are supported. Audio, filenames,
 folders and unrelated tags stay unchanged. On completion, the bot requests a Navidrome scan;
 catalogue refresh may finish later.
+Selected maintenance requires write access to each existing file and refuses
+hard-linked files and files with access ACLs. See
+[replacement semantics](volume-permissions.md#maintenance-replacement-semantics).
 
 ## Import an album
 
 Album downloads from [Bandcamp](https://get.bandcamp.help/en/articles/15263311-how-do-i-unzip-my-album-download)
 arrive as ZIP files. Use `/upload` or **Upload page** in `/start` to open the configured
-[browser upload page](setup.md#local-imports). You can also copy an album ZIP or a folder of
-tracks into `bot-data/uploads/` on the server.
+[browser upload page](setup.md#local-imports), enter the configured upload token, then choose
+your files. You can also copy an album ZIP or a folder of tracks into `bot-data/uploads/` on
+the server.
 
 Both entry points also accept individual audio files, including MP3, M4A and FLAC.
 The page transfers your files to the bot; import progress and results are reported in Telegram.
