@@ -34,6 +34,7 @@ audio through your private chat. Configure [Navidrome sharing](setup.md#inline-m
 | `/upload` | Open the configured upload page or view import instructions |
 | `/import ID release` | Import a staged upload using an album link or Deezer album ID |
 | `/retag` | Preview library-wide tag changes from Deezer and Last.fm |
+| `/maintain` | Choose titles, genres, synced lyrics and artwork to update library-wide |
 | `/retag confirm` | Apply the pending preview |
 | `/retag stop` | Discard the pending preview |
 | `/provider` | Check optional download provider status and open setup |
@@ -41,13 +42,39 @@ audio through your private chat. Configure [Navidrome sharing](setup.md#inline-m
 
 Retagging refreshes track metadata from [Deezer](https://www.deezer.com/) and adds genres from
 [Last.fm](https://www.last.fm/api) when an API key is configured. It preserves audio, existing
-lyrics and embedded cover art. Synced lyrics from [LRCLIB](https://lrclib.net/) are fetched during
-import; library-wide lyrics and artwork updates are on the [roadmap](../ROADMAP.md). A preview expires
+lyrics and embedded cover art. Use `/maintain` to update those fields separately. A preview expires
 after two hours and is invalidated by library changes made through the bot. Confirmation also
 checks whether the previewed files changed on disk. Open an album with `/library name`, select
 **Preview tag changes**, then confirm or discard. This uses the same planner and tag writers as
 `/retag`, scoped to that album; it keeps folder paths stable. A preview belongs to its initiating
 user and chat. Only one preview can be pending at a time.
+
+## Update selected fields
+
+Use `/maintain` for the whole library, or open an album with `/library name` and choose
+**Update selected fields**. Select any combination of:
+
+- **Titles**: apply track titles from the identified Deezer release.
+- **Genres**: add Deezer and optional Last.fm genres, retaining your existing genres.
+- **Lyrics**: fill missing synced lyrics from [LRCLIB](https://lrclib.net/), retaining supplied plain text.
+- **Artwork**: fill missing embedded covers. A new `cover.jpg` is added when the album has no cover.
+
+Lyrics and artwork cycle through off, **fill missing**, and **replace existing** when tapped.
+Replacement updates existing content only after you select that mode and confirm the preview.
+Artwork replacement also updates `cover.jpg`; other artwork sidecars are retained.
+
+Choose **Preview changes**, review the selected modes, counts and changes, then **Confirm** or
+**Discard**. For large libraries, the preview shows a sample and totals. Unmatched tracks and
+unavailable lyrics or covers are reported and skipped. Missing synced lyrics are left alone
+when LRCLIB offers only plain text. Genres can still use Last.fm when Deezer cannot identify
+the album. No download provider is required.
+
+The same two-hour preview session and user/chat ownership checks apply as for `/retag`.
+`/retag confirm` and `/retag stop` also work for these previews. Changed files require a new
+preview. Updates use the values fetched during preview; failed writes preserve the original.
+FLAC, MP3 and M4A are supported. Audio, filenames,
+folders and unrelated tags stay unchanged. On completion, the bot requests a Navidrome scan;
+catalogue refresh may finish later.
 
 ## Import an album
 

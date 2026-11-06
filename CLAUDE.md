@@ -18,6 +18,7 @@ providers.py            optional download configuration, health and lazy backend
   → soulseek/           slskd search/enqueue/monitor; selection.py owns source policy
 library/                files.py = identity/dedup; tagger.py = FLAC/M4A/MP3 tags
 retagger.py             shared library/album preview and apply; preserves artwork and lyrics
+maintenance.py          selected field plans; exact preview values and atomic file replacement
 navidrome.py            library API and scan requests after writes
 reporting.py            progress events → live status and final summary
 ```
@@ -75,6 +76,15 @@ This repo is public (mirrored to GitHub): no hostnames, IPs or registry addresse
 - **Retag ownership**: album and whole-library previews share one session, scoped to user/chat.
   Confirm only while its file snapshot still matches; imports, downloads and retags serialize
   writes through the same semaphore. Keep album retags on the shared planner/tag writers.
+- **Selected maintenance**: `/maintain` and album **Update selected fields** reuse retagger
+  identification, session ownership, snapshots, serialization and apply reporting. New scoped
+  writes live in `library/tagger.py`, not another tag writer. Lyrics/artwork fill missing data
+  unless replacement is explicitly selected. Preserve plain lyrics when adding synced lyrics,
+  add genres without clearing existing values, and keep audio and folder paths stable.
+  Preview fetches data without library writes; confirmation applies those exact values without
+  network lookups. Check file fingerprints before replacement. Temporary copies have a `.tmp`
+  suffix so interrupted writes cannot become library tracks. Artwork replacement updates
+  embedded front covers and `cover.jpg`; a missing sidecar alone does not replace embedded art.
 - **Upload navigation**: `UPLOAD_HTTP_PORT` enables the browser server. `UPLOAD_WEB_URL` is the
   separate user-reachable LAN/VPN/proxy address for Telegram buttons; never infer it from a
   container hostname or listen port. `/upload` opens the page or local-import setup instructions.

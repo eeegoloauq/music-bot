@@ -40,6 +40,7 @@ import providers
 from library.importing import run_to_completion
 import navidrome
 import retagger
+import maintenance
 import uploads
 import upload_import
 import upload_web
@@ -383,6 +384,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"/help — show all features\n"
         f"/scan — trigger Navidrome library rescan\n"
         f"/upload — import your music\n"
+        f"/maintain — choose library fields to update\n"
         f"/provider — download provider status and setup\n\n"
         f"Send a music link to identify a release and check your library.\n"
         f"Import album ZIPs or audio files with /upload.\n"
@@ -450,6 +452,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/provider — download provider status and setup\n"
         "/stats — library statistics\n"
         "/library name — open an album and preview its tag changes\n"
+        "/maintain — choose library fields to update\n"
         "/import ID release — manually select an upload release\n"
         "/retag — refresh tags on every album from Deezer + Last.fm "
         "(dry-run, then <code>/retag confirm</code>)",
@@ -817,13 +820,81 @@ async def _handle_album_callback(update: Update, context: ContextTypes.DEFAULT_T
     folder = choice[0]
     if action == "preview":
         await _retag_command(update, [], folder=folder)
+    elif action == "maintain":
+        await _show_maintenance_picker(update, context, folder)
     elif action == "open":
         files = await asyncio.to_thread(retagger._list_audio_files, folder)
         title = f"{os.path.basename(os.path.dirname(folder))} — {os.path.basename(folder)}"
         await query.message.reply_text(
             title + f"\n{len(files)} tracks\n\n" + "\n".join(os.path.relpath(f, folder) for f in files)[:3000],
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
-                "Preview tag changes", callback_data=f"album:preview:{token}")]]))
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("Preview tag changes", callback_data=f"album:preview:{token}")],
+                [InlineKeyboardButton("Update selected fields", callback_data=f"album:maintain:{token}")],
+            ]))
+
+
+@authorized
+async def cmd_maintain(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await _show_maintenance_picker(update, context)
+
+
+def _maintenance_picker(selection: dict):
+    token = selection["token"]
+    rows = []
+    for name in maintenance.FIELDS:
+        mode = selection["fields"].get(name, 0)
+        label = ("replace existing" if mode == 2 else "fill missing") if name in {"lyrics", "artwork"} else "on"
+        text = f"{'✓' if mode else '○'} {name.title()}" + (f": {label}" if mode else "")
+        rows.append([InlineKeyboardButton(text, callback_data=f"maintain:{name}:{token}")])
+    rows.append([InlineKeyboardButton("Preview changes", callback_data=f"maintain:preview:{token}"),
+                 InlineKeyboardButton("Close", callback_data=f"maintain:close:{token}")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def _show_maintenance_picker(update: Update, context, folder: str | None = None):
+    selection = {"token": uuid.uuid4().hex[:12], "chat": update.effective_chat.id,
+                 "owner": update.effective_user.id,
+                 "folder": folder, "fields": {}, "expires": time.monotonic() + _RETAG_SESSION_TTL}
+    context.user_data["maintenance_selection"] = selection
+    scope = os.path.basename(folder) if folder else "Entire library"
+    await update.effective_message.reply_text(
+        f"Update fields · {scope}\nChoose fields, then preview. "
+        "Tap Lyrics or Artwork again to allow replacement of existing content.",
+        reply_markup=_maintenance_picker(selection))
+
+
+@authorized
+async def _handle_maintenance_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    _prefix, action, token = query.data.split(":", 2)
+    selection = context.user_data.get("maintenance_selection")
+    if (not selection or selection["token"] != token or selection["chat"] != update.effective_chat.id
+            or selection["owner"] != update.effective_user.id
+            or selection["expires"] < time.monotonic()):
+        await query.answer("Selection expired. Use /maintain or reopen the album.", show_alert=True)
+        return
+    if action in maintenance.FIELDS:
+        modes = 3 if action in {"lyrics", "artwork"} else 2
+        selection["fields"][action] = (selection["fields"].get(action, 0) + 1) % modes
+        await query.answer()
+        await query.edit_message_reply_markup(reply_markup=_maintenance_picker(selection))
+    elif action == "close":
+        context.user_data.pop("maintenance_selection", None)
+        await query.answer()
+        await query.edit_message_reply_markup(reply_markup=None)
+    elif action == "preview":
+        fields = frozenset(name for name, mode in selection["fields"].items() if mode)
+        if not fields:
+            await query.answer("Choose at least one field.", show_alert=True)
+            return
+        folder = selection["folder"]
+        if folder and not _safe_library_album(folder):
+            await query.answer("Album unavailable. Use /library again.", show_alert=True)
+            return
+        await query.answer()
+        options = maintenance.Options(fields, selection["fields"].get("lyrics") == 2,
+                                       selection["fields"].get("artwork") == 2)
+        await _retag_command(update, [], folder=folder, maintenance_options=options)
 
 
 @authorized
@@ -842,7 +913,40 @@ async def cmd_retag(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _retag_command(update, context.args or [])
 
 
-async def _retag_command(update: Update, args: list[str], folder: str | None = None):
+def _format_maintenance_preview(plans, summary, options) -> str:
+    updates = [update for plan in plans for update in plan.updates]
+    counts = []
+    for name in maintenance.FIELDS:
+        if name in options.fields:
+            keys = {"title"} if name == "titles" else {"artwork", "cover_file"} if name == "artwork" else {name}
+            counts.append(f"{name}: {sum(bool(keys.intersection(u.values)) for u in updates)}")
+    lines = ["<b>Selected field preview</b>", reporting.esc(options.describe()),
+             f"{summary.total} albums · {len(updates)} files to update", ", ".join(counts)]
+    details = [f"{p.artist_dir} / {p.album_dir} · {change}" for p in plans for change in p.changes]
+    for index, detail in enumerate(details):
+        line = reporting.esc(detail[:300])
+        if sum(map(len, lines)) + len(line) > 2800:
+            lines.append(f"+{len(details) - index} more changes")
+            break
+        lines.append(line)
+    notes = [f"{p.artist_dir} / {p.album_dir}: {note}" for p in plans for note in p.notes]
+    if summary.unidentified:
+        lines.append(f"{summary.unidentified} albums could not be identified; skipped.")
+    if notes:
+        lines.append(f"<b>Skipped or unavailable: {len(notes)}</b>")
+        for note in notes[:3]:
+            line = reporting.esc(note[:180])
+            if sum(map(len, lines)) + len(line) < 3500:
+                lines.append(line)
+    if updates:
+        lines.append("Confirm to apply these values, or discard. Preview expires in 2 hours.")
+    else:
+        lines.append("No applicable updates. Files were left unchanged.")
+    return "\n".join(lines)
+
+
+async def _retag_command(update: Update, args: list[str], folder: str | None = None,
+                         maintenance_options: maintenance.Options | None = None):
     global _retag_session, _retag_invalidated_reason, _retag_in_progress
     message = update.effective_message
     user_id = update.effective_user.id
@@ -935,7 +1039,14 @@ async def _retag_command(update: Update, args: list[str], folder: str | None = N
                 options["albums"] = [(folder, os.path.basename(os.path.dirname(folder)),
                                       os.path.basename(folder))]
             async with _download_semaphore:
-                plans, summary = await retagger.run_dry_run(MUSIC_DIR, progress=progress, **options)
+                if maintenance_options:
+                    albums = options.get("albums")
+                    if albums is None:
+                        albums = await asyncio.to_thread(retagger.scan_albums, MUSIC_DIR)
+                    albums = [entry for entry in albums if _safe_library_album(entry[0])]
+                    plans, summary = await maintenance.preview(albums, maintenance_options, progress)
+                else:
+                    plans, summary = await retagger.run_dry_run(MUSIC_DIR, progress=progress, **options)
                 snapshot = await asyncio.to_thread(_retag_snapshot, plans)
         except Exception as e:
             logger.exception("Re-tag dry-run failed")
@@ -952,11 +1063,14 @@ async def _retag_command(update: Update, args: list[str], folder: str | None = N
         "snapshot": snapshot,
         "plans": plans,
         "summary": summary,
+        "maintenance": maintenance_options,
         "expire_at": time.monotonic() + _RETAG_SESSION_TTL,
     }
     _retag_invalidated_reason = None
     text = _format_retag_summary(plans, summary, elapsed)
-    if folder:
+    if maintenance_options:
+        text = _format_maintenance_preview(plans, summary, maintenance_options)
+    if folder and not maintenance_options:
         details = [reporting.esc(change) for plan in plans for change in plan.changes]
         if details:
             text += "\n\n" + "\n".join(details)
@@ -1008,7 +1122,10 @@ async def _do_retag_apply(update: Update, plans: list):
                         and session["snapshot"] != await asyncio.to_thread(_retag_snapshot, plans)):
                     await safe_edit(status_msg, "Library changed since the preview. Run /retag again.", final=True)
                     return
-                stats = await retagger.run_apply(plans, progress=progress)
+                if session.get("maintenance"):
+                    stats = await retagger.run_apply(plans, progress=progress, apply_fn=maintenance.apply_plan)
+                else:
+                    stats = await retagger.run_apply(plans, progress=progress)
         except Exception as e:
             logger.exception("Re-tag apply failed")
             await safe_edit(status_msg, f"Apply failed: {_short(e)}", final=True)
@@ -1030,9 +1147,9 @@ async def _do_retag_apply(update: Update, plans: list):
 
     if stats["failed"]:
         out.append("")
-        out.append(f"<b>{len(stats['failed'])}</b> album-level failures:")
+        out.append(f"<b>{len(stats['failed'])}</b> failures:")
         for path, err in stats["failed"][:3]:
-            out.append(f"  {path} — {_short(Exception(err))}")
+            out.append(f"  {reporting.esc(path)} — {reporting.esc(_short(Exception(err)))}")
         if len(stats["failed"]) > 3:
             out.append(f"  +{len(stats['failed']) - 3} more")
 
@@ -2192,6 +2309,7 @@ async def _post_init(app: Application) -> None:
         BotCommand("provider", "Download provider status and setup"),
         BotCommand("stats", "Library statistics"),
         BotCommand("library", "Browse albums and preview tag changes"),
+        BotCommand("maintain", "Choose library fields to update"),
         BotCommand("import", "Select an upload release manually"),
         BotCommand("retag", "Re-tag library from current Deezer + Last.fm metadata"),
     ]
@@ -2260,7 +2378,10 @@ def _build_app() -> Application:
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("retag", cmd_retag))
     app.add_handler(CommandHandler("library", cmd_library))
-    app.add_handler(CallbackQueryHandler(_handle_album_callback, pattern=r"^album:(open|preview):"))
+    app.add_handler(CommandHandler("maintain", cmd_maintain))
+    app.add_handler(CallbackQueryHandler(_handle_maintenance_callback,
+                                        pattern=r"^maintain:(titles|genres|lyrics|artwork|preview|close):[a-f0-9]{12}$"))
+    app.add_handler(CallbackQueryHandler(_handle_album_callback, pattern=r"^album:(open|preview|maintain):"))
     app.add_handler(CallbackQueryHandler(_handle_retag_callback, pattern=r"^retag:(confirm|stop):"))
     app.add_handler(CallbackQueryHandler(_upload_choices.list_pending, pattern=r"^uploads:pending$"))
     app.add_handler(CommandHandler("import", _upload_choices.manual))

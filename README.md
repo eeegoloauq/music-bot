@@ -12,9 +12,10 @@ A Telegram bot for managing your [Navidrome](https://www.navidrome.org/) music l
   or a server folder. Keep originals or identify and tag a release.
 - Download albums and tracks through optional [providers](docs/providers).
 - Delete albums or individual tracks remotely.
-- Update library tags from [Deezer](https://www.deezer.com/) and add genres from
+- Preview album or library tag updates from [Deezer](https://www.deezer.com/) and add genres from
   [Last.fm](https://www.last.fm/api) with your API key.
-- Fetch synced lyrics from [LRCLIB](https://lrclib.net/) when importing music.
+- Fill missing artwork from Deezer and synced lyrics from [LRCLIB](https://lrclib.net/),
+  with optional replacement.
 
 ## Setup
 
@@ -36,8 +37,9 @@ Enable inline mode in [BotFather](https://t.me/BotFather), then type `@yourbot` 
 | `lib name` | Find a track or album in your library to share a link |
 | `del name` | Delete a track or album, with confirmation |
 
-Use `/retag` to update library tags and genres, `/scan` to rescan Navidrome, and `/stats` for
-library counts and size. `/retag` lists the changes first; `/retag confirm` applies them.
+Use `/maintain` to choose fields to update, `/retag` to refresh library tags, `/scan` to rescan
+Navidrome, and `/stats` for library counts and size. `/retag` lists the changes first;
+`/retag confirm` applies them.
 Local imports and library management work without a download provider.
 
 Use `/upload` or **Upload page** in `/start` to add an album ZIP or audio file through the

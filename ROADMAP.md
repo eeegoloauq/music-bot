@@ -6,11 +6,6 @@ Larger work that shouldn't be done in passing. Remove an item when it ships.
   video per album alongside the audio. Keep static artwork for tags and fallback, select a
   suitable resolution within a configurable size limit, and let imports finish when artwork
   is unavailable. Evaluate source access and reuse terms before choosing a provider.
-- **Library maintenance by field.** Add album-level and library-wide actions to fetch missing
-  synced lyrics from LRCLIB, refresh genres from Deezer and Last.fm, and update cover art and
-  track names from a matched release. Let users choose the fields, review changes and explicitly
-  opt into replacing existing lyrics or artwork. Keep bulk lyrics and artwork updates separate
-  from the current retag flow, which preserves both.
 - **Share links on request.** Keep library search read-only; create a public Navidrome share only
   after the user chooses to share an entry.
 - **Scan completion feedback.** Track Navidrome scan status after requesting a scan, report

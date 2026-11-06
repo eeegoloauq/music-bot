@@ -530,7 +530,8 @@ def _compute_changes(folder: str, artist: str, album: str,
 
 # --- plan ------------------------------------------------------------------
 
-async def plan_album(folder: str, artist: str, album: str) -> AlbumPlan:
+async def plan_album(folder: str, artist: str, album: str, *,
+                     include_genres: bool = True) -> AlbumPlan:
     plan = AlbumPlan(folder=folder, artist_dir=artist, album_dir=album)
     plan.files = _list_audio_files(folder)
     if not plan.files:
@@ -568,9 +569,9 @@ async def plan_album(folder: str, artist: str, album: str) -> AlbumPlan:
         # (canonical title/artist drives the Last.fm lookup). If Deezer
         # failed we still capture Last.fm-only genres so the caller can
         # write a partial update.
-        if plan.fresh_meta is not None:
+        if include_genres and plan.fresh_meta is not None:
             await metadata.enrich_genres(plan.fresh_meta)
-        else:
+        elif include_genres:
             plan.lastfm_only_genres = await _try_lastfm_only(artist, album)
 
     if plan.fresh_meta is not None:
@@ -1175,7 +1176,7 @@ async def run_dry_run(
 
 
 async def run_apply(
-    plans: list[AlbumPlan], progress: ProgressCb = None,
+    plans: list[AlbumPlan], progress: ProgressCb = None, *, apply_fn=None,
 ) -> dict:
     """Apply pre-computed plans. Returns a stats dict for the caller."""
     total = sum(1 for p in plans if p.needs_apply)
@@ -1195,11 +1196,13 @@ async def run_apply(
             logger.info("Re-tag folder disappeared; skipping: %s", plan.folder)
         else:
             try:
-                written, skipped = await apply_plan(plan)
+                written, skipped = await (apply_fn or apply_plan)(plan)
                 plan.files_written = written
                 plan.files_skipped = skipped
                 written_total += written
                 skipped_total += skipped
+                failed.extend((f"{plan.artist_dir}/{plan.album_dir}/{name}", error)
+                              for name, error in getattr(plan, "write_errors", []))
             except Exception as e:
                 failed.append((f"{plan.artist_dir}/{plan.album_dir}", str(e)))
         if progress is not None:

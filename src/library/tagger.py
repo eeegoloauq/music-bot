@@ -1,5 +1,7 @@
 import logging
 import os
+import re
+from mutagen import File as MutagenFile
 
 from mutagen.flac import FLAC, Picture
 from mutagen.mp4 import MP4, MP4Cover, MP4FreeForm
@@ -13,6 +15,126 @@ from library.files import _comment_value
 from metadata import fetch_lyrics
 
 logger = logging.getLogger(__name__)
+
+
+def inspect_selected_tags(filepath: str) -> dict:
+    """Read the values used by field maintenance; invalid files fail closed."""
+    audio = MutagenFile(filepath)
+    if audio is None:
+        raise ValueError("Unsupported audio file")
+    tags = audio.tags or {}
+    ext = os.path.splitext(filepath)[1].lower()
+    synced, plain, artwork = "", "", []
+    has_synced = False
+    if ext == ".flac":
+        title = next(iter(tags.get("title") or []), "")
+        genres = list(tags.get("genre") or [])
+        synced = next(iter(tags.get("syncedlyrics") or []), "")
+        lyrics = next(iter(tags.get("lyrics") or []), "")
+        plain = next(iter(tags.get("unsyncedlyrics") or []), "")
+        if re.search(r"\[\d{1,3}:\d{2}(?:[.:]\d+)?\]", lyrics):
+            synced = synced or lyrics
+        else:
+            plain = plain or lyrics
+        artwork = [p.data for p in audio.pictures]
+    elif ext == ".m4a":
+        title = next(iter(tags.get("©nam") or []), "")
+        genres = [g.strip() for value in tags.get("©gen", [])
+                  for g in value.split(";") if g.strip()]
+        synced = next(iter(tags.get("----:com.apple.iTunes:SYNCEDLYRICS") or []), b"")
+        synced = bytes(synced).decode("utf-8", "replace") if synced else ""
+        plain = next(iter(tags.get("©lyr") or []), "")
+        artwork = [bytes(p) for p in tags.get("covr", [])]
+    elif ext == ".mp3":
+        title = str(tags["TIT2"].text[0]) if "TIT2" in tags else ""
+        genres = list(tags["TCON"].text) if "TCON" in tags else []
+        if audio.tags is not None:
+            synced = next((str(f.text[0]) for f in tags.getall("TXXX")
+                           if f.desc.casefold() == "syncedlyrics" and f.text), "")
+            plain = next((f.text for f in tags.getall("USLT") if f.text), "")
+            has_synced = bool(tags.getall("SYLT"))
+            artwork = [p.data for p in tags.getall("APIC")]
+    else:
+        raise ValueError("Unsupported maintenance format")
+    has_synced = has_synced or bool(re.search(r"\[\d{1,3}:\d{2}(?:[.:]\d+)?\]", plain))
+    return {"title": title, "genres": genres, "synced": synced, "plain": plain,
+            "has_synced": bool(synced) or has_synced, "artwork": artwork}
+
+
+def write_selected_tags(filepath: str, updates: dict) -> None:
+    """Write only previewed fields. The caller stages and atomically replaces the file."""
+    audio = MutagenFile(filepath)
+    if audio is None:
+        raise ValueError("Unsupported audio file")
+    if audio.tags is None:
+        audio.add_tags()
+    # Staged writes use a non-audio suffix so scanners ignore unfinished files.
+    if isinstance(audio, FLAC):
+        for key in ("title", "genres"):
+            if key in updates:
+                audio["genre" if key == "genres" else key] = updates[key]
+        if "artwork" in updates:
+            others = [p for p in audio.pictures if p.type != 3]
+            audio.clear_pictures()
+            for picture in others:
+                audio.add_picture(picture)
+            picture = Picture()
+            picture.type, picture.mime, picture.data = 3, "image/jpeg", updates["artwork"]
+            audio.add_picture(picture)
+        if "lyrics" in updates:
+            lyrics = updates["lyrics"]
+            if lyrics.get("replaceExisting"):
+                for key in ("lyrics", "syncedlyrics", "unsyncedlyrics"):
+                    audio.pop(key, None)
+            elif "unsyncedlyrics" not in audio and "lyrics" in audio:
+                audio["unsyncedlyrics"] = list(audio["lyrics"])
+            audio["lyrics"] = audio["syncedlyrics"] = lyrics["syncedLyrics"]
+            if lyrics.get("plainLyrics") and "unsyncedlyrics" not in audio:
+                audio["unsyncedlyrics"] = lyrics["plainLyrics"]
+    elif isinstance(audio, MP4):
+        if "title" in updates:
+            audio["©nam"] = [updates["title"]]
+        if "genres" in updates:
+            audio["©gen"] = ["; ".join(updates["genres"])]
+        if "artwork" in updates:
+            audio["covr"] = [MP4Cover(updates["artwork"], imageformat=MP4Cover.FORMAT_JPEG)]
+        if "lyrics" in updates:
+            lyrics = updates["lyrics"]
+            if lyrics.get("replaceExisting"):
+                audio.pop("©lyr", None)
+            if lyrics.get("plainLyrics") and "©lyr" not in audio:
+                audio["©lyr"] = [lyrics["plainLyrics"]]
+            audio["----:com.apple.iTunes:SYNCEDLYRICS"] = [
+                MP4FreeForm(lyrics["syncedLyrics"].encode("utf-8"))]
+    elif isinstance(audio, MP3):
+        tags = audio.tags
+        if "title" in updates:
+            tags.add(TIT2(encoding=3, text=updates["title"]))
+        if "genres" in updates:
+            tags.add(TCON(encoding=3, text=updates["genres"]))
+        if "artwork" in updates:
+            for picture in list(tags.getall("APIC")):
+                if picture.type == 3:
+                    tags.delall(picture.HashKey)
+            descriptions = {p.desc for p in tags.getall("APIC")}
+            description = "Cover"
+            while description in descriptions:
+                description += " (front)"
+            tags.add(APIC(encoding=3, mime="image/jpeg", type=3, desc=description, data=updates["artwork"]))
+        if "lyrics" in updates:
+            lyrics = updates["lyrics"]
+            if lyrics.get("replaceExisting"):
+                tags.delall("USLT")
+                tags.delall("SYLT")
+            for frame in list(tags.getall("TXXX")):
+                if frame.desc.casefold() == "syncedlyrics":
+                    tags.delall(frame.HashKey)
+            tags.add(TXXX(encoding=3, desc="SYNCEDLYRICS", text=lyrics["syncedLyrics"]))
+            if lyrics.get("plainLyrics") and not tags.getall("USLT"):
+                tags.add(USLT(encoding=3, lang="eng", desc="", text=lyrics["plainLyrics"]))
+    else:
+        raise ValueError("Unsupported maintenance format")
+    audio.save()
 
 
 def _id3_get_text(audio, frame_id: str) -> str:
