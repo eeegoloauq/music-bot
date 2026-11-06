@@ -39,15 +39,17 @@ from mutagen import File as MutagenFile
 import metadata
 from metadata import deezer
 from library.files import (
+    AUDIO_EXTS,
     _ensure_album_dir, _find_existing_track, _locate_existing_album,
     _sanitize, _track_prefix,
 )
 from library.tagger import _patch_missing_tags
 from library.importing import (
-    _download_cover, _move_into_library, _result_dict, write_import_tags,
+    _download_cover, _result_dict, write_import_tags,
     run_to_completion,
 )
-from uploads import AUDIO_EXTS, ART_EXTS, SIDECAR_EXTS, IntakeReport, _inventory_tree
+from library.writing import copy_into_library
+from uploads import ART_EXTS, SIDECAR_EXTS, IntakeReport, _inventory_tree
 
 logger = logging.getLogger(__name__)
 
@@ -336,9 +338,14 @@ def _file_track(src: str, dest: str, track: dict, album: dict,
     finished library file, never a moved-but-untagged one. The saved count
     is bumped here, by the thread, so it stays right even when the awaiting
     coroutine was cancelled meanwhile."""
-    if ext in ("flac", "m4a", "mp3"):
-        write_import_tags(src, track, album, cover_data, lyrics, ext)
-    _move_into_library(src, dest)
+    def prepare(temporary):
+        if ext in ("flac", "m4a", "mp3"):
+            write_import_tags(temporary, track, album, cover_data, lyrics, ext)
+
+    # A supplied 0644 file may belong to another writer. Tag the new library
+    # inode, not the source: intake only requires source read/directory access.
+    copy_into_library(src, dest, prepare=prepare)
+    os.unlink(src)
     progress["saved"] = progress.get("saved", 0) + 1
 
 
@@ -363,8 +370,7 @@ def _preserve_extras(staging_dir: str, album_dir: str) -> None:
             stem, ext = os.path.splitext(dest)
             dest = f"{stem}-{digest}{ext}"
         if not os.path.exists(dest):
-            with open(src, "rb") as source, open(dest, "xb") as target:
-                shutil.copyfileobj(source, target)
+            copy_into_library(src, dest)
 
 
 async def import_staged_album(album: dict, staging_dir: str, dest_dir: str,
@@ -493,17 +499,22 @@ def _new_album_dir(dest_dir: str, album: dict) -> str:
 
 def _file_original(src: str, dest: str, progress: dict, audio: bool) -> None:
     os.makedirs(os.path.dirname(dest), exist_ok=True)
+    try:
+        copy_into_library(src, dest)
+    except FileExistsError:
+        # Sidecars remain in staging until the album finishes. A retry may
+        # encounter our previous complete copy; never overwrite a changed one.
+        if audio or os.path.islink(dest) or not os.path.isfile(dest):
+            raise
+        with open(src, "rb") as source, open(dest, "rb") as target:
+            while chunk := source.read(1024 * 1024):
+                if chunk != target.read(len(chunk)):
+                    raise FileExistsError(f"Import destination already exists: {dest}")
+            if target.read(1):
+                raise FileExistsError(f"Import destination already exists: {dest}")
     if audio:
-        if os.path.exists(dest):
-            raise FileExistsError(f"Import destination already exists: {dest}")
-        _move_into_library(src, dest)
+        os.unlink(src)
         progress["saved"] += 1
-    else:
-        # Keep sidecars in staging too, so a cancelled import can resume.
-        temporary = dest + ".importing"
-        with open(src, "rb") as source, open(temporary, "wb") as target:
-            shutil.copyfileobj(source, target)
-        os.replace(temporary, dest)
 
 
 def _original_state(report: IntakeReport, dest_dir: str, inventory: IntakeReport) -> dict:

@@ -8,7 +8,7 @@ import pytest
 import journal
 from journal import PendingDownload
 
-import bot
+from flows import common, downloads, state
 import providers
 
 
@@ -48,9 +48,9 @@ async def test_run_album_clears_journal_after_reported_outcome(monkeypatch):
     async def fake_do(io, status_msg, album_id, force=False):
         assert journal.load()[0].key == ("album", "302127", 42)  # entry live during run
 
-    monkeypatch.setattr(bot, "_do_download_album", fake_do)
+    monkeypatch.setattr(downloads, "_do_download_album", fake_do)
 
-    assert await bot._run_album(bot.ChatIO(FakeBot(), 42), "302127") is True
+    assert await downloads._run_album(common.ChatIO(FakeBot(), 42), "302127") is True
     assert journal.load() == []  # outcome was reported → ledger clean
 
 
@@ -58,10 +58,10 @@ async def test_run_album_keeps_journal_when_flow_dies(monkeypatch):
     async def fake_do(io, status_msg, album_id, force=False):
         raise RuntimeError("container killed mid-download")
 
-    monkeypatch.setattr(bot, "_do_download_album", fake_do)
+    monkeypatch.setattr(downloads, "_do_download_album", fake_do)
 
     with pytest.raises(RuntimeError):
-        await bot._run_album(bot.ChatIO(FakeBot(), 42), "302127", force=True)
+        await downloads._run_album(common.ChatIO(FakeBot(), 42), "302127", force=True)
 
     entries = journal.load()
     assert len(entries) == 1
@@ -71,11 +71,11 @@ async def test_run_album_keeps_journal_when_flow_dies(monkeypatch):
 
 
 async def test_run_album_reports_duplicates(monkeypatch):
-    bot._in_flight.add("album:1")
+    state._in_flight.add("album:1")
     try:
-        assert await bot._run_album(bot.ChatIO(FakeBot(), 42), "1") is False
+        assert await downloads._run_album(common.ChatIO(FakeBot(), 42), "1") is False
     finally:
-        bot._in_flight.discard("album:1")
+        state._in_flight.discard("album:1")
     assert journal.load() == []  # duplicate never journaled
 
 
@@ -94,12 +94,12 @@ async def test_resume_bumps_edits_and_reruns(monkeypatch):
         journal.remove("album", id, io.chat_id)  # flow reported its outcome
         return True
 
-    monkeypatch.setattr(bot, "_run_album", fake_run_album)
+    monkeypatch.setattr(downloads, "_run_album", fake_run_album)
     journal.add(PendingDownload(kind="album", id="1", chat_id=42,
                                 status_message_id=7, force=True))
     app, fake = _app()
 
-    await bot._resume_pending(app)
+    await downloads._resume_pending(app)
 
     # bumped before the run; force deliberately not resumed
     assert calls == [("1", False, 1)]
@@ -111,12 +111,12 @@ async def test_resume_gives_up_at_attempt_cap(monkeypatch):
     async def must_not_run(*args, **kwargs):
         raise AssertionError("capped entry must not be re-run")
 
-    monkeypatch.setattr(bot, "_run_track", must_not_run)
+    monkeypatch.setattr(downloads, "_run_track", must_not_run)
     journal.add(PendingDownload(kind="track", id="9", chat_id=42,
                                 resume_attempts=journal.MAX_RESUME_ATTEMPTS))
     app, fake = _app()
 
-    await bot._resume_pending(app)
+    await downloads._resume_pending(app)
 
     assert journal.load() == []  # dropped, not retried
     assert any("giving up" in text for _, text in fake.sent)
@@ -132,14 +132,14 @@ async def test_resume_oldest_first_and_survives_failures(monkeypatch):
         journal.remove("album", id, io.chat_id)
         return True
 
-    monkeypatch.setattr(bot, "_run_album", fake_run_album)
+    monkeypatch.setattr(downloads, "_run_album", fake_run_album)
     journal.add(PendingDownload(kind="album", id="new", chat_id=42,
                                 requested_at="2026-07-05T12:00:00+00:00"))
     journal.add(PendingDownload(kind="album", id="old", chat_id=42,
                                 requested_at="2026-07-05T09:00:00+00:00"))
     app, _ = _app()
 
-    await bot._resume_pending(app)
+    await downloads._resume_pending(app)
 
     assert order == ["old", "new"]  # oldest first; failure didn't stop the loop
     left = journal.load()

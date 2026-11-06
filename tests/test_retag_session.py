@@ -2,8 +2,11 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
+import config
 
-import bot
+import metadata
+import providers
+from flows import common, downloads, handlers, library_actions, state
 import retagger
 
 
@@ -23,14 +26,14 @@ class RecordingMessage:
 
 @pytest.fixture(autouse=True)
 def reset_retag_state(monkeypatch):
-    monkeypatch.setattr(bot, "_retag_session", None)
-    monkeypatch.setattr(bot, "_retag_invalidated_reason", None)
-    monkeypatch.setattr(bot, "_retag_in_progress", False)
+    monkeypatch.setattr(state, "_retag_session", None)
+    monkeypatch.setattr(state, "_retag_invalidated_reason", None)
+    monkeypatch.setattr(state, "_retag_in_progress", False)
 
 
 async def test_successful_track_download_invalidates_retag_session(
         monkeypatch, tmp_path):
-    bot._retag_session = {"plans": [], "expire_at": float("inf")}
+    state._retag_session = {"plans": [], "expire_at": float("inf")}
     track = {"artist": "Artist", "title": "Track"}
     album = {"artist": "Artist", "title": "Album", "tracks": [track]}
     target = tmp_path / "Artist" / "Album" / "01 - Track.flac"
@@ -47,24 +50,24 @@ async def test_successful_track_download_invalidates_retag_session(
     async def fake_share(*_args, **_kwargs):
         return None
 
-    monkeypatch.setattr(bot, "_download_semaphore", asyncio.Semaphore(1))
-    monkeypatch.setattr(bot.metadata, "fetch_single_track", fake_fetch)
-    monkeypatch.setattr(bot.metadata, "enrich_genres", no_op)
-    monkeypatch.setattr(bot.providers, "download_single_track", fake_download)
-    monkeypatch.setattr(bot, "_trigger_scan", no_op)
-    monkeypatch.setattr(bot, "_try_share_album", fake_share)
-    monkeypatch.setattr(bot, "_send_result", no_op)
+    monkeypatch.setattr(state, "_download_semaphore", asyncio.Semaphore(1))
+    monkeypatch.setattr(metadata, "fetch_single_track", fake_fetch)
+    monkeypatch.setattr(metadata, "enrich_genres", no_op)
+    monkeypatch.setattr(providers, "download_single_track", fake_download)
+    monkeypatch.setattr(library_actions, "_trigger_scan", no_op)
+    monkeypatch.setattr(library_actions, "_try_share_album", fake_share)
+    monkeypatch.setattr(common, "_send_result", no_op)
 
-    await bot._do_download_track(SimpleNamespace(chat_id=1), RecordingMessage(), "42")
+    await downloads._do_download_track(SimpleNamespace(chat_id=1), RecordingMessage(), "42")
 
-    assert bot._retag_session is None
-    assert bot._retag_invalidated_reason == "track downloaded"
+    assert state._retag_session is None
+    assert state._retag_invalidated_reason == "track downloaded"
 
 
 async def test_delete_invalidates_retag_session(monkeypatch, tmp_path):
     album = tmp_path / "Artist" / "Album"
     album.mkdir(parents=True)
-    bot._retag_session = {"plans": [], "expire_at": float("inf")}
+    state._retag_session = {"plans": [], "expire_at": float("inf")}
 
     async def fake_scan(*_args, **_kwargs):
         return "scan scheduled"
@@ -72,20 +75,20 @@ async def test_delete_invalidates_retag_session(monkeypatch, tmp_path):
     async def inline_to_thread(func, *args):
         return func(*args)
 
-    monkeypatch.setattr(bot, "MUSIC_DIR", str(tmp_path))
-    monkeypatch.setattr(bot, "_trigger_scan", fake_scan)
-    monkeypatch.setattr(bot.asyncio, "to_thread", inline_to_thread)
+    monkeypatch.setattr(config, "MUSIC_DIR", str(tmp_path))
+    monkeypatch.setattr(library_actions, "_trigger_scan", fake_scan)
+    monkeypatch.setattr(common.asyncio, "to_thread", inline_to_thread)
 
-    await bot._delete_album(str(album))
+    await library_actions._delete_album(str(album))
 
     assert not album.exists()
-    assert bot._retag_session is None
-    assert bot._retag_invalidated_reason == "album deleted"
+    assert state._retag_session is None
+    assert state._retag_invalidated_reason == "album deleted"
 
 
 async def test_confirm_reports_invalidation_reason(monkeypatch):
-    bot._retag_invalidated_reason = "upload imported"
-    monkeypatch.setattr(bot, "ALLOWED_USERS", {1})
+    state._retag_invalidated_reason = "upload imported"
+    monkeypatch.setattr(config, "ALLOWED_USERS", {1})
     message = RecordingMessage()
     update = SimpleNamespace(
         effective_user=SimpleNamespace(id=1),
@@ -94,7 +97,7 @@ async def test_confirm_reports_invalidation_reason(monkeypatch):
         effective_chat=SimpleNamespace(id=1),
     )
 
-    await bot.cmd_retag(update, SimpleNamespace(args=["confirm"]))
+    await handlers.cmd_retag(update, SimpleNamespace(args=["confirm"]))
 
     assert message.replies == [
         "Library changed since the scan (upload imported) — run /retag again."

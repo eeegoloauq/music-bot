@@ -2,9 +2,10 @@
 
 import asyncio
 from dataclasses import dataclass, field
+import errno
 import os
 import shutil
-import tempfile
+import stat
 
 import aiohttp
 
@@ -13,6 +14,7 @@ from metadata.client import _get_session
 import retagger
 from library.files import _cover_url
 from library.importing import run_to_completion
+from library.writing import library_temporary
 from library.tagger import inspect_selected_tags, write_selected_tags, _format_title
 
 FIELDS = ("titles", "genres", "lyrics", "artwork")
@@ -204,30 +206,58 @@ async def preview(albums: list[tuple[str, str, str]], options: Options, progress
     return plans, summary
 
 
+def _check_replaceable(update: FileUpdate):
+    """Require real file write access even though rename only needs the folder.
+
+    Atomic replacement cannot retain a foreign owner's inode, hard links or
+    access ACL. Shared ordinary files use directory inheritance; refuse files
+    whose link/access policy would be lost. Never chown/chmod the original.
+    """
+    if update.fingerprint is None:
+        return
+    descriptor = os.open(update.path, os.O_WRONLY | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(descriptor)
+        current = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+        if not stat.S_ISREG(info.st_mode) or current != update.fingerprint:
+            raise ValueError("File changed since preview")
+        if not info.st_mode & 0o222:
+            raise PermissionError("Read-only file cannot be replaced")
+        if info.st_nlink != 1:
+            raise ValueError("Atomic maintenance cannot preserve hard links")
+        try:
+            acl = os.getxattr(descriptor, "system.posix_acl_access")
+        except OSError as exc:
+            if exc.errno not in (errno.ENODATA, errno.ENOTSUP):
+                raise
+        else:
+            if acl:
+                raise ValueError("Atomic maintenance cannot preserve file access ACLs")
+    finally:
+        os.close(descriptor)
+
+
 def _write_atomic(update: FileUpdate, folder: str):
     if not _target_unchanged(update, folder):
         raise ValueError("File changed since preview")
-    # A crashed write must never be mistaken for another library audio file.
-    descriptor, temporary = tempfile.mkstemp(prefix=".maintenance-", suffix=".tmp",
-                                             dir=os.path.dirname(update.path))
-    os.close(descriptor)
-    try:
+    _check_replaceable(update)
+    with library_temporary(update.path) as (temporary, stream):
         if "cover_file" in update.values:
-            with open(temporary, "wb") as stream:
-                stream.write(update.values["cover_file"])
-            if update.fingerprint is not None:
-                os.chmod(temporary, os.stat(update.path).st_mode & 0o777)
-            else:
-                os.chmod(temporary, 0o664)
+            stream.write(update.values["cover_file"])
+            stream.close()
         else:
-            shutil.copy2(update.path, temporary)
+            with open(update.path, "rb") as source:
+                shutil.copyfileobj(source, stream)
+            stream.close()
             write_selected_tags(temporary, update.values)
         if not _target_unchanged(update, folder):
             raise ValueError("File changed while applying update")
-        os.replace(temporary, update.path)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
+        _check_replaceable(update)
+        if update.fingerprint is None:
+            # Another writer may have created artwork after our final check.
+            os.link(temporary, update.path)
+        else:
+            os.replace(temporary, update.path)
 
 
 async def apply_plan(plan: Plan) -> tuple[int, int]:

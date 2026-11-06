@@ -22,10 +22,10 @@ import zipfile
 from dataclasses import dataclass, field
 
 from config import MAX_FILE_BYTES, UPLOAD_DIR, UPLOAD_MAX_TOTAL_BYTES
+from library.files import AUDIO_EXTS
 
 logger = logging.getLogger(__name__)
 
-AUDIO_EXTS = {".flac", ".m4a", ".mp3", ".ogg", ".opus", ".wav"}
 ART_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 SIDECAR_EXTS = {".txt", ".pdf", ".nfo", ".cue", ".log", ".lrc",
                 ".m3u", ".m3u8", ".ffp", ".sfv", ".md", ".accurip"}

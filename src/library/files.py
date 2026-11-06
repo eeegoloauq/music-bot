@@ -6,9 +6,24 @@ from mutagen import File as MutagenFile
 from mutagen.flac import FLAC
 from mutagen.mp4 import MP4, MP4FreeForm
 
-_AUDIO_EXTS = frozenset({".flac", ".mp3", ".m4a", ".ogg", ".opus", ".aac", ".wv", ".ape"})
-_AUDIO_DEDUP_EXTS = (".flac", ".m4a", ".mp3")  # formats we read tags from for dedup
+# All formats accepted into the library must remain visible to search and deletion.
+AUDIO_EXTS = frozenset({
+    ".flac", ".mp3", ".m4a", ".ogg", ".opus", ".aac", ".wv", ".ape", ".wav",
+})
+# Retagging and album identity use these formats' native tag layouts.
+TAGGED_AUDIO_EXTS = tuple(ext for ext in (".flac", ".m4a", ".mp3") if ext in AUDIO_EXTS)
 _DEEZER_ID_RE = re.compile(r"deezer\.com/album/(\d+)")
+
+
+def list_audio_files(folder: str, *, extensions=AUDIO_EXTS) -> list[str]:
+    """List library audio recursively without following symlinked files or folders."""
+    return sorted(
+        os.path.join(root, name)
+        for root, _dirs, files in os.walk(folder)
+        for name in files
+        if os.path.splitext(name)[1].lower() in extensions
+        and not os.path.islink(os.path.join(root, name))
+    )
 
 
 def _sanitize(name: str) -> str:
@@ -148,7 +163,7 @@ def _folder_signals(folder: str) -> tuple[str | None, str | None]:
     deezer_id: str | None = None
     album_tag: str | None = None
     for fname in sorted(os.listdir(folder)):
-        if not fname.lower().endswith(_AUDIO_DEDUP_EXTS):
+        if not fname.lower().endswith(TAGGED_AUDIO_EXTS):
             continue
         comment, album = _read_tags_for_dedup(os.path.join(folder, fname))
         if deezer_id is None and comment:
@@ -259,7 +274,7 @@ def _find_existing_track(album_dir: str, track: dict) -> str | None:
     title = _sanitize(track["title"])
 
     # Fast path: check both disc-prefixed (multi-disc) and plain (single-disc)
-    for ext in (".flac", ".m4a", ".mp3"):
+    for ext in (*TAGGED_AUDIO_EXTS, *sorted(AUDIO_EXTS.difference(TAGGED_AUDIO_EXTS))):
         for prefix in (f"{disc}-{num:02d}", f"{num:02d}"):
             canonical = os.path.join(album_dir, f"{prefix} {title}{ext}")
             if os.path.exists(canonical):
@@ -281,7 +296,7 @@ def _find_existing_track(album_dir: str, track: dict) -> str | None:
     title_only_hit: str | None = None
     for fname in os.listdir(album_dir):
         ext = os.path.splitext(fname)[1].lower()
-        if ext not in _AUDIO_EXTS:
+        if ext not in AUDIO_EXTS:
             continue
         fpath = os.path.join(album_dir, fname)
         try:

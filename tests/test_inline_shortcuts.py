@@ -4,13 +4,14 @@ import types
 from unittest.mock import AsyncMock
 
 import pytest
+import config
 
-import bot
+from flows import common, handlers
 import inline
 
 
 def _buttons():
-    return [btn for row in bot._inline_shortcuts().inline_keyboard for btn in row]
+    return [btn for row in handlers._inline_shortcuts().inline_keyboard for btn in row]
 
 
 def test_every_button_prefills_an_inline_query():
@@ -43,7 +44,7 @@ def test_send_to_chat_button_shares_now_playing():
 
 @pytest.mark.parametrize("pinned_by,pins", [(None, 1), (42, 0), (7, 1)])
 async def test_start_pins_the_shortcuts_only_once(monkeypatch, pinned_by, pins):
-    monkeypatch.setattr(bot, "ALLOWED_USERS", [1])
+    monkeypatch.setattr(config, "ALLOWED_USERS", [1])
     msg = types.SimpleNamespace(chat_id=1, pin=AsyncMock())
     pinned = (types.SimpleNamespace(from_user=types.SimpleNamespace(id=pinned_by))
               if pinned_by else None)
@@ -53,5 +54,5 @@ async def test_start_pins_the_shortcuts_only_once(monkeypatch, pinned_by, pins):
     update = types.SimpleNamespace(
         effective_user=types.SimpleNamespace(id=1),
         message=types.SimpleNamespace(reply_text=AsyncMock(return_value=msg)))
-    await bot.cmd_start(update, types.SimpleNamespace(bot=fake_bot, args=[]))
+    await handlers.cmd_start(update, types.SimpleNamespace(bot=fake_bot, args=[]))
     assert msg.pin.await_count == pins

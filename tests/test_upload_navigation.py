@@ -6,13 +6,15 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+import config
 
 import bot
+from flows import common, handlers
 
 
 @pytest.fixture
 def upload_update(monkeypatch):
-    monkeypatch.setattr(bot, "ALLOWED_USERS", [1])
+    monkeypatch.setattr(config, "ALLOWED_USERS", [1])
     message = SimpleNamespace(reply_text=AsyncMock())
     query = SimpleNamespace(answer=AsyncMock(), message=message)
     return SimpleNamespace(effective_user=SimpleNamespace(id=1),
@@ -21,25 +23,25 @@ def upload_update(monkeypatch):
 
 
 @pytest.mark.parametrize("url", ["", "http://music.example.com:8080/upload"])
-@pytest.mark.parametrize("handler", [bot.cmd_upload, bot._handle_import_help])
+@pytest.mark.parametrize("handler", [handlers.cmd_upload, handlers._handle_import_help])
 async def test_upload_instructions_link_to_page_or_setup(monkeypatch, upload_update, url, handler):
-    monkeypatch.setattr(bot, "UPLOAD_WEB_URL", url)
+    monkeypatch.setattr(config, "UPLOAD_WEB_URL", url)
     await handler(upload_update, None)
     text = upload_update.message.reply_text.call_args.args[0]
     button = upload_update.message.reply_text.call_args.kwargs["reply_markup"].inline_keyboard[0][0]
-    assert button.url == (url or bot._UPLOAD_GUIDE)
+    assert button.url == (url or common._UPLOAD_GUIDE)
     assert button.callback_data is None
     assert "here" in text
     assert "watched" not in text
-    if handler is bot._handle_import_help:
+    if handler is handlers._handle_import_help:
         upload_update.callback_query.answer.assert_awaited_once()
 
 
 @pytest.mark.parametrize("url", ["", "https://music.example.com/import"])
 def test_menu_and_provider_fallback_offer_the_same_upload_entry(monkeypatch, upload_update, url):
-    monkeypatch.setattr(bot, "UPLOAD_WEB_URL", url)
-    menu_button = bot._chat_shortcuts(upload_update).inline_keyboard[0][0]
-    fallback_button, providers_button = bot._provider_actions().inline_keyboard[0]
+    monkeypatch.setattr(config, "UPLOAD_WEB_URL", url)
+    menu_button = handlers._chat_shortcuts(upload_update).inline_keyboard[0][0]
+    fallback_button, providers_button = common._provider_actions().inline_keyboard[0]
     assert menu_button == fallback_button
     if url:
         assert menu_button.url == url
@@ -50,7 +52,7 @@ def test_menu_and_provider_fallback_offer_the_same_upload_entry(monkeypatch, upl
     assert providers_button.url.endswith("/tree/main/docs/providers")
 
 
-@pytest.mark.parametrize("handler", [bot.cmd_upload, bot._handle_import_help])
+@pytest.mark.parametrize("handler", [handlers.cmd_upload, handlers._handle_import_help])
 async def test_upload_navigation_requires_authorization(upload_update, handler):
     upload_update.effective_user.id = 2
     await handler(upload_update, None)

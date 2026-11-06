@@ -22,7 +22,7 @@ from mutagen.flac import FLAC
 from mutagen.mp4 import MP4
 
 from config import ALLOWED_USERS, MUSIC_DIR
-from library.files import _title_from_filename
+from library.files import AUDIO_EXTS as _AUDIO_EXTS, _title_from_filename
 import metadata
 import navidrome
 
@@ -56,7 +56,6 @@ def _cache_set(cache: OrderedDict, key: str, value) -> None:
 
 _DELETE_PREFIX = "delete:"
 
-_AUDIO_EXTS = frozenset({".flac", ".mp3", ".m4a", ".ogg", ".opus", ".aac", ".wv", ".ape"})
 _ALBUM_URL_RE = re.compile(
     r"(?:tidal\.com|(?:www\.)?deezer\.com)/album/(\d+)",
     re.IGNORECASE,

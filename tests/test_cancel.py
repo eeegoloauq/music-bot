@@ -6,18 +6,19 @@ import asyncio
 import types
 
 import pytest
+import config
 
 import journal
 
-import bot
+from flows import common, downloads, handlers
 
 
 @pytest.fixture(autouse=True)
 def journal_path(tmp_path, monkeypatch):
     monkeypatch.setattr(journal, "JOURNAL_PATH", str(tmp_path / "pending.json"))
-    bot._active_runs.clear()
+    common._active_runs.clear()
     yield
-    bot._active_runs.clear()
+    common._active_runs.clear()
 
 
 class FakeBot:
@@ -70,9 +71,9 @@ async def _start_album(monkeypatch, fake, chat_id=42, total=3):
         started.set()
         await asyncio.sleep(3600)          # the transfer that never finishes
 
-    monkeypatch.setattr(bot, "_do_download_album", fake_do)
-    monkeypatch.setattr(bot, "ALLOWED_USERS", {1})
-    task = asyncio.create_task(bot._run_album(bot.ChatIO(fake, chat_id), "302127"))
+    monkeypatch.setattr(downloads, "_do_download_album", fake_do)
+    monkeypatch.setattr(config, "ALLOWED_USERS", {1})
+    task = asyncio.create_task(downloads._run_album(common.ChatIO(fake, chat_id), "302127"))
     await asyncio.wait_for(started.wait(), 1)
     return task
 
@@ -81,7 +82,7 @@ async def test_status_message_carries_cancel_button(monkeypatch):
     fake = FakeBot()
     task = await _start_album(monkeypatch, fake)
     run_id = _run_id(fake.sent[0][2])
-    assert run_id in bot._active_runs
+    assert run_id in common._active_runs
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task                          # shutdown cancel, not the user
@@ -94,12 +95,12 @@ async def test_cancel_tap_stops_run_clears_journal_and_button(monkeypatch):
     run_id = _run_id(fake.sent[0][2])
 
     update, answers = _tap(run_id, chat_id=42)
-    await bot._handle_cancel_callback(update, None)
+    await handlers._handle_cancel_callback(update, None)
     assert answers == ["Cancelling…"]
 
     assert await asyncio.wait_for(task, 1) is True   # a reported outcome
     assert journal.load() == []                      # restart won't resurrect it
-    assert run_id not in bot._active_runs
+    assert run_id not in common._active_runs
     text, markup = fake.edits[-1]
     assert text == "✖ Cancelled — 1/3 tracks were already saved"
     assert markup is None                            # final message: no button
@@ -111,10 +112,10 @@ async def test_cancel_from_other_chat_is_refused(monkeypatch):
     run_id = _run_id(fake.sent[0][2])
 
     update, answers = _tap(run_id, chat_id=99)
-    await bot._handle_cancel_callback(update, None)
+    await handlers._handle_cancel_callback(update, None)
     assert answers == ["Only the chat that requested this can cancel it."]
     assert not task.done()
-    assert bot._active_runs[run_id].cancel_requested is False
+    assert common._active_runs[run_id].cancel_requested is False
 
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -122,9 +123,9 @@ async def test_cancel_from_other_chat_is_refused(monkeypatch):
 
 
 async def test_cancel_on_finished_run_is_a_noop(monkeypatch):
-    monkeypatch.setattr(bot, "ALLOWED_USERS", {1})
+    monkeypatch.setattr(config, "ALLOWED_USERS", {1})
     update, answers = _tap("deadbeef0000", chat_id=42)
-    await bot._handle_cancel_callback(update, None)
+    await handlers._handle_cancel_callback(update, None)
     assert answers == ["Nothing to cancel — already finished."]
 
 
@@ -175,7 +176,7 @@ async def test_cancel_still_lands_when_answer_fails(monkeypatch):
         raise TelegramError("blip")
 
     update.callback_query.answer = failing_answer
-    await bot._handle_cancel_callback(update, None)
+    await handlers._handle_cancel_callback(update, None)
     assert await asyncio.wait_for(task, 1) is True
     assert journal.load() == []
 
@@ -187,7 +188,7 @@ async def test_restore_backup_puts_a_single_file_back(tmp_path):
     backup.write_bytes(b"old")
     (tmp_path / "01 Song.flac").write_bytes(b"half-written fresh copy")
 
-    assert await bot._restore_backup(str(backup), str(original)) is True
+    assert await common._restore_backup(str(backup), str(original)) is True
     assert original.read_bytes() == b"old"
     assert not backup.exists()
-    assert await bot._restore_backup(str(backup), str(original)) is False  # nothing left
+    assert await common._restore_backup(str(backup), str(original)) is False  # nothing left

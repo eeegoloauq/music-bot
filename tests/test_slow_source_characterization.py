@@ -15,7 +15,10 @@ import types
 import pytest
 from telegram.error import NetworkError
 
-import bot
+import metadata
+import upload_import
+from flows import uploads as upload_flow
+from flows import common, library_actions, state
 import uploads
 from soulseek import downloader
 from soulseek.downloader import PeerTransferError
@@ -363,20 +366,20 @@ async def test_network_error_on_cosmetic_edit_no_longer_aborts_upload(
     async def fake_share(artist, title, skip_delay=False):
         return None
 
-    monkeypatch.setattr(bot.upload_import, "identify_album", fake_identify)
-    monkeypatch.setattr(bot.upload_import, "import_staged_album", fake_import)
-    monkeypatch.setattr(bot.metadata, "fetch_album", fake_fetch)
-    monkeypatch.setattr(bot.metadata, "enrich_genres", fake_enrich)
-    monkeypatch.setattr(bot, "_trigger_scan", fake_scan)
-    monkeypatch.setattr(bot, "_try_share_album", fake_share)
-    monkeypatch.setattr(bot, "_EDIT_BACKOFF", (0,))
-    monkeypatch.setattr(bot, "_FINAL_BACKOFF", (0,))
+    monkeypatch.setattr(upload_import, "identify_album", fake_identify)
+    monkeypatch.setattr(upload_import, "import_staged_album", fake_import)
+    monkeypatch.setattr(metadata, "fetch_album", fake_fetch)
+    monkeypatch.setattr(metadata, "enrich_genres", fake_enrich)
+    monkeypatch.setattr(library_actions, "_trigger_scan", fake_scan)
+    monkeypatch.setattr(library_actions, "_try_share_album", fake_share)
+    monkeypatch.setattr(common, "_EDIT_BACKOFF", (0,))
+    monkeypatch.setattr(common, "_FINAL_BACKOFF", (0,))
 
     report = uploads.IntakeReport(name="drop.zip", staging_dir=str(tmp_path),
                                   audio=["01 - Track 1.flac"])
     msg = RaisingMessage()
 
-    await bot._handle_upload(FakeUploadIO(msg), report)  # must not raise
+    await upload_flow._handle_upload(FakeUploadIO(msg), report)  # must not raise
 
     assert len(imported) == 1        # filing work ran despite the dead chat
     assert msg.edit_calls >= 2       # the edits were attempted (and retried)
@@ -410,18 +413,18 @@ async def test_identified_upload_reports_queue_before_waiting(
 
     semaphore = asyncio.Semaphore(1)
     await semaphore.acquire()
-    monkeypatch.setattr(bot, "_download_semaphore", semaphore)
-    monkeypatch.setattr(bot.upload_import, "identify_album", fake_identify)
-    monkeypatch.setattr(bot.upload_import, "import_staged_album", fake_import)
-    monkeypatch.setattr(bot.metadata, "fetch_album", fake_fetch)
-    monkeypatch.setattr(bot.metadata, "enrich_genres", no_op)
-    monkeypatch.setattr(bot, "_trigger_scan", no_op)
-    monkeypatch.setattr(bot, "_try_share_album", no_op)
-    caplog.set_level("INFO", logger="bot")
+    monkeypatch.setattr(state, "_download_semaphore", semaphore)
+    monkeypatch.setattr(upload_import, "identify_album", fake_identify)
+    monkeypatch.setattr(upload_import, "import_staged_album", fake_import)
+    monkeypatch.setattr(metadata, "fetch_album", fake_fetch)
+    monkeypatch.setattr(metadata, "enrich_genres", no_op)
+    monkeypatch.setattr(library_actions, "_trigger_scan", no_op)
+    monkeypatch.setattr(library_actions, "_try_share_album", no_op)
+    caplog.set_level("INFO", logger="flows.uploads")
 
     report = uploads.IntakeReport(name="drop.zip", staging_dir=str(tmp_path),
                                   audio=["01 - Track 1.flac"])
-    task = asyncio.create_task(bot._handle_upload(
+    task = asyncio.create_task(upload_flow._handle_upload(
         FakeUploadIO(RecordingMessage()), report))
     await asyncio.sleep(0)
 

@@ -6,14 +6,13 @@ import errno
 import logging
 import os
 import shutil
-from copy import deepcopy
 
 import aiohttp
 
 from metadata.client import _get_session
 from library.files import _cover_url
-from library.tagger import _write_tags, _write_m4a_tags, _write_mp3_tags
-from mutagen import File as MutagenFile
+from library.tagger import write_tags, write_import_tags
+from library.writing import new_library_file
 
 logger = logging.getLogger(__name__)
 
@@ -51,8 +50,13 @@ async def _download_cover(cover_uuid: str, album_dir: str) -> bytes | None:
         async with session.get(cover_url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
             if resp.status == 200:
                 cover_data = await resp.read()
-                with open(cover_path, "wb") as f:
-                    f.write(cover_data)
+                try:
+                    with new_library_file(cover_path) as f:
+                        f.write(cover_data)
+                except FileExistsError:
+                    # An upload or another library writer supplied art meanwhile.
+                    with open(cover_path, "rb") as f:
+                        return f.read()
                 return cover_data
     except Exception:
         logger.warning("Failed to download cover art")
@@ -64,7 +68,7 @@ def _relocate(src: str, dst: str) -> None:
 
     A rename is a metadata op, not a multi-MB byte copy — slskd's staging dir
     and the library both live under the /media/music mount, so that is the
-    normal path. Across devices (the upload intake under /data, say) the copy
+    normal path. For a download staged on another filesystem, the copy
     is written through ``open`` rather than ``shutil.copy2``: copy2 would carry
     over the mode of whoever produced the source — a Samba client's 0644 — and
     the track would land in the shared library without group write. Creating
@@ -112,45 +116,8 @@ def _write_tags_force(filepath: str, track: dict, album: dict,
                       ext: str):
     """Write canonical metadata when importing an audio file.
     """
-    if ext == "m4a":
-        _write_m4a_tags(filepath, track, album, None, cover_data, lyrics, force=True)
-    elif ext == "mp3":
-        _write_mp3_tags(filepath, track, album, None, cover_data, lyrics, force=True)
-    else:
-        _write_tags(filepath, track, album, None, cover_data, lyrics, force=True)
-
-
-def write_import_tags(filepath: str, track: dict, album: dict,
-                      cover_data: bytes | None, lyrics: dict | None, ext: str):
-    """Apply release tags while retaining supplied artwork and lyric fields."""
-    def is_media(key):
-        key = str(key).casefold()
-        return (key in {"covr", "©lyr", "lyrics", "syncedlyrics", "unsyncedlyrics"}
-                or key.startswith(("apic", "uslt", "sylt"))
-                or "syncedlyrics" in key)
-
-    original = MutagenFile(filepath)
-    saved = {key: deepcopy(value) for key, value in (original.tags or {}).items()
-             if is_media(key)}
-    pictures = deepcopy(getattr(original, "pictures", []))
-    has_art = pictures or any(str(key).casefold() == "covr" or str(key).casefold().startswith("apic")
-                              for key in saved)
-    has_lyrics = any(str(key).casefold() != "covr" and not str(key).casefold().startswith("apic")
-                     for key in saved)
-    _write_tags_force(filepath, track, album, None if has_art else cover_data,
-                      None if has_lyrics else lyrics, ext)
-    if not saved and not pictures:
-        return
-    updated = MutagenFile(filepath)
-    if updated.tags is None:
-        updated.add_tags()
-    for key, value in saved.items():
-        updated.tags[key] = value
-    if pictures:
-        updated.clear_pictures()
-        for picture in pictures:
-            updated.add_picture(picture)
-    updated.save()
+    return write_tags(filepath, track, album, cover_data=cover_data, lyrics=lyrics,
+                      mode="replace", audio_format=ext)
 
 
 def _result_dict(album_dir, downloaded, skipped, failed, total, fmt, with_lyrics,

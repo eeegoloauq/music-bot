@@ -9,8 +9,11 @@ from unittest.mock import AsyncMock
 
 import aiohttp
 import pytest
+import config
 
 import bot
+import metadata
+from flows import common, downloads, library_actions
 import journal
 import providers
 
@@ -85,10 +88,10 @@ async def test_health_checks_login_authentication_and_connectivity(
 def release(monkeypatch, tmp_path):
     track = {"id": "2", "artist": "Artist", "title": "Song", "trackNumber": 1}
     album = {"id": "1", "artist": "Artist", "title": "Album", "tracks": [track]}
-    monkeypatch.setattr(bot.metadata, "fetch_album", AsyncMock(return_value=album))
-    monkeypatch.setattr(bot.metadata, "fetch_single_track", AsyncMock(return_value=(track, album)))
-    monkeypatch.setattr(bot, "MUSIC_DIR", str(tmp_path))
-    monkeypatch.setattr(bot, "_locate_existing_album", lambda *_, **kwargs: str(tmp_path))
+    monkeypatch.setattr(metadata, "fetch_album", AsyncMock(return_value=album))
+    monkeypatch.setattr(metadata, "fetch_single_track", AsyncMock(return_value=(track, album)))
+    monkeypatch.setattr(config, "MUSIC_DIR", str(tmp_path))
+    monkeypatch.setattr(downloads, "_locate_existing_album", lambda *_, **kwargs: str(tmp_path))
     monkeypatch.setattr(journal, "JOURNAL_PATH", str(tmp_path / "pending.json"))
     io = SimpleNamespace(reply_text=AsyncMock())
     return io, tmp_path
@@ -101,8 +104,8 @@ async def test_existing_release_does_not_need_provider_or_create_a_share(monkeyp
     check = AsyncMock(side_effect=AssertionError("provider must not be checked"))
     share = AsyncMock(side_effect=AssertionError("lookup must not publish a share"))
     monkeypatch.setattr(providers, "check", check)
-    monkeypatch.setattr(bot, "_try_share_album", share)
-    assert await bot._prepare_download(io, kind, id) is False
+    monkeypatch.setattr(library_actions, "_try_share_album", share)
+    assert await downloads._prepare_download(io, kind, id) is False
     assert "Already in library" in io.reply_text.call_args.args[0]
     check.assert_not_called()
     share.assert_not_called()
@@ -117,7 +120,7 @@ async def test_missing_provider_does_not_queue_or_move_force_backup(monkeypatch,
     original.write_bytes(b"existing audio")
     monkeypatch.setattr(providers, "check", AsyncMock(
         return_value=providers.ProviderStatus(state, "Provider needs attention")))
-    assert await bot._prepare_download(io, kind, id, force=True) is False
+    assert await downloads._prepare_download(io, kind, id, force=True) is False
     assert original.read_bytes() == b"existing audio"
     assert journal.load() == []
     assert not (path / ".redownload-backup").exists()
@@ -133,7 +136,7 @@ async def test_ready_provider_can_accept_missing_music(monkeypatch, release, kin
     io, _ = release
     monkeypatch.setattr(providers, "check", AsyncMock(
         return_value=providers.ProviderStatus("ready", "Ready")))
-    assert await bot._prepare_download(io, kind, id) is True
+    assert await downloads._prepare_download(io, kind, id) is True
     io.reply_text.assert_not_called()
 
 
@@ -142,9 +145,9 @@ async def test_download_entrypoint_rejects_work_before_spawning(monkeypatch, rel
     io, _ = release
     monkeypatch.setattr(providers, "check", AsyncMock(
         return_value=providers.ProviderStatus("disabled", "No download provider is configured.")))
-    monkeypatch.setattr(bot.ChatIO, "from_update", lambda _: io)
-    monkeypatch.setattr(bot, "_spawn_run", lambda *args: pytest.fail("must not queue a download"))
-    handler = bot._download_album if kind == "album" else bot._download_track
+    monkeypatch.setattr(common.ChatIO, "from_update", lambda _: io)
+    monkeypatch.setattr(common, "_spawn_run", lambda *args: pytest.fail("must not queue a download"))
+    handler = downloads._download_album if kind == "album" else downloads._download_track
     await handler(object(), id)
     assert "No download provider" in io.reply_text.call_args.args[0]
     assert journal.load() == []
@@ -159,7 +162,7 @@ async def test_unavailable_provider_preserves_resume_journal(monkeypatch, tmp_pa
     monkeypatch.setattr(providers, "check", AsyncMock(
         return_value=providers.ProviderStatus(state, "Not ready")))
     app = SimpleNamespace(bot=SimpleNamespace(send_message=AsyncMock()))
-    await bot._resume_pending(app)
+    await downloads._resume_pending(app)
     assert Path(journal.JOURNAL_PATH).read_bytes() == before
     app.bot.send_message.assert_not_called()
 
@@ -205,14 +208,16 @@ class BlockProvider(importlib.abc.MetaPathFinder):
             raise AssertionError(f"optional provider imported: {fullname}")
 sys.meta_path.insert(0, BlockProvider())
 import bot
+import config
+from flows import common
 import upload_import
-bot.ALLOWED_USERS = [42]
-bot.UPLOAD_HTTP_PORT = 0
+config.ALLOWED_USERS = [42]
+config.UPLOAD_HTTP_PORT = 0
 started = []
 def spawn(coro):
     started.append(coro.cr_code.co_name)
     coro.close()
-bot._spawn_background = spawn
+common._spawn_background = spawn
 app = SimpleNamespace(bot=SimpleNamespace(set_my_commands=AsyncMock()))
 async def run():
     await bot._post_init(app)

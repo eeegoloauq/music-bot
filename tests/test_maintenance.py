@@ -15,8 +15,9 @@ from mutagen.id3 import APIC, COMM, TALB, TCON, TIT2, TPE1, TRCK, TSRC, TXXX, US
 from mutagen.mp3 import MP3
 from mutagen.mp4 import MP4, MP4Cover, MP4FreeForm
 import pytest
+import config
 
-import bot
+from flows import common, handlers, library_actions, retag, state
 import maintenance
 from maintenance import fetch_artwork
 import retagger
@@ -29,7 +30,7 @@ NEW_LRC = "[00:02.00] New lyrics"
 
 
 @pytest.fixture(params=["flac", "mp3", "m4a"])
-def release(request, tmp_path, monkeypatch):
+def release(request, tmp_path, monkeypatch, shared_umask):
     if not shutil.which("ffmpeg"):
         pytest.skip("requires ffmpeg")
     folder = tmp_path / "Artist" / "Album"
@@ -143,7 +144,7 @@ async def test_selected_title_only_preserves_audio_and_other_fields(release):
     assert audio_digest(release.path) == digest
     assert os.stat(release.path).st_mode & 0o777 == 0o664
     assert (release.folder / "booklet.txt").read_text() == "Keep this sidecar"
-    assert not list(release.folder.glob(".maintenance-*"))
+    assert not list(release.folder.glob("*.tmp"))
 
 
 async def test_fill_mode_preserves_existing_media_and_adds_genres(release):
@@ -220,7 +221,7 @@ async def test_failed_write_preserves_original_and_removes_temporary_file(releas
     assert stats["files_written"] == 0
     assert "disk write failed" in stats["failed"][0][1]
     assert release.path.read_bytes() == before
-    assert not list(release.folder.glob(".maintenance-*"))
+    assert not list(release.folder.glob("*.tmp"))
 
 
 async def test_cover_sidecar_is_replaced_only_in_explicit_replacement_mode(release):
@@ -275,17 +276,17 @@ async def test_external_edit_during_write_is_not_overwritten(release, monkeypatc
     assert stats["failed"]
     assert release.path.read_bytes().endswith(b"external edit during apply")
     assert inspect_selected_tags(str(release.path))["title"] == "Old Song"
-    assert not list(release.folder.glob(".maintenance-*"))
+    assert not list(release.folder.glob("*.tmp"))
 
 
 @pytest.fixture
 def chat(monkeypatch):
-    monkeypatch.setattr(bot, "ALLOWED_USERS", [1, 2])
-    monkeypatch.setattr(bot, "_retag_session", None)
-    monkeypatch.setattr(bot, "_retag_invalidated_reason", None)
-    monkeypatch.setattr(bot, "_retag_in_progress", False)
-    monkeypatch.setattr(bot, "_download_semaphore", asyncio.Semaphore(1))
-    monkeypatch.setattr(bot, "_trigger_scan", AsyncMock(return_value="Scan requested"))
+    monkeypatch.setattr(config, "ALLOWED_USERS", [1, 2])
+    monkeypatch.setattr(state, "_retag_session", None)
+    monkeypatch.setattr(state, "_retag_invalidated_reason", None)
+    monkeypatch.setattr(state, "_retag_in_progress", False)
+    monkeypatch.setattr(state, "_download_semaphore", asyncio.Semaphore(1))
+    monkeypatch.setattr(library_actions, "_trigger_scan", AsyncMock(return_value="Scan requested"))
     message = SimpleNamespace(message_id=1, chat_id=1, reply_text=AsyncMock(), edit_text=AsyncMock())
     message.reply_text.return_value = message
     query = SimpleNamespace(answer=AsyncMock(), message=message, edit_message_reply_markup=AsyncMock())
@@ -297,18 +298,18 @@ def chat(monkeypatch):
 
 async def test_picker_requires_explicit_replacement_and_keeps_scope(chat, monkeypatch, tmp_path):
     update, context = chat
-    await bot.cmd_maintain(update, context)
+    await handlers.cmd_maintain(update, context)
     selection = context.user_data["maintenance_selection"]
     preview_call = AsyncMock()
-    monkeypatch.setattr(bot, "_retag_command", preview_call)
+    monkeypatch.setattr(retag, "_retag_command", preview_call)
     update.callback_query.data = f"maintain:preview:{selection['token']}"
-    await bot._handle_maintenance_callback(update, context)
+    await retag._handle_maintenance_callback(update, context)
     preview_call.assert_not_awaited()
     for _ in range(2):
         update.callback_query.data = f"maintain:lyrics:{selection['token']}"
-        await bot._handle_maintenance_callback(update, context)
+        await retag._handle_maintenance_callback(update, context)
     update.callback_query.data = f"maintain:preview:{selection['token']}"
-    await bot._handle_maintenance_callback(update, context)
+    await retag._handle_maintenance_callback(update, context)
     options = preview_call.call_args.kwargs["maintenance_options"]
     assert options.fields == {"lyrics"}
     assert options.replace_lyrics is True
@@ -319,39 +320,39 @@ async def test_picker_requires_explicit_replacement_and_keeps_scope(chat, monkey
 @pytest.mark.parametrize("invalid", ["user", "chat", "expired", "changed"])
 async def test_confirmation_rejects_wrong_owner_expired_or_changed_previews(release, chat, monkeypatch, invalid):
     update, _context = chat
-    monkeypatch.setattr(bot, "MUSIC_DIR", str(release.root))
+    monkeypatch.setattr(config, "MUSIC_DIR", str(release.root))
     before = release.path.read_bytes()
-    await bot._retag_command(update, [], folder=str(release.folder),
+    await retag._retag_command(update, [], folder=str(release.folder),
                              maintenance_options=maintenance.Options(frozenset({"titles"})))
-    assert bot._retag_session is not None
+    assert state._retag_session is not None
     if invalid == "user":
         update.effective_user.id = 2
     elif invalid == "chat":
         update.effective_chat.id = 2
     elif invalid == "expired":
-        bot._retag_session["expire_at"] = 0
+        state._retag_session["expire_at"] = 0
     else:
         with release.path.open("ab") as stream:
             stream.write(b"external change")
         before = release.path.read_bytes()
-    await bot._retag_command(update, ["confirm"])
+    await retag._retag_command(update, ["confirm"])
     assert release.path.read_bytes() == before
-    bot._trigger_scan.assert_not_awaited()
+    library_actions._trigger_scan.assert_not_awaited()
 
 
 async def test_album_preview_and_confirmation_use_shared_session_and_scan(release, chat, monkeypatch):
     update, _context = chat
-    monkeypatch.setattr(bot, "MUSIC_DIR", str(release.root))
+    monkeypatch.setattr(config, "MUSIC_DIR", str(release.root))
     before = release.path.read_bytes()
-    await bot._retag_command(update, [], folder=str(release.folder),
+    await retag._retag_command(update, [], folder=str(release.folder),
                              maintenance_options=maintenance.Options(frozenset({"titles"})))
     assert release.path.read_bytes() == before
     assert "Selected field preview" in update.message.edit_text.call_args.args[0]
-    assert bot._retag_session["owner"] == 1
-    await bot._retag_command(update, ["confirm"])
-    assert bot._retag_session is None
+    assert state._retag_session["owner"] == 1
+    await retag._retag_command(update, ["confirm"])
+    assert state._retag_session is None
     assert inspect_selected_tags(str(release.path))["title"] == "New Song"
-    bot._trigger_scan.assert_awaited_once()
+    library_actions._trigger_scan.assert_awaited_once()
 
 
 async def test_library_picker_previews_all_albums_and_discard_writes_nothing(release, chat, monkeypatch):
@@ -361,43 +362,43 @@ async def test_library_picker_previews_all_albums_and_discard_writes_nothing(rel
     second = other / release.path.name
     shutil.copyfile(release.path, second)
     before = release.path.read_bytes()
-    monkeypatch.setattr(bot, "MUSIC_DIR", str(release.root))
-    await bot.cmd_maintain(update, context)
+    monkeypatch.setattr(config, "MUSIC_DIR", str(release.root))
+    await handlers.cmd_maintain(update, context)
     token = context.user_data["maintenance_selection"]["token"]
     for action in ("titles", "preview"):
         update.callback_query.data = f"maintain:{action}:{token}"
-        await bot._handle_maintenance_callback(update, context)
-    assert len(bot._retag_session["plans"]) == 2
+        await retag._handle_maintenance_callback(update, context)
+    assert len(state._retag_session["plans"]) == 2
     assert "2 albums" in update.message.edit_text.call_args.args[0]
-    await bot._retag_command(update, ["stop"])
-    assert bot._retag_session is None
+    await retag._retag_command(update, ["stop"])
+    assert state._retag_session is None
     assert release.path.read_bytes() == second.read_bytes() == before
-    bot._trigger_scan.assert_not_awaited()
+    library_actions._trigger_scan.assert_not_awaited()
 
 
 async def test_confirm_rechecks_snapshot_after_waiting_for_library_lock(release, chat, monkeypatch):
     update, _context = chat
-    monkeypatch.setattr(bot, "MUSIC_DIR", str(release.root))
-    await bot._retag_command(update, [], folder=str(release.folder),
+    monkeypatch.setattr(config, "MUSIC_DIR", str(release.root))
+    await retag._retag_command(update, [], folder=str(release.folder),
                              maintenance_options=maintenance.Options(frozenset({"titles"})))
-    plans = bot._retag_session["plans"]
-    async with bot._download_semaphore:
-        task = asyncio.create_task(bot._do_retag_apply(update, plans))
+    plans = state._retag_session["plans"]
+    async with state._download_semaphore:
+        task = asyncio.create_task(retag._do_retag_apply(update, plans))
         await asyncio.sleep(0)
-        assert bot._retag_in_progress
+        assert state._retag_in_progress
         with release.path.open("ab") as stream:
             stream.write(b"external edit while queued")
     await task
     assert release.path.read_bytes().endswith(b"external edit while queued")
     assert inspect_selected_tags(str(release.path))["title"] == "Old Song"
-    assert bot._retag_session is None
-    bot._trigger_scan.assert_not_awaited()
+    assert state._retag_session is None
+    library_actions._trigger_scan.assert_not_awaited()
 
 
 @pytest.mark.parametrize("invalid", ["user", "chat", "token", "expired"])
 async def test_picker_rejects_other_users_chats_and_stale_buttons(chat, monkeypatch, invalid):
     update, context = chat
-    await bot.cmd_maintain(update, context)
+    await handlers.cmd_maintain(update, context)
     selection = context.user_data["maintenance_selection"]
     token = selection["token"]
     if invalid == "user":
@@ -409,7 +410,7 @@ async def test_picker_rejects_other_users_chats_and_stale_buttons(chat, monkeypa
     else:
         selection["expires"] = 0
     update.callback_query.data = f"maintain:titles:{token}"
-    await bot._handle_maintenance_callback(update, context)
+    await retag._handle_maintenance_callback(update, context)
     assert not selection["fields"]
     update.callback_query.edit_message_reply_markup.assert_not_awaited()
 
@@ -418,7 +419,7 @@ def test_preview_stays_within_telegram_limit_with_escaped_names():
     plan = maintenance.Plan(folder="/unused", artist_dir="&" * 200, album_dir="<" * 200,
                             changes=["&" * 500] * 50, notes=["<" * 500] * 50)
     summary = retagger.RetagSummary(total=1)
-    text = bot._format_maintenance_preview([plan], summary, maintenance.Options(frozenset({"titles"})))
+    text = retag._format_maintenance_preview([plan], summary, maintenance.Options(frozenset({"titles"})))
     assert len(text) < 4096
     assert "+" in text and "more changes" in text
 

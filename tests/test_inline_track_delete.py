@@ -5,8 +5,9 @@ import os
 from types import SimpleNamespace
 
 import pytest
+import config
 
-import bot
+from flows import common, handlers, library_actions, state
 import inline
 
 
@@ -54,21 +55,21 @@ def library(monkeypatch, tmp_path):
     async def inline_to_thread(func, *args):
         return func(*args)
 
-    for mod in (bot, inline):
+    for mod in (config, inline):
         monkeypatch.setattr(mod, "MUSIC_DIR", str(tmp_path))
-    monkeypatch.setattr(bot, "ALLOWED_USERS", {1})
-    monkeypatch.setattr(bot, "_pending_deletes", {})
-    monkeypatch.setattr(bot, "_trigger_scan", fake_scan)
-    monkeypatch.setattr(bot.asyncio, "to_thread", inline_to_thread)
-    monkeypatch.setattr(bot, "_retag_session", {"plans": [], "expire_at": float("inf")})
-    monkeypatch.setattr(bot, "_retag_invalidated_reason", None)
+    monkeypatch.setattr(config, "ALLOWED_USERS", {1})
+    monkeypatch.setattr(library_actions, "_pending_deletes", {})
+    monkeypatch.setattr(library_actions, "_trigger_scan", fake_scan)
+    monkeypatch.setattr(common.asyncio, "to_thread", inline_to_thread)
+    monkeypatch.setattr(state, "_retag_session", {"plans": [], "expire_at": float("inf")})
+    monkeypatch.setattr(state, "_retag_invalidated_reason", None)
     return tmp_path
 
 
 async def ask(rel_path):
     """Send ``delete:<rel_path>``; return (reply text, {action: callback data})."""
     message = RecordingMessage()
-    await bot._handle_delete(SimpleNamespace(message=message), rel_path)
+    await library_actions._handle_delete(SimpleNamespace(message=message), rel_path)
     [(text, markup)] = message.replies
     buttons = {}
     if markup is not None:
@@ -79,7 +80,7 @@ async def ask(rel_path):
 
 async def tap(data):
     query = FakeQuery(data)
-    await bot._handle_delete_callback(SimpleNamespace(callback_query=query), None)
+    await handlers._handle_delete_callback(SimpleNamespace(callback_query=query), None)
     return query
 
 
@@ -124,7 +125,7 @@ async def test_delete_asks_first_and_deletes_on_confirm(library):
     assert not track.exists()
     assert (library / "Artist" / "Album" / "02 - Other Song.mp3").exists()
     assert query.text.startswith("Deleted: Artist — Album — Song One")
-    assert bot._retag_session is None and bot._retag_invalidated_reason == "track deleted"
+    assert state._retag_session is None and state._retag_invalidated_reason == "track deleted"
 
 
 async def test_album_prompt_counts_tracks(library):
@@ -137,7 +138,7 @@ async def test_cancel_keeps_the_files(library):
     query = await tap(buttons["no"])
     assert query.text == "Cancelled."
     assert (library / "Artist" / "Album" / "01 Song One.flac").exists()
-    assert bot._retag_session is not None
+    assert state._retag_session is not None
 
 
 async def test_second_tap_does_nothing(library):
@@ -161,13 +162,13 @@ async def test_other_users_cannot_confirm(library):
     _, buttons = await ask("Artist/Album")
     query = FakeQuery(buttons["yes"])
     query.from_user = SimpleNamespace(id=2)
-    await bot._handle_delete_callback(SimpleNamespace(callback_query=query), None)
+    await handlers._handle_delete_callback(SimpleNamespace(callback_query=query), None)
     assert (library / "Artist" / "Album").exists()
     assert query.toasts == ["Not allowed."]
 
 
 async def test_last_track_takes_album_and_empty_artist_folder(library):
-    await bot._delete_track(str(library / "Solo" / "Single" / "01 Lonely.flac"))
+    await library_actions._delete_track(str(library / "Solo" / "Single" / "01 Lonely.flac"))
     assert not (library / "Solo").exists()  # cover-only album and empty artist both gone
     assert library.exists()
 
@@ -176,13 +177,13 @@ async def test_audio_in_a_nested_folder_keeps_the_album(library):
     disc = library / "Solo" / "Single" / "CD2"
     disc.mkdir()
     (disc / "01 Bonus.flac").write_bytes(b"x")
-    await bot._delete_track(str(library / "Solo" / "Single" / "01 Lonely.flac"))
+    await library_actions._delete_track(str(library / "Solo" / "Single" / "01 Lonely.flac"))
     assert (disc / "01 Bonus.flac").exists()
 
 
 async def test_unknown_files_keep_the_album(library):
     (library / "Solo" / "Single" / "02 Lonely (demo).wav").write_bytes(b"x")
-    await bot._delete_track(str(library / "Solo" / "Single" / "01 Lonely.flac"))
+    await library_actions._delete_track(str(library / "Solo" / "Single" / "01 Lonely.flac"))
     assert (library / "Solo" / "Single" / "02 Lonely (demo).wav").exists()
 
 
@@ -199,7 +200,7 @@ async def test_track_prompt_never_deletes_a_folder(library):
 
 async def test_linked_album_folder_is_left_alone(library):
     (library / "Solo" / "Linked").symlink_to(library / "Solo" / "Single")
-    message = await bot._delete_track(str(library / "Solo" / "Linked" / "01 Lonely.flac"))
+    message = await library_actions._delete_track(str(library / "Solo" / "Linked" / "01 Lonely.flac"))
     assert message.startswith("Deleted: Solo — Linked — Lonely")
     assert (library / "Solo" / "Linked").is_symlink()
     assert (library / "Solo" / "Single" / "cover.jpg").exists()
@@ -209,7 +210,7 @@ async def test_track_directly_under_artist_never_climbs_to_the_root(library):
     loose = library / "Loose"
     loose.mkdir()
     (loose / "Only.flac").write_bytes(b"x")
-    await bot._delete_track(str(loose / "Only.flac"))
+    await library_actions._delete_track(str(loose / "Only.flac"))
     assert not (loose / "Only.flac").exists()
     assert loose.exists() and library.exists()
 

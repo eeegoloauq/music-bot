@@ -184,7 +184,7 @@ async def test_flac_artists_round_trip_and_patch(tmp_path):
 
     del patched["artists"]
     patched.save()
-    assert retagger._retag_flac_surgical(str(path), track, album)
+    assert tagger.write_tags(str(path), track, album, mode="retag")
     assert FLAC(path)["artists"] == ["A", "B", "X"]
 
 

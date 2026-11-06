@@ -16,19 +16,12 @@ import tempfile
 from pathlib import Path
 
 import pytest
+import config
 
 import journal
 from library.files import _ensure_album_dir
 from library import importing
 from library.importing import _move_into_library
-
-
-@pytest.fixture
-def shared_umask():
-    """The umask main() sets for the whole process."""
-    previous = os.umask(0o002)
-    yield
-    os.umask(previous)
 
 
 def test_created_paths_are_group_writable(tmp_path, shared_umask):
@@ -225,7 +218,7 @@ def test_startup_refuses_a_volume_it_cannot_write(tmp_path, monkeypatch, caplog)
     library = tmp_path / "music"
     library.mkdir()
     monkeypatch.setattr(journal_module, "JOURNAL_PATH", str(state / "pending.json"))
-    monkeypatch.setattr(bot, "MUSIC_DIR", str(library))
+    monkeypatch.setattr(config, "MUSIC_DIR", str(library))
 
     bot._require_writable_volumes()  # both writable: no complaint
 

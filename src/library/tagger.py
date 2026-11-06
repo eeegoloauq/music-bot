@@ -1,14 +1,18 @@
 import logging
 import os
 import re
+from copy import deepcopy
+from typing import Literal
+
 from mutagen import File as MutagenFile
 
 from mutagen.flac import FLAC, Picture
 from mutagen.mp4 import MP4, MP4Cover, MP4FreeForm
+from mutagen.id3 import ID3, ID3NoHeaderError
 from mutagen.mp3 import MP3
 from mutagen.id3 import (
     APIC, COMM, TALB, TBPM, TCON, TCOP, TCOM, TDOR, TDRC, TDRL,
-    TIT2, TPE1, TPE2, TPOS, TPUB, TRCK, TSRC, TXXX, USLT,
+    TEXT, TIT2, TPE1, TPE2, TPOS, TPUB, TRCK, TSRC, TXXX, USLT,
 )
 
 from library.files import _comment_value
@@ -192,9 +196,62 @@ def _format_title(track: dict) -> str:
     return track["title"]
 
 
+def _first(values) -> str:
+    return str(values[0]) if values else ""
+
+
+def _merge_genres(existing, fresh) -> list[str]:
+    return list(existing) + _dedupe_names(fresh, existing)
+
+
+def _canonical_comment(album_id, existing: str, preserve: bool) -> str:
+    marker = _comment_value(album_id)
+    if not preserve:
+        return marker
+    if "music-bot" in existing.lower():
+        # Accept both the current URL-first marker and the legacy prefix.
+        url = r"https?://(?:www\.)?(?:deezer|tidal)\.com/album/\d+"
+        existing = re.sub(
+            rf"^(?:{url}\s*·\s*Downloaded with github\.com/eeegoloauq/music-bot"
+            rf"|music-bot\s*·\s*{url})(?:\s*·\s*)?",
+            "", existing, flags=re.IGNORECASE,
+        ).strip()
+    note = existing.strip()
+    return f"{marker} · {note}" if note else marker
+
+
+def write_tags(filepath: str, track: dict, album: dict,
+               stream_meta: dict | None = None, cover_data: bytes | None = None,
+               lyrics: dict | None = None, *,
+               mode: Literal["fill", "replace", "retag"] = "fill",
+               audio_format: str | None = None) -> bool:
+    """Write supported audio tags through one format dispatch.
+
+    ``fill`` adds missing values. ``replace`` wipes tags except curated credits.
+    ``retag`` updates managed values, merges genres, and preserves artwork,
+    lyrics, peer notes and unmanaged tags. Retag writes only when tags change;
+    its errors propagate so callers can report failed files.
+    """
+    if mode not in {"fill", "replace", "retag"}:
+        raise ValueError(f"Unknown tag writing mode: {mode}")
+    writer = {
+        ".flac": _write_tags,
+        ".m4a": _write_m4a_tags,
+        ".mp3": _write_mp3_tags,
+    }.get("." + audio_format.lower().lstrip(".") if audio_format
+          else os.path.splitext(filepath)[1].lower())
+    if writer is None:
+        return False
+    if mode == "retag":
+        cover_data = lyrics = None
+    return writer(filepath, track, album, stream_meta, cover_data, lyrics,
+                  force=mode == "replace", surgical=mode == "retag")
+
+
 def _write_tags(filepath: str, track: dict, album: dict,
                 stream_meta: dict | None, cover_data: bytes | None,
-                lyrics: dict | None = None, force: bool = False):
+                lyrics: dict | None = None, force: bool = False,
+                surgical: bool = False) -> bool:
     """Write Vorbis Comment tags to a FLAC file.
 
     force=False: only fills in missing tags (preserves anything already there).
@@ -204,6 +261,8 @@ def _write_tags(filepath: str, track: dict, album: dict,
     """
     try:
         audio = FLAC(filepath)
+        before = dict(audio)
+        overwrite = force or surgical
         # Capture a small allow-list of peer tags before the wipe — these are
         # things uploaders sometimes hand-curate that no streaming-service API
         # provides (composer/lyricist/performer credits, free-form comments).
@@ -247,8 +306,8 @@ def _write_tags(filepath: str, track: dict, album: dict,
         }
         # Genres (multi-value Vorbis comment)
         genres = album.get("genres") or []
-        if genres:
-            audio["genre"] = genres
+        if genres and (overwrite or "genre" not in audio):
+            audio["genre"] = _merge_genres(audio.get("genre") or [], genres) if surgical else genres
         artist_names = _artist_names(track, album)
         if artist_names and (force or "artists" not in audio):
             audio["artists"] = artist_names
@@ -257,7 +316,7 @@ def _write_tags(filepath: str, track: dict, album: dict,
 
         album_id = album.get("id", "")
         if album_id:
-            tags["comment"] = _comment_value(album_id)
+            tags["comment"] = _canonical_comment(album_id, _first(audio.get("comment")), surgical)
 
         if album.get("type"):
             tags["releasetype"] = album["type"].lower()
@@ -290,7 +349,7 @@ def _write_tags(filepath: str, track: dict, album: dict,
         for key, val in tags.items():
             if not val:
                 continue
-            if force or key == "comment" or key not in audio:
+            if overwrite or key == "comment" or key not in audio:
                 audio[key] = val
 
         if cover_data:
@@ -314,26 +373,33 @@ def _write_tags(filepath: str, track: dict, album: dict,
             plain = lyrics.get("plainLyrics")
             if synced:
                 # lyrics = LRC so Navidrome detects timestamps → serves as synced via API
-                if force or "lyrics" not in audio:
+                if overwrite or "lyrics" not in audio:
                     audio["lyrics"] = synced
-                if force or "syncedlyrics" not in audio:
+                if overwrite or "syncedlyrics" not in audio:
                     audio["syncedlyrics"] = synced  # for foobar2000, Poweramp, etc.
-                if plain and (force or "unsyncedlyrics" not in audio):
+                if plain and (overwrite or "unsyncedlyrics" not in audio):
                     audio["unsyncedlyrics"] = plain  # fallback for plain-only players
             elif plain:
-                if force or "lyrics" not in audio:
+                if overwrite or "lyrics" not in audio:
                     audio["lyrics"] = plain
-        elif "lrclibchecked" not in audio:
+        elif not surgical and "lrclibchecked" not in audio:
             audio["lrclibchecked"] = "1"
 
-        audio.save()
+        changed = dict(audio) != before or bool(cover_data and force)
+        if not surgical or changed:
+            audio.save()
+        return changed
     except Exception:
+        if surgical:
+            raise
         logger.warning("Could not write tags to %s", filepath, exc_info=True)
+        return False
 
 
 def _write_m4a_tags(filepath: str, track: dict, album: dict,
                     stream_meta: dict | None, cover_data: bytes | None,
-                    lyrics: dict | None = None, force: bool = False):
+                    lyrics: dict | None = None, force: bool = False,
+                    surgical: bool = False) -> bool:
     """Write iTunes-style tags to an M4A file.
 
     force=False: only fills in missing tags.
@@ -341,6 +407,8 @@ def _write_m4a_tags(filepath: str, track: dict, album: dict,
     """
     try:
         audio = MP4(filepath)
+        before = dict(audio)
+        overwrite = force or surgical
         peer_keep: dict[str, str] = {}
         if force:
             # Capture peer-curated credits before the wipe — same reason as FLAC.
@@ -376,25 +444,25 @@ def _write_m4a_tags(filepath: str, track: dict, album: dict,
         }
         album_id = album.get("id", "")
         if album_id:
-            str_tags["\xa9cmt"] = _comment_value(album_id)
+            str_tags["\xa9cmt"] = _canonical_comment(album_id, _first(audio.get("\xa9cmt")), surgical)
 
         for key, val in str_tags.items():
             if not val:
                 continue
-            if force or key == "\xa9cmt" or key not in audio:
+            if overwrite or key == "\xa9cmt" or key not in audio:
                 audio[key] = [val]
 
-        if force or "trkn" not in audio:
+        if overwrite or "trkn" not in audio:
             audio["trkn"] = [(num, total_tracks)]
-        if force or "disk" not in audio:
+        if overwrite or "disk" not in audio:
             audio["disk"] = [(disc, total_discs)]
-        if track.get("explicit") and (force or "rtng" not in audio):
+        if track.get("explicit") and (overwrite or "rtng" not in audio):
             audio["rtng"] = [1]
 
         # Free-form tags (----:com.apple.iTunes:NAME)
         def _ff(name: str, value: str):
             key = f"----:com.apple.iTunes:{name}"
-            if force or key not in audio:
+            if overwrite or key not in audio:
                 audio[key] = [MP4FreeForm(value.encode("utf-8"))]
 
         if track.get("isrc"):
@@ -413,8 +481,9 @@ def _write_m4a_tags(filepath: str, track: dict, album: dict,
             _ff("LABEL", album["label"])
         # Genre — iTunes ©gen takes a single string; join Deezer's list.
         genres = album.get("genres") or []
-        if genres and (force or "\xa9gen" not in audio):
-            audio["\xa9gen"] = ["; ".join(genres)]
+        if genres and (overwrite or "\xa9gen" not in audio):
+            existing = [g.strip() for g in _first(audio.get("\xa9gen")).split(";") if g.strip()]
+            audio["\xa9gen"] = ["; ".join(_merge_genres(existing, genres) if surgical else genres)]
 
         # ReplayGain from Deezer (track) + computed album-mean.
         tg = track.get("track_gain")
@@ -427,16 +496,16 @@ def _write_m4a_tags(filepath: str, track: dict, album: dict,
             _ff("REPLAYGAIN_REFERENCE_LOUDNESS", "89.0 dB")
 
         # Cover art
-        if cover_data and (force or "covr" not in audio):
+        if cover_data and (overwrite or "covr" not in audio):
             audio["covr"] = [MP4Cover(cover_data, imageformat=MP4Cover.FORMAT_JPEG)]
 
         # Lyrics
         if lyrics:
-            if lyrics.get("plainLyrics") and (force or "\xa9lyr" not in audio):
+            if lyrics.get("plainLyrics") and (overwrite or "\xa9lyr" not in audio):
                 audio["\xa9lyr"] = [lyrics["plainLyrics"]]
             if lyrics.get("syncedLyrics"):
                 _ff("SYNCEDLYRICS", lyrics["syncedLyrics"])
-        elif "----:com.apple.iTunes:LRCLIBCHECKED" not in audio:
+        elif not surgical and "----:com.apple.iTunes:LRCLIBCHECKED" not in audio:
             _ff("LRCLIBCHECKED", "1")
 
         # Restore peer-curated credits.
@@ -447,14 +516,21 @@ def _write_m4a_tags(filepath: str, track: dict, album: dict,
         if peer_keep.get("performer"):
             _ff("PERFORMER", peer_keep["performer"])
 
-        audio.save()
+        changed = dict(audio) != before or bool(cover_data and force)
+        if not surgical or changed:
+            audio.save()
+        return changed
     except Exception:
+        if surgical:
+            raise
         logger.warning("Could not write M4A tags to %s", filepath, exc_info=True)
+        return False
 
 
 def _write_mp3_tags(filepath: str, track: dict, album: dict,
                     stream_meta: dict | None, cover_data: bytes | None,
-                    lyrics: dict | None = None, force: bool = False):
+                    lyrics: dict | None = None, force: bool = False,
+                    surgical: bool = False) -> bool:
     """Write ID3v2.4 tags to an mp3 file.
 
     Used by the mp3 lossy-fallback path. Same force-mode contract as the FLAC /
@@ -466,13 +542,20 @@ def _write_mp3_tags(filepath: str, track: dict, album: dict,
         if mp3.tags is None:
             mp3.add_tags()
         audio = mp3.tags
+        before = dict(audio)
+        overwrite = force or surgical
 
         peer_keep: dict[str, str] = {}
         if force:
             peer_keep["composer"] = _id3_get_text(audio, "TCOM")
-            peer_keep["lyricist"] = _id3_get_text(audio, "TEXT")
+            peer_keep["lyricist"] = _id3_get_text(audio, "TEXT") or _id3_get_txxx(audio, "LYRICIST")
             peer_keep["performer"] = _id3_get_txxx(audio, "PERFORMER")
             audio.clear()
+
+        def add(frame):
+            # ID3 HashKey distinguishes custom frames such as TXXX:ARTISTS.
+            if overwrite or frame.HashKey not in audio:
+                audio.add(frame)
 
         artist_str = _format_artist(track, album)
         title_str = _format_title(track)
@@ -484,85 +567,99 @@ def _write_mp3_tags(filepath: str, track: dict, album: dict,
 
         release_date = album.get("releaseDate", "")
 
-        audio.add(TIT2(encoding=3, text=title_str))
-        audio.add(TPE1(encoding=3, text=artist_str))
-        audio.add(TPE2(encoding=3, text=album.get("artist", track.get("artist", "Unknown"))))
-        audio.add(TALB(encoding=3, text=album.get("title", "Singles")))
-        audio.add(TRCK(encoding=3, text=f"{num}/{total_tracks}" if total_tracks else str(num)))
-        audio.add(TPOS(encoding=3, text=f"{disc}/{total_discs}" if total_discs else str(disc)))
+        add(TIT2(encoding=3, text=title_str))
+        add(TPE1(encoding=3, text=artist_str))
+        add(TPE2(encoding=3, text=album.get("artist", track.get("artist", "Unknown"))))
+        add(TALB(encoding=3, text=album.get("title", "Singles")))
+        add(TRCK(encoding=3, text=f"{num}/{total_tracks}" if total_tracks else str(num)))
+        add(TPOS(encoding=3, text=f"{disc}/{total_discs}" if total_discs else str(disc)))
         if release_date:
             # ID3v2.4: TDRC supersedes TYER. TDOR + TDRL track original /
             # release dates the same way FLAC's ORIGINALDATE / RELEASEDATE do.
-            audio.add(TDRC(encoding=3, text=release_date))
-            audio.add(TDOR(encoding=3, text=release_date))
-            audio.add(TDRL(encoding=3, text=release_date))
+            add(TDRC(encoding=3, text=release_date))
+            add(TDOR(encoding=3, text=release_date))
+            add(TDRL(encoding=3, text=release_date))
 
         cprt = track.get("copyright") or album.get("copyright", "")
         if cprt:
-            audio.add(TCOP(encoding=3, text=cprt))
+            add(TCOP(encoding=3, text=cprt))
         if track.get("isrc"):
-            audio.add(TSRC(encoding=3, text=track["isrc"]))
+            add(TSRC(encoding=3, text=track["isrc"]))
         if album.get("label"):
-            audio.add(TPUB(encoding=3, text=album["label"]))
+            add(TPUB(encoding=3, text=album["label"]))
         if track.get("bpm"):
-            audio.add(TBPM(encoding=3, text=str(track["bpm"])))
+            add(TBPM(encoding=3, text=str(track["bpm"])))
         genres = album.get("genres") or []
         if genres:
             # mutagen accepts a list; stored as null-separated in v2.4.
-            audio.add(TCON(encoding=3, text=genres))
+            current = audio.get("TCON")
+            existing = [str(g) for g in current.text] if current else []
+            add(TCON(encoding=3, text=_merge_genres(existing, genres) if surgical else genres))
 
         if album.get("upc"):
-            audio.add(TXXX(encoding=3, desc="BARCODE", text=album["upc"]))
+            add(TXXX(encoding=3, desc="BARCODE", text=album["upc"]))
         artist_names = _artist_names(track, album)
-        if artist_names:
-            audio.add(TXXX(encoding=3, desc="ARTISTS", text=artist_names))
+        if artist_names and (force or "TXXX:ARTISTS" not in audio):
+            add(TXXX(encoding=3, desc="ARTISTS", text=artist_names))
         if album.get("type"):
-            audio.add(TXXX(encoding=3, desc="RELEASETYPE", text=album["type"].lower()))
+            add(TXXX(encoding=3, desc="RELEASETYPE", text=album["type"].lower()))
         if track.get("explicit"):
-            audio.add(TXXX(encoding=3, desc="ITUNESADVISORY", text="1"))
+            add(TXXX(encoding=3, desc="ITUNESADVISORY", text="1"))
 
         # ReplayGain via TXXX (foobar2000 / Mp3gain / RG-aware players).
         tg = track.get("track_gain")
         ag = album.get("album_gain")
         if tg is not None:
-            audio.add(TXXX(encoding=3, desc="REPLAYGAIN_TRACK_GAIN", text=f"{tg:+.2f} dB"))
+            add(TXXX(encoding=3, desc="REPLAYGAIN_TRACK_GAIN", text=f"{tg:+.2f} dB"))
         if ag is not None:
-            audio.add(TXXX(encoding=3, desc="REPLAYGAIN_ALBUM_GAIN", text=f"{ag:+.2f} dB"))
+            add(TXXX(encoding=3, desc="REPLAYGAIN_ALBUM_GAIN", text=f"{ag:+.2f} dB"))
         if tg is not None or ag is not None:
-            audio.add(TXXX(encoding=3, desc="REPLAYGAIN_REFERENCE_LOUDNESS", text="89.0 dB"))
+            add(TXXX(encoding=3, desc="REPLAYGAIN_REFERENCE_LOUDNESS", text="89.0 dB"))
 
         album_id = album.get("id", "")
         if album_id:
-            audio.add(COMM(encoding=3, lang="eng", desc="", text=_comment_value(album_id)))
+            existing_comments = audio.getall("COMM")
+            existing_comment = _first(existing_comments[0].text) if existing_comments else ""
+            comment = _canonical_comment(album_id, existing_comment, surgical)
+            if surgical and existing_comment != comment:
+                audio.delall("COMM")
+            # The canonical source marker always replaces its matching frame.
+            audio.add(COMM(encoding=3, lang="eng", desc="", text=comment))
 
         if cover_data:
-            audio.add(APIC(
+            add(APIC(
                 encoding=3, mime="image/jpeg", type=3, desc="Cover", data=cover_data,
             ))
 
         if peer_keep.get("composer"):
-            audio.add(TCOM(encoding=3, text=peer_keep["composer"]))
+            add(TCOM(encoding=3, text=peer_keep["composer"]))
         if peer_keep.get("lyricist"):
-            audio.add(TXXX(encoding=3, desc="LYRICIST", text=peer_keep["lyricist"]))
+            add(TEXT(encoding=3, text=peer_keep["lyricist"]))
         if peer_keep.get("performer"):
-            audio.add(TXXX(encoding=3, desc="PERFORMER", text=peer_keep["performer"]))
+            add(TXXX(encoding=3, desc="PERFORMER", text=peer_keep["performer"]))
 
         if lyrics:
             synced = lyrics.get("syncedLyrics")
             plain = lyrics.get("plainLyrics")
             if synced:
-                audio.add(USLT(encoding=3, lang="eng", desc="", text=plain or synced))
-                audio.add(TXXX(encoding=3, desc="SYNCEDLYRICS", text=synced))
+                add(USLT(encoding=3, lang="eng", desc="", text=plain or synced))
+                add(TXXX(encoding=3, desc="SYNCEDLYRICS", text=synced))
             elif plain:
-                audio.add(USLT(encoding=3, lang="eng", desc="", text=plain))
-        else:
+                add(USLT(encoding=3, lang="eng", desc="", text=plain))
+        elif not surgical:
             already = any(f.desc == "LRCLIBCHECKED" for f in audio.getall("TXXX"))
             if not already:
-                audio.add(TXXX(encoding=3, desc="LRCLIBCHECKED", text="1"))
+                add(TXXX(encoding=3, desc="LRCLIBCHECKED", text="1"))
 
-        mp3.save(v2_version=4)
+        changed = dict(audio) != before
+        if not surgical or changed:
+            mp3.save(v2_version=4)
+        return changed
     except Exception:
+        if surgical:
+            raise
         logger.warning("Could not write MP3 tags to %s", filepath, exc_info=True)
+        return False
 
 
 async def _patch_missing_tags(filepath: str, track: dict, album: dict) -> list[str]:
@@ -775,3 +872,87 @@ async def _patch_mp3_tags(filepath: str, track: dict, album: dict) -> list[str]:
     except Exception as e:
         logger.warning("Could not patch MP3 tags for %s: %s", filepath, e)
     return added
+
+
+def append_genres(filepath: str, new_genres: list[str]) -> bool:
+    """Add ``new_genres`` to a file's GENRE / TCON / ©gen tag in place,
+    leaving everything else alone. Returns True when something changed.
+    Used by the Last.fm-only branch — the file isn't on Deezer, so we
+    can't safely rewrite the canonical fields, but adding fine-grained
+    genre tags on top of whatever's already there is safe.
+    """
+    ext = os.path.splitext(filepath)[1].lower()
+    try:
+        if ext == ".flac":
+            audio = FLAC(filepath)
+            current = list(audio.get("genre") or [])
+            added = _dedupe_names(new_genres, current)
+            if not added:
+                return False
+            audio["genre"] = current + added
+            audio.save()
+            return True
+        if ext == ".m4a":
+            audio = MP4(filepath)
+            current = list(audio.get("\xa9gen") or [])
+            current_str = current[0] if current else ""
+            existing_set = {g.strip().lower() for g in current_str.split(";") if g.strip()}
+            added = _dedupe_names(new_genres, existing_set)
+            if not added:
+                return False
+            merged = "; ".join(([current_str] if current_str else []) + added)
+            audio["\xa9gen"] = [merged]
+            audio.save()
+            return True
+        if ext == ".mp3":
+            from mutagen.id3 import TCON
+            try:
+                tags = ID3(filepath)
+            except ID3NoHeaderError:
+                tags = ID3()
+            tcon = tags.get("TCON")
+            current = list(tcon.text) if tcon else []
+            added = _dedupe_names(new_genres, current)
+            if not added:
+                return False
+            tags.add(TCON(encoding=3, text=current + added))
+            tags.save(filepath, v2_version=4)
+            return True
+    except Exception:
+        logger.warning("Genre-only append failed: %s", filepath, exc_info=True)
+    return False
+
+
+def write_import_tags(filepath: str, track: dict, album: dict,
+                      cover_data: bytes | None, lyrics: dict | None, ext: str):
+    """Apply release tags while retaining supplied artwork and lyric fields."""
+    def is_media(key):
+        key = str(key).casefold()
+        return (key in {"covr", "©lyr", "lyrics", "syncedlyrics", "unsyncedlyrics"}
+                or key.startswith(("apic", "uslt", "sylt"))
+                or "syncedlyrics" in key)
+
+    original = MutagenFile(filepath)
+    saved = {key: deepcopy(value) for key, value in (original.tags or {}).items()
+             if is_media(key)}
+    pictures = deepcopy(getattr(original, "pictures", []))
+    has_art = pictures or any(str(key).casefold() == "covr" or str(key).casefold().startswith("apic")
+                              for key in saved)
+    has_lyrics = any(str(key).casefold() != "covr" and not str(key).casefold().startswith("apic")
+                     for key in saved)
+    write_tags(filepath, track, album,
+               cover_data=None if has_art else cover_data,
+               lyrics=None if has_lyrics else lyrics,
+               mode="replace", audio_format=ext)
+    if not saved and not pictures:
+        return
+    updated = MutagenFile(filepath)
+    if updated.tags is None:
+        updated.add_tags()
+    for key, value in saved.items():
+        updated.tags[key] = value
+    if pictures:
+        updated.clear_pictures()
+        for picture in pictures:
+            updated.add_picture(picture)
+    updated.save()

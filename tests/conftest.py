@@ -7,6 +7,7 @@ order-independent.
 """
 
 import asyncio
+import os
 import sys
 import time
 import types
@@ -19,6 +20,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from soulseek import client as sc  # noqa: E402
 from soulseek.client import SearchResult  # noqa: E402
+
+
+@pytest.fixture
+def shared_umask():
+    """Apply main()'s process policy around a test, before starting its tasks."""
+    previous = os.umask(0o002)
+    try:
+        yield
+    finally:
+        os.umask(previous)
 
 
 @pytest.fixture(autouse=True)

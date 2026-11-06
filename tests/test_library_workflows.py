@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock
 import zipfile
 
 import pytest
+import config
 from mutagen.flac import FLAC, Picture
 from mutagen.id3 import ID3, APIC, USLT
 from mutagen.mp4 import MP4, MP4Cover
@@ -18,6 +19,9 @@ from telegram import Update, CallbackQuery, User
 from telegram.error import NetworkError
 
 import bot
+import providers
+from flows import uploads as upload_flow
+from flows import common, handlers, retag, state
 import inline
 import retagger
 import upload_choices
@@ -166,9 +170,9 @@ async def test_preview_cannot_be_confirmed_or_discarded_by_another_user(monkeypa
     update = SimpleNamespace(effective_message=message, effective_user=SimpleNamespace(id=2),
                              effective_chat=SimpleNamespace(id=1))
     session = {"owner": 1, "chat": 1}
-    monkeypatch.setattr(bot, "_retag_session", session)
-    await bot._retag_command(update, [action])
-    assert bot._retag_session is session
+    monkeypatch.setattr(state, "_retag_session", session)
+    await retag._retag_command(update, [action])
+    assert state._retag_session is session
     assert "another user" in message.reply_text.call_args.args[0]
 
 
@@ -176,19 +180,19 @@ async def test_changed_album_cannot_be_applied(tmp_path, monkeypatch):
     track = tmp_path / "song.flac"
     track.write_bytes(b"old")
     plan = retagger.AlbumPlan(str(tmp_path), "A", "B")
-    snapshot = bot._retag_snapshot([plan])
+    snapshot = retag._retag_snapshot([plan])
     track.write_bytes(b"new version")
-    monkeypatch.setattr(bot, "_retag_session", {"plans": [plan], "snapshot": snapshot,
+    monkeypatch.setattr(state, "_retag_session", {"plans": [plan], "snapshot": snapshot,
         "expire_at": time.monotonic() + 60, "owner": 1, "chat": 1})
-    monkeypatch.setattr(bot, "_retag_in_progress", False)
+    monkeypatch.setattr(state, "_retag_in_progress", False)
     apply = AsyncMock()
-    monkeypatch.setattr(bot, "_do_retag_apply", apply)
+    monkeypatch.setattr(retag, "_do_retag_apply", apply)
     message = SimpleNamespace(reply_text=AsyncMock())
     update = SimpleNamespace(effective_message=message, effective_user=SimpleNamespace(id=1),
                              effective_chat=SimpleNamespace(id=1))
-    await bot._retag_command(update, ["confirm"])
+    await retag._retag_command(update, ["confirm"])
     apply.assert_not_awaited()
-    assert bot._retag_session is None
+    assert state._retag_session is None
 
 
 async def test_manual_selection_skips_automatic_identification(tmp_path, monkeypatch):
@@ -309,24 +313,24 @@ async def test_pending_button_is_private_to_upload_owner(monkeypatch, user, chat
     ("uploads:pending", "pending"),
 ])
 def test_import_buttons_reach_their_own_handlers(monkeypatch, data, callback):
-    monkeypatch.setattr(bot, "TG_TOKEN", "123:fake-token")
+    monkeypatch.setattr(config, "TG_TOKEN", "123:fake-token")
     app = bot._build_app()
     update = Update(1, callback_query=CallbackQuery(
         id="query", from_user=User(1, "Owner", False), chat_instance="chat", data=data))
     handler = next(h for h in app.handlers[0] if h.check_update(update))
-    expected = {"upload": bot._upload_choices.callback, "pending": bot._upload_choices.list_pending,
-                "_handle_import_help": bot._handle_import_help}[callback]
+    expected = {"upload": upload_flow._upload_choices.callback, "pending": upload_flow._upload_choices.list_pending,
+                "_handle_import_help": handlers._handle_import_help}[callback]
     assert handler.callback == expected
 
 
 def test_owner_start_menu_has_pending_upload_button(monkeypatch):
-    monkeypatch.setattr(bot, "ALLOWED_USERS", [1])
+    monkeypatch.setattr(config, "ALLOWED_USERS", [1])
     owner = SimpleNamespace(effective_chat=SimpleNamespace(id=1))
     other = SimpleNamespace(effective_chat=SimpleNamespace(id=2))
     assert any(b.callback_data == "uploads:pending"
-               for row in bot._chat_shortcuts(owner).inline_keyboard for b in row)
+               for row in handlers._chat_shortcuts(owner).inline_keyboard for b in row)
     assert not any(b.callback_data == "uploads:pending"
-                   for row in bot._chat_shortcuts(other).inline_keyboard for b in row)
+                   for row in handlers._chat_shortcuts(other).inline_keyboard for b in row)
 
 
 async def test_startup_restores_pending_uploads_before_accepting_new_ones(monkeypatch):
@@ -339,13 +343,13 @@ async def test_startup_restores_pending_uploads_before_accepting_new_ones(monkey
     async def watch(_callback):
         order.append("watch")
 
-    monkeypatch.setattr(bot, "ALLOWED_USERS", [1])
-    monkeypatch.setattr(bot, "UPLOAD_HTTP_PORT", 0)
-    monkeypatch.setattr(bot, "_spawn_background", scheduled.append)
-    monkeypatch.setattr(bot._upload_choices, "restore", restore)
+    monkeypatch.setattr(config, "ALLOWED_USERS", [1])
+    monkeypatch.setattr(config, "UPLOAD_HTTP_PORT", 0)
+    monkeypatch.setattr(common, "_spawn_background", scheduled.append)
+    monkeypatch.setattr(upload_flow._upload_choices, "restore", restore)
     monkeypatch.setattr(bot.uploads, "watch_loop", watch)
-    monkeypatch.setattr(bot.providers, "sharing_enabled", lambda: False)
-    monkeypatch.setattr(bot.providers, "check", AsyncMock(
+    monkeypatch.setattr(providers, "sharing_enabled", lambda: False)
+    monkeypatch.setattr(providers, "check", AsyncMock(
         return_value=SimpleNamespace(state="disabled", ready=False)))
     await bot._post_init(SimpleNamespace(bot=SimpleNamespace(set_my_commands=AsyncMock())))
     await asyncio.gather(*scheduled)
