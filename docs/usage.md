@@ -105,8 +105,8 @@ After upload, the owner chooses in Telegram:
 - `/import ID <album link or Deezer ID>`: select a release manually, including after a failed lookup.
 
 The upload message contains the import choices. The owner can reopen them with **Pending uploads**
-in the `/start` menu. After a restart, the bot shows unfinished uploads automatically; after a failed
-lookup, it shows the choices again. Until an import starts, audio stays in staging. No download provider is required for either mode. All uploads use the same
+in the `/start` menu. Unfinished uploads survive restarts without repeat notifications; after a failed
+lookup, the bot shows the choices again. Until an import starts, audio stays in staging. No download provider is required for either mode. All uploads use the same
 handler regardless of where the files came from.
 
 Artwork and useful sidecars (PDF booklets, text notes, CUE sheets, logs, LRC lyrics, playlists

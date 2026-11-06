@@ -333,24 +333,34 @@ def test_owner_start_menu_has_pending_upload_button(monkeypatch):
                    for row in handlers._chat_shortcuts(other).inline_keyboard for b in row)
 
 
-async def test_startup_restores_pending_uploads_before_accepting_new_ones(monkeypatch):
-    order, scheduled = [], []
+async def test_repeated_startup_keeps_pending_uploads_quiet_and_announces_new_ones(monkeypatch):
+    scheduled = []
+    pending = uploads.IntakeReport(name="Waiting", staging_dir="/staging/abcdef123456", audio=["old.mp3"])
+    fresh = uploads.IntakeReport(name="New", staging_dir="/staging/123456abcdef", audio=["new.mp3"])
+    staged = lambda *_: [pending]
+    monkeypatch.setattr(uploads, "staged_reports", staged)
+    restore = AsyncMock(wraps=upload_flow._upload_choices.restore)
+    offer = AsyncMock()
+    monkeypatch.setattr(upload_flow._upload_choices, "restore", restore)
+    monkeypatch.setattr(upload_flow._upload_choices, "offer", offer)
 
-    async def restore(io):
-        assert io.chat_id == 1
-        order.append("restore")
-
-    async def watch(_callback):
-        order.append("watch")
+    async def watch(callback):
+        # Already staged entries stay untouched; only new intake is announced.
+        assert uploads.staged_reports() == [pending]
+        await callback(fresh)
 
     monkeypatch.setattr(config, "ALLOWED_USERS", [1])
     monkeypatch.setattr(config, "UPLOAD_HTTP_PORT", 0)
     monkeypatch.setattr(common, "_spawn_background", scheduled.append)
-    monkeypatch.setattr(upload_flow._upload_choices, "restore", restore)
     monkeypatch.setattr(bot.uploads, "watch_loop", watch)
     monkeypatch.setattr(providers, "sharing_enabled", lambda: False)
     monkeypatch.setattr(providers, "check", AsyncMock(
         return_value=SimpleNamespace(state="disabled", ready=False)))
-    await bot._post_init(SimpleNamespace(bot=SimpleNamespace(set_my_commands=AsyncMock())))
-    await asyncio.gather(*scheduled)
-    assert order == ["restore", "watch"]
+    for _ in range(2):
+        await bot._post_init(SimpleNamespace(bot=SimpleNamespace(set_my_commands=AsyncMock())))
+        await asyncio.gather(*scheduled)
+        scheduled.clear()
+    restore.assert_not_awaited()
+    assert offer.await_count == 2
+    assert all(call.args[1] is fresh for call in offer.await_args_list)
+    assert uploads.staged_reports() == [pending]

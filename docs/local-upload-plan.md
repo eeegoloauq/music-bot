@@ -21,8 +21,8 @@ in staging rather than being discarded after import.
 
 The watcher offers the owner (the first `ALLOWED_USERS` ID) a Telegram prompt through
 `upload_choices.py`. The owner chooses original files or release identification. The **Pending
-uploads** button in the start menu rebuilds prompts from staging. Unfinished uploads are also
-shown automatically at startup, before watching for new arrivals. `/import <id> <album link or Deezer ID>` manually
+uploads** button in the start menu rebuilds prompts from staging. Restarting the bot keeps
+unfinished uploads available without sending their prompts again. `/import <id> <album link or Deezer ID>` manually
 selects a release. Choices and manual commands are restricted to the owner's private chat.
 Concurrent attempts to import the same upload are rejected.
 

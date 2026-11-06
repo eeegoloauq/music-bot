@@ -1,4 +1,4 @@
-"""Owner-only choices shown on upload, at restart and through chat buttons."""
+"""Owner-only choices shown on upload and through chat buttons."""
 
 import asyncio
 import logging

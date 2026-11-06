@@ -113,7 +113,8 @@ Original imports preserve content bytes; filesystem metadata follows the library
 - **Resume journal**: `/data/pending-downloads.json` (host `./bot-data/`, gitignored — don't
   "clean up") re-issues unfinished downloads only when their provider is ready; otherwise leave
   entries and attempt counters intact. Upload choices persist separately in staging and are
-  re-offered on startup. See `docs/download-resilience.md` and `docs/local-upload-plan.md`.
+  available from the start menu without startup notifications. See `docs/download-resilience.md`
+  and `docs/local-upload-plan.md`.
 - The optional local `slskd` web UI is loopback-only without auth. Downloads stage under the
   library's `.slskd-downloads/`; library sharing and share rescans require separate opt-ins.
 - Browser uploads require `UPLOAD_HTTP_TOKEN` whenever `UPLOAD_HTTP_PORT` is enabled. The

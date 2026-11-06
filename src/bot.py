@@ -93,8 +93,7 @@ async def _post_init(app: Application) -> None:
                 await upload_flow._upload_choices.offer(owner_io, report)
 
         async def _watch_uploads() -> None:
-            # Re-offer unfinished uploads before intake starts to avoid duplicate prompts.
-            await upload_flow._upload_choices.restore(owner_io)
+            # Pending uploads stay in staging and can be reopened from the start menu.
             await uploads.watch_loop(_on_upload)
 
         common._spawn_background(_watch_uploads())
