@@ -7,7 +7,15 @@ providers. Python 3.12+, `uv`, `python-telegram-bot`, `aiohttp`, `mutagen`.
 ## Flow
 
 ```
-bot.py                  auth (ALLOWED_USERS), Telegram handlers and orchestration
+bot.py                  application wiring, startup and shutdown
+flows/handlers.py       thin Telegram command and callback adapters
+flows/downloads.py      resolution, provider readiness, downloads and resume
+flows/uploads.py        upload choices and import orchestration
+flows/retag.py          owned preview sessions, selected maintenance and confirmation
+flows/catalog.py        album browsing and scoped actions
+flows/library_actions.py statistics, guarded deletion, scans and shares
+flows/common.py         authorization, cancellable runs, status delivery and backup recovery
+flows/state.py          write serialization, duplicate requests and preview invalidation
 inline.py               library audio/links, now playing, lyrics, search and delete
 uploads.py              stage ZIPs, folders and audio from UPLOAD_DIR
 upload_web.py           optional browser intake → same uploads.py pipeline
@@ -16,7 +24,7 @@ upload_import.py        original import or metadata match → library/importing.
 metadata/               service links/tags → canonical Deezer album/track JSON
 providers.py            optional download configuration, health and lazy backend access
   → soulseek/           slskd search/enqueue/monitor; selection.py owns source policy
-library/                files.py = identity/dedup; tagger.py = FLAC/M4A/MP3 tags
+library/                files.py = formats/identity/dedup; tagger.py = shared tag writers
 retagger.py             shared library/album preview and apply; preserves artwork and lyrics
 maintenance.py          selected field plans; exact preview values and atomic file replacement
 navidrome.py            library API and scan requests after writes
@@ -51,6 +59,16 @@ GitHub Actions builds multi-arch, pushes to GHCR, cuts a Release. `pyproject` ve
 placeholder: the tag is the version.
 
 This repo is public (mirrored to GitHub): no hostnames, IPs or registry addresses in code or docs.
+
+## Filesystem permissions (mandatory)
+
+Read [docs/volume-permissions.md](docs/volume-permissions.md) before changing library,
+upload or maintenance writes.
+Create library files through ordinary creation modes, the startup umask and shared directory
+inheritance. Use content-only copies; never repair library permissions with runtime chmod/chown,
+copy source modes onto new library files or change the process umask inside tasks/threads.
+Atomic replacement must respect target write access and explicitly handle inode/ACL/link semantics.
+Original imports preserve content bytes; filesystem metadata follows the library access policy.
 
 ## Things you'll trip on
 
@@ -98,5 +116,7 @@ This repo is public (mirrored to GitHub): no hostnames, IPs or registry addresse
   re-offered on startup. See `docs/download-resilience.md` and `docs/local-upload-plan.md`.
 - The optional local `slskd` web UI is loopback-only without auth. Downloads stage under the
   library's `.slskd-downloads/`; library sharing and share rescans require separate opt-ins.
-- The upload page has no built-in auth. Keep its port private or use an authenticated proxy;
-  setting `UPLOAD_WEB_URL` advertises a link and does not change network exposure.
+- Browser uploads require `UPLOAD_HTTP_TOKEN` whenever `UPLOAD_HTTP_PORT` is enabled. The
+  static entry page is public; all other routes check Bearer auth before parsing or writes.
+  Keep the token out of URLs and browser storage. Use HTTPS for remote access; the optional
+  Compose mapping binds the host port to loopback. `UPLOAD_WEB_URL` only advertises a link.

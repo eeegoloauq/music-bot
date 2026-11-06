@@ -1,7 +1,7 @@
 FROM python:3.12-slim
 WORKDIR /app
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
-# Зависимости из uv.lock (--frozen = строго по локу + проверка хешей)
+# Install dependencies from the frozen lockfile.
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
 COPY pyproject.toml uv.lock ./
 ARG MUSICBOT_EXTRAS=""
@@ -11,7 +11,7 @@ RUN if [ "$MUSICBOT_EXTRAS" = "soulseek" ]; then \
 ENV PATH="/app/.venv/bin:$PATH"
 COPY src/ .
 # Do not run as root: /app stays root-owned and read-only to the bot, which
-# only ever writes to /data. Compose overrides the numeric UID and GID.
+# writes to /data and the configured library. Compose sets the UID and GID.
 RUN useradd --uid 1000 --user-group --no-create-home --shell /usr/sbin/nologin app \
  && install -d -o 1000 -g 1000 /data
 USER 1000:1000

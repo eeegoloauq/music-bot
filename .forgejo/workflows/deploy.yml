@@ -1,9 +1,7 @@
 name: Build & Deploy
 
-# main and dev both deploy to the same VM — dev to test on the live bot,
-# merge dev → main to promote. See docs/setup.md for health checks and rollback. Only main may
-# stamp :latest; dev builds get :dev so a test push can't hijack the tag
-# main deploys from.
+# Publish separate main and dev images. Only main updates :latest.
+# Deployment is handled externally; see docs/setup.md for health checks and rollback.
 on:
   push:
     branches: [main, dev]
@@ -16,8 +14,7 @@ jobs:
       image: ghcr.io/astral-sh/uv:python3.12-bookworm
     steps:
       # The uv image has no node, so the JS-based actions/checkout can't run —
-      # plain shell checkout of the pushed ref using the job token (same
-      # pattern as aether's go-check job).
+      # check out the pushed ref through git using the job token.
       - name: Checkout
         run: |
           git init -q .
@@ -40,7 +37,7 @@ jobs:
     needs: test
     env:
       REGISTRY: ${{ secrets.REGISTRY }}
-      IMAGE: ${{ secrets.REGISTRY }}/homelab/music-bot
+      IMAGE: ${{ secrets.REGISTRY }}/${{ github.repository }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -65,16 +62,12 @@ jobs:
           docker push "$IMAGE:${{ github.sha }}-soulseek"
           docker push "$IMAGE:$branch_tag-soulseek"
 
-      # The runner disk is 10G and every push leaves ~320MB of SHA-tagged
-      # images behind; without cleanup they pile up until docker build dies
-      # with ENOSPC (bit the lala repo 2026-07-05). Keep only the just-built
-      # image — it doubles as layer cache for the next build; older tags
-      # live in the registry anyway.
+      # Keep the current build as layer cache and remove superseded local tags.
+      # Published images remain available in the registry.
       - name: Drop superseded local images
         if: always()
         run: |
-          docker images --format '{{.Repository}}:{{.Tag}}' \
-            | { grep -E "^$REGISTRY/homelab/music-bot:" || true; } \
+          docker images --filter "reference=$IMAGE:*" --format '{{.Repository}}:{{.Tag}}' \
             | grep -v "${{ github.sha }}" \
             | xargs -r docker rmi || true
           docker image prune -f

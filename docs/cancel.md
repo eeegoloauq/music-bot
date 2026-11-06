@@ -9,7 +9,7 @@ Skip). Only the chat that requested the run can cancel it.
 
 ## Mechanism
 
-- Each run is an `ActiveRun` in `bot._active_runs`, keyed by a 12-hex id that
+- Each run is an `ActiveRun` in `flows.common._active_runs`, keyed by a 12-hex id that
   is the button's `callback_data` (`cancel:<id>`). The run is registered
   before the status message is sent and retired (`close()`) once nothing is
   left to cancel — after the files are on disk, or in the runner's `finally`.

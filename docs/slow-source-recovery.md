@@ -30,15 +30,15 @@ advertisements from search time; peer A's were simply wrong.
 **Fragile status edits.** An upload import was killed by a transient
 `telegram.error.NetworkError` raised from the *cosmetic*
 `status_msg.edit_text("Importing upload…")` inside the critical `try` in
-`bot._handle_upload` — a ~30 s network blip aborted the import before
+`flows.uploads._handle_upload` — a ~30 s network blip aborted the import before
 `import_staged_album` ever ran. Staging was orphaned, the user got a
 confusing report, and the follow-up album request searched Soulseek for all
 11 tracks including the 6 sitting staged. A messaging hiccup must never
 abort filing work.
 
-**Runner disk.** Each CI build leaves a ~320 MB SHA-tagged image on the
-runner's 10 G root disk. The lala repo already hit ENOSPC from this and
-grew a cleanup step; this repo has none.
+**Runner disk.** At the time of these incidents, each CI build left a
+SHA-tagged image on the runner. Repeated builds could exhaust available
+space without cleanup.
 
 ## A. Slow-source recovery in the album downloader
 
@@ -173,7 +173,7 @@ selection time; measurement is a runtime concern.
 
 ## B. Status-edit robustness
 
-One helper in bot.py, `safe_edit(status_msg, text, **kwargs)` (and a
+One helper in `flows/common.py`, `safe_edit(status_msg, text, **kwargs)` (and a
 matching `safe_send` for initial status messages): retry transient
 `telegram.error.NetworkError` / `TimedOut` with short backoff (3 attempts,
 ~2/5/10 s — sized to outlive a blip like the incident's), honor
@@ -200,13 +200,10 @@ asserting `import_staged_album` runs and files despite a raising edit.
 
 ## C. CI hygiene
 
-Add a "Drop superseded local images" step to the `build` job of
-`.forgejo/workflows/deploy.yml`, same pattern as
-/opt/lala/.forgejo/workflows/deploy.yml: `if: always()`, list local
-`homelab/music-bot:*` tags, `grep -v` the just-built SHA, `docker rmi` the
-rest, then `docker image prune -f`. The just-built image stays as layer
-cache; older tags live in the registry. Without it the 10 G runner disk
-gains ~320 MB per push until builds die with ENOSPC (lala, 2026-07-05).
+The `build` job in `.forgejo/workflows/deploy.yml` now removes superseded
+local image tags in an `if: always()` step. It filters by the configured
+image repository, retains the current build as layer cache, and prunes
+unused build layers. Published tags remain in the registry.
 
 ## Characterization tests (before any behavior change)
 

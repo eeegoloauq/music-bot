@@ -4,7 +4,7 @@ What happens to in-flight downloads when the bot restarts — deploys recreate
 the container, but crashes, OOM kills, and host reboots hit the same path.
 This note describes the failure, weighs a deploy gate against a persistent
 journal, and documents the journal as implemented (`src/journal.py`, the
-runner bracket and `_resume_pending` in `bot.py`, attach-first enqueue in
+runner bracket and `_resume_pending` in `flows/downloads.py`, attach-first enqueue in
 `soulseek/downloader.py`).
 
 ## What breaks today
@@ -104,7 +104,7 @@ On startup, after `post_init`:
 
 - `src/journal.py`: load/add/remove/bump with atomic rewrites; strictly
   fail-open — persistence is best-effort, the download is the job.
-- `bot.py`: the download flows run behind a small `ChatIO` seam (send text
+- `flows/downloads.py`: the download flows use `flows/common.py::ChatIO` (send text
   / photo into a chat) instead of the PTB `Update`, so a journal entry
   drives the same code path as a pasted link. The runners share one
   bracket: accept → `journal.add` → download → report → `journal.remove`.
