@@ -48,7 +48,7 @@ Most logic changes can be developed against the offline test suite alone.
 
 - Keep changes small and focused — one topic per PR.
 - Behavior changes need a test. The suite is offline by design, so stub any
-  new network interaction the way the existing tests do (`tests/`).
+  new network interaction the way the existing tests do ([`tests/`](tests)).
 - `uv run --no-sync pytest` must pass after the frozen development sync above.
 - For anything bigger than a fix, link the issue where we discussed it.
 
