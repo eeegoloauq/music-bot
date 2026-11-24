@@ -124,7 +124,7 @@ def test_matched_flac_import_with_ambiguous_header(tmp_path, monkeypatch, fail_s
     source = tmp_path / "upload.flac"
     dest = tmp_path / "library.flac"
     # A FLAC application block may contain MP4's detection marker.
-    stream_info = struct.pack(">HH6xQ16x", 4096, 4096, (44100 << 44) | (15 << 36))
+    stream_info = struct.pack(">HH6xQ16x", 4096, 4096, (44100 << 44) | (15 << 36) | 1)
     original = b"fLaC\x00\x00\x00\x22" + stream_info + b"\x82\x00\x00\x04mp4x"
     source.write_bytes(original)
     track = {"title": "Matched song", "artist": "Artist", "trackNumber": 1}
@@ -150,6 +150,56 @@ def test_matched_flac_import_with_ambiguous_header(tmp_path, monkeypatch, fail_s
         assert not source.exists()
 
     assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_matched_flac_fills_sample_count_without_reencoding(tmp_path):
+    if not shutil.which("flac"):
+        pytest.skip("needs the reference FLAC tools")
+    source = tmp_path / "source.flac"
+    dest = tmp_path / "matched.flac"
+    samples = 5003  # Two blocks with the encoder's default block size.
+    subprocess.run(
+        ["flac", "--silent", "--force-raw-format", "--channels=2", "--bps=16",
+         "--sample-rate=44100", "--endian=little", "--sign=signed", "--no-padding",
+         "--output-name", str(source), "-"], input=b"\0" * (samples * 4), check=True,
+    )
+    audio = FLAC(source)
+    assert audio.info.total_samples == samples
+    audio.info.total_samples = 0
+    audio.save()
+    before = source.read_bytes()
+    track = {"title": "Matched song", "artist": "Artist", "trackNumber": 1}
+    album = {"title": "Album", "artist": "Artist", "id": "42", "numberOfTracks": 1}
+
+    def frames(data):
+        offset = 4  # fLaC marker
+        while True:
+            last = data[offset] & 0x80
+            offset += 4 + int.from_bytes(data[offset + 1:offset + 4], "big")
+            if last:
+                return data[offset:]
+
+    # Keep the complete metadata, but remove every audio frame.
+    broken = tmp_path / "broken.flac"
+    broken.write_bytes(before[:-len(frames(before))])
+    progress = {"saved": 0}
+    with pytest.raises(ValueError):
+        upload_import._file_track(
+            str(broken), str(dest), track, album, None, None, "flac", progress,
+        )
+    assert broken.exists()
+    assert not dest.exists()
+    assert progress["saved"] == 0
+
+    upload_import._file_track(str(source), str(dest), track, album, None, None, "flac", progress)
+    tagged = FLAC(dest)
+    assert tagged.info.total_samples == samples
+    assert tagged["title"] == ["Matched song"]
+    # Metadata can grow, but the original FLAC audio frames remain byte-identical.
+    assert frames(dest.read_bytes()) == frames(before)
+    assert progress["saved"] == 1
+    assert not source.exists()
+    subprocess.run(["flac", "--test", "--silent", str(dest)], check=True)
 
 
 def test_recover_pending_import_and_reject_symlinks(tmp_path):

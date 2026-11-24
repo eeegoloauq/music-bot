@@ -322,6 +322,7 @@ async def test_import_moves_matches_and_reports_missing(tmp_path, quiet_pipeline
         in_staging = str(tmp_path / "staging") in root
         return str(src) if track["id"] == "t1" and in_staging else None
 
+    monkeypatch.setattr(upload_import, "restore_sample_count", lambda _path: 0)
     monkeypatch.setattr(upload_import, "_find_existing_track", staged_match)
 
     result = await import_staged_album(ALBUM, str(tmp_path / "staging"), str(music))

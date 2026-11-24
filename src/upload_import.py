@@ -49,6 +49,7 @@ from library.importing import (
     run_to_completion,
 )
 from library.writing import copy_into_library
+from library.flac_info import restore_sample_count
 from uploads import ART_EXTS, SIDECAR_EXTS, IntakeReport, _inventory_tree
 
 logger = logging.getLogger(__name__)
@@ -339,6 +340,8 @@ def _file_track(src: str, dest: str, track: dict, album: dict,
     is bumped here, by the thread, so it stays right even when the awaiting
     coroutine was cancelled meanwhile."""
     def prepare(temporary):
+        if ext == "flac":
+            restore_sample_count(temporary)
         if ext in ("flac", "m4a", "mp3"):
             write_import_tags(temporary, track, album, cover_data, lyrics, ext)
 

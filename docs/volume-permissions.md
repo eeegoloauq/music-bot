@@ -27,8 +27,10 @@ Local original and matched imports always create a new destination inode through
 `copyfileobj()` copies content only. A source arriving `0644`, `0600` or with
 execute bits does not impose those modes on the new library file. The importing
 user must still be able to read the source and remove it from staging.
-Matched imports apply release tags to the new temporary copy before publication;
-they do not require write access to the supplied source inode.
+Matched imports apply release tags to the new temporary copy before publication.
+When a FLAC has no total sample count, the bot counts its audio samples and fills
+in STREAMINFO in the temporary copy. The compressed audio frames are preserved.
+The import needs write access to the temporary copy and read access to the source inode.
 
 **Keep original files** preserves every content byte, including tags, embedded
 artwork and lyrics. It also retains filenames and supported sidecar contents.

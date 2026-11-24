@@ -99,7 +99,8 @@ import and setup instructions. It does not queue a future download.
 
 ## Without Docker
 
-From a checkout, with Python 3.12+ and uv:
+From a checkout, with Python 3.12+ and uv. Install the `flac` command to repair missing
+FLAC sample counts during matched imports. The Docker image includes it.
 
 ```sh
 uv sync --frozen

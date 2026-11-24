@@ -25,6 +25,9 @@ jobs:
           git fetch -q --depth 1 origin "+${{ github.ref }}:refs/ci"
           git checkout -q refs/ci
 
+      - name: Install FLAC tools
+        run: apt-get update && apt-get install -y --no-install-recommends flac
+
       - name: Run tests
         run: |
           uv sync --frozen --extra soulseek
