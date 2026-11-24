@@ -41,7 +41,7 @@ def release(request, tmp_path, monkeypatch, shared_umask):
     (folder / "booklet.txt").write_text("Keep this sidecar")
     if request.param == "flac":
         audio = FLAC(path)
-        audio.update(title="Old Song", artist="Artist", album="Album", tracknumber="1",
+        audio.update(comment_probe="mp4", title="Old Song", artist="Artist", album="Album", tracknumber="1",
                      isrc="TEST001", comment="https://www.deezer.com/album/1", genre="Personal",
                      composer="Composer", custom="Keep me", lyrics="Original plain", syncedlyrics=OLD_LRC)
         picture = Picture()
@@ -213,7 +213,7 @@ async def test_stale_preview_cannot_overwrite_changed_file(release):
 async def test_failed_write_preserves_original_and_removes_temporary_file(release, monkeypatch):
     plans, _ = await preview(release, {"titles"})
     before = release.path.read_bytes()
-    def fail(path, values):
+    def fail(path, values, *, audio_format):
         Path(path).write_bytes(b"interrupted tag write")
         raise OSError("disk write failed")
     monkeypatch.setattr(maintenance, "write_selected_tags", fail)
@@ -266,8 +266,8 @@ async def test_lastfm_only_genres_still_work_without_matching_track(release, mon
 async def test_external_edit_during_write_is_not_overwritten(release, monkeypatch):
     plans, _ = await preview(release, {"titles"})
     writer = maintenance.write_selected_tags
-    def race(path, values):
-        writer(path, values)
+    def race(path, values, *, audio_format):
+        writer(path, values, audio_format=audio_format)
         with release.path.open("ab") as stream:
             stream.write(b"external edit during apply")
     monkeypatch.setattr(maintenance, "write_selected_tags", race)

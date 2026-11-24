@@ -4,8 +4,6 @@ import re
 from copy import deepcopy
 from typing import Literal
 
-from mutagen import File as MutagenFile
-
 from mutagen.flac import FLAC, Picture
 from mutagen.mp4 import MP4, MP4Cover, MP4FreeForm
 from mutagen.id3 import ID3, ID3NoHeaderError
@@ -20,14 +18,21 @@ from metadata import fetch_lyrics
 
 logger = logging.getLogger(__name__)
 
+_AUDIO_READERS = {"flac": FLAC, "m4a": MP4, "mp3": MP3}
+
+
+def _audio_reader(audio_format: str):
+    reader = _AUDIO_READERS.get(audio_format.lower().lstrip("."))
+    if reader is None:
+        raise ValueError(f"Unsupported audio format: {audio_format}")
+    return reader
+
 
 def inspect_selected_tags(filepath: str) -> dict:
     """Read the values used by field maintenance; invalid files fail closed."""
-    audio = MutagenFile(filepath)
-    if audio is None:
-        raise ValueError("Unsupported audio file")
-    tags = audio.tags or {}
     ext = os.path.splitext(filepath)[1].lower()
+    audio = _audio_reader(ext)(filepath)
+    tags = audio.tags or {}
     synced, plain, artwork = "", "", []
     has_synced = False
     if ext == ".flac":
@@ -58,21 +63,16 @@ def inspect_selected_tags(filepath: str) -> dict:
             plain = next((f.text for f in tags.getall("USLT") if f.text), "")
             has_synced = bool(tags.getall("SYLT"))
             artwork = [p.data for p in tags.getall("APIC")]
-    else:
-        raise ValueError("Unsupported maintenance format")
     has_synced = has_synced or bool(re.search(r"\[\d{1,3}:\d{2}(?:[.:]\d+)?\]", plain))
     return {"title": title, "genres": genres, "synced": synced, "plain": plain,
             "has_synced": bool(synced) or has_synced, "artwork": artwork}
 
 
-def write_selected_tags(filepath: str, updates: dict) -> None:
-    """Write only previewed fields. The caller stages and atomically replaces the file."""
-    audio = MutagenFile(filepath)
-    if audio is None:
-        raise ValueError("Unsupported audio file")
+def write_selected_tags(filepath: str, updates: dict, *, audio_format: str) -> None:
+    """Write previewed fields to a staged copy using the original format."""
+    audio = _audio_reader(audio_format)(filepath)
     if audio.tags is None:
         audio.add_tags()
-    # Staged writes use a non-audio suffix so scanners ignore unfinished files.
     if isinstance(audio, FLAC):
         for key in ("title", "genres"):
             if key in updates:
@@ -136,8 +136,6 @@ def write_selected_tags(filepath: str, updates: dict) -> None:
             tags.add(TXXX(encoding=3, desc="SYNCEDLYRICS", text=lyrics["syncedLyrics"]))
             if lyrics.get("plainLyrics") and not tags.getall("USLT"):
                 tags.add(USLT(encoding=3, lang="eng", desc="", text=lyrics["plainLyrics"]))
-    else:
-        raise ValueError("Unsupported maintenance format")
     audio.save()
 
 
@@ -224,13 +222,15 @@ def write_tags(filepath: str, track: dict, album: dict,
                stream_meta: dict | None = None, cover_data: bytes | None = None,
                lyrics: dict | None = None, *,
                mode: Literal["fill", "replace", "retag"] = "fill",
-               audio_format: str | None = None) -> bool:
+               audio_format: str | None = None,
+               raise_on_error: bool = False) -> bool:
     """Write supported audio tags through one format dispatch.
 
     ``fill`` adds missing values. ``replace`` wipes tags except curated credits.
     ``retag`` updates managed values, merges genres, and preserves artwork,
     lyrics, peer notes and unmanaged tags. Retag writes only when tags change;
-    its errors propagate so callers can report failed files.
+    its errors propagate so callers can report failed files. Callers preparing
+    a staged copy can request the same error handling in other modes.
     """
     if mode not in {"fill", "replace", "retag"}:
         raise ValueError(f"Unknown tag writing mode: {mode}")
@@ -245,13 +245,14 @@ def write_tags(filepath: str, track: dict, album: dict,
     if mode == "retag":
         cover_data = lyrics = None
     return writer(filepath, track, album, stream_meta, cover_data, lyrics,
-                  force=mode == "replace", surgical=mode == "retag")
+                  force=mode == "replace", surgical=mode == "retag",
+                  raise_on_error=raise_on_error)
 
 
 def _write_tags(filepath: str, track: dict, album: dict,
                 stream_meta: dict | None, cover_data: bytes | None,
                 lyrics: dict | None = None, force: bool = False,
-                surgical: bool = False) -> bool:
+                surgical: bool = False, *, raise_on_error: bool = False) -> bool:
     """Write Vorbis Comment tags to a FLAC file.
 
     force=False: only fills in missing tags (preserves anything already there).
@@ -390,7 +391,7 @@ def _write_tags(filepath: str, track: dict, album: dict,
             audio.save()
         return changed
     except Exception:
-        if surgical:
+        if surgical or raise_on_error:
             raise
         logger.warning("Could not write tags to %s", filepath, exc_info=True)
         return False
@@ -399,7 +400,7 @@ def _write_tags(filepath: str, track: dict, album: dict,
 def _write_m4a_tags(filepath: str, track: dict, album: dict,
                     stream_meta: dict | None, cover_data: bytes | None,
                     lyrics: dict | None = None, force: bool = False,
-                    surgical: bool = False) -> bool:
+                    surgical: bool = False, *, raise_on_error: bool = False) -> bool:
     """Write iTunes-style tags to an M4A file.
 
     force=False: only fills in missing tags.
@@ -521,7 +522,7 @@ def _write_m4a_tags(filepath: str, track: dict, album: dict,
             audio.save()
         return changed
     except Exception:
-        if surgical:
+        if surgical or raise_on_error:
             raise
         logger.warning("Could not write M4A tags to %s", filepath, exc_info=True)
         return False
@@ -530,7 +531,7 @@ def _write_m4a_tags(filepath: str, track: dict, album: dict,
 def _write_mp3_tags(filepath: str, track: dict, album: dict,
                     stream_meta: dict | None, cover_data: bytes | None,
                     lyrics: dict | None = None, force: bool = False,
-                    surgical: bool = False) -> bool:
+                    surgical: bool = False, *, raise_on_error: bool = False) -> bool:
     """Write ID3v2.4 tags to an mp3 file.
 
     Used by the mp3 lossy-fallback path. Same force-mode contract as the FLAC /
@@ -656,7 +657,7 @@ def _write_mp3_tags(filepath: str, track: dict, album: dict,
             mp3.save(v2_version=4)
         return changed
     except Exception:
-        if surgical:
+        if surgical or raise_on_error:
             raise
         logger.warning("Could not write MP3 tags to %s", filepath, exc_info=True)
         return False
@@ -932,7 +933,9 @@ def write_import_tags(filepath: str, track: dict, album: dict,
                 or key.startswith(("apic", "uslt", "sylt"))
                 or "syncedlyrics" in key)
 
-    original = MutagenFile(filepath)
+    # The caller supplies the staged source format because the copy ends in .tmp.
+    reader = _audio_reader(ext)
+    original = reader(filepath)
     saved = {key: deepcopy(value) for key, value in (original.tags or {}).items()
              if is_media(key)}
     pictures = deepcopy(getattr(original, "pictures", []))
@@ -943,10 +946,10 @@ def write_import_tags(filepath: str, track: dict, album: dict,
     write_tags(filepath, track, album,
                cover_data=None if has_art else cover_data,
                lyrics=None if has_lyrics else lyrics,
-               mode="replace", audio_format=ext)
+               mode="replace", audio_format=ext, raise_on_error=True)
     if not saved and not pictures:
         return
-    updated = MutagenFile(filepath)
+    updated = reader(filepath)
     if updated.tags is None:
         updated.add_tags()
     for key, value in saved.items():

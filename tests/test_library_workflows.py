@@ -3,6 +3,7 @@
 import asyncio
 import os
 import shutil
+import struct
 import subprocess
 import time
 from pathlib import Path
@@ -27,7 +28,6 @@ import retagger
 import upload_choices
 import upload_import
 import uploads
-from library.importing import write_import_tags
 from library import importing
 
 
@@ -95,7 +95,13 @@ def test_release_tagging_keeps_embedded_artwork_and_lyrics(tmp_path, ext):
     tags.save()
     track = {"title": "New title", "artist": "Artist", "trackNumber": 1}
     album = {"title": "Album", "artist": "Artist", "id": "42", "numberOfTracks": 1}
-    write_import_tags(str(path), track, album, b"replacement", {"plainLyrics": "New lyrics"}, ext)
+    dest = tmp_path / f"imported.{ext}"
+    progress = {"saved": 0}
+    upload_import._file_track(str(path), str(dest), track, album, b"replacement",
+                              {"plainLyrics": "New lyrics"}, ext, progress)
+    assert progress["saved"] == 1
+    assert not path.exists()
+    path = dest
     if ext == "flac":
         tagged = FLAC(path)
         assert tagged["title"] == ["New title"]
@@ -111,6 +117,39 @@ def test_release_tagging_keeps_embedded_artwork_and_lyrics(tmp_path, ext):
         assert tagged["©nam"] == ["New title"]
         assert tagged["©lyr"] == ["Original lyrics"]
         assert list(tagged["covr"]) == [b"original"]
+
+
+@pytest.mark.parametrize("fail_save", [False, True])
+def test_matched_flac_import_with_ambiguous_header(tmp_path, monkeypatch, fail_save):
+    source = tmp_path / "upload.flac"
+    dest = tmp_path / "library.flac"
+    # A FLAC application block may contain MP4's detection marker.
+    stream_info = struct.pack(">HH6xQ16x", 4096, 4096, (44100 << 44) | (15 << 36))
+    original = b"fLaC\x00\x00\x00\x22" + stream_info + b"\x82\x00\x00\x04mp4x"
+    source.write_bytes(original)
+    track = {"title": "Matched song", "artist": "Artist", "trackNumber": 1}
+    album = {"title": "Album", "artist": "Artist", "id": "42", "numberOfTracks": 1}
+    progress = {"saved": 0}
+
+    def import_track():
+        upload_import._file_track(str(source), str(dest), track, album, None, None, "flac", progress)
+
+    if fail_save:
+        def disk_full(*args, **kwargs):
+            raise OSError("disk full")
+        monkeypatch.setattr(FLAC, "save", disk_full)
+        with pytest.raises(OSError, match="disk full"):
+            import_track()
+        assert progress["saved"] == 0
+        assert source.read_bytes() == original
+        assert not dest.exists()
+    else:
+        import_track()
+        assert progress["saved"] == 1
+        assert FLAC(dest)["title"] == ["Matched song"]
+        assert not source.exists()
+
+    assert not list(tmp_path.glob("*.tmp"))
 
 
 def test_recover_pending_import_and_reject_symlinks(tmp_path):

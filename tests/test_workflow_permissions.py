@@ -305,7 +305,7 @@ writing.shutil.copyfileobj = real_copy
 # Maintenance tag preparation failure retains the original inode and content.
 update = maintenance.FileUpdate(str(dest), maintenance.fingerprint(str(dest)), {"title": "new"})
 before = dest.stat().st_ino
-def fail_tags(path, values):
+def fail_tags(path, values, *, audio_format):
     Path(path).write_bytes(b"partial tag write")
     raise OSError("simulated tag failure")
 maintenance.write_selected_tags = fail_tags
@@ -334,7 +334,7 @@ assert dest.read_bytes() == b"other writer" and dest.stat().st_ino == before
 
 # Cancellation waits for the worker, preserving completion and cleanup semantics.
 started, finish = threading.Event(), threading.Event()
-def slow_tags(path, values):
+def slow_tags(path, values, *, audio_format):
     started.set()
     assert finish.wait(5)
     Path(path).write_bytes(b"complete update")

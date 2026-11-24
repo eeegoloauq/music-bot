@@ -249,7 +249,8 @@ def _write_atomic(update: FileUpdate, folder: str):
             with open(update.path, "rb") as source:
                 shutil.copyfileobj(source, stream)
             stream.close()
-            write_selected_tags(temporary, update.values)
+            write_selected_tags(temporary, update.values,
+                                audio_format=os.path.splitext(update.path)[1])
         if not _target_unchanged(update, folder):
             raise ValueError("File changed while applying update")
         _check_replaceable(update)
